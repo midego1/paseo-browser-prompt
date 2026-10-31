@@ -182,11 +182,18 @@ interface FieldSpec {
   label: string;
   block?: boolean;
   max?: number;
-  /** Masked when the tool types it into a page. */
-  maskFor?: RegExp;
+  /** Masked when it is text the tool types into a page. */
+  mask?: (tool: string, value: string) => boolean;
 }
 
 const TYPED_TEXT_TOOL = /(^|__)browser_(fill|type)$/;
+const KEYPRESS_TOOL = /(^|__)browser_keypress$/;
+/** One key, optionally with modifiers: a single character or a named key such as Enter, ArrowDown, F5, KeyA. */
+const KEY_NAME =
+  /^(?:(?:Control|Shift|Alt|Meta|ControlOrMeta)\+)*(?:[^\s]|Enter|Tab|Escape|Backspace|Delete|Insert|Home|End|PageUp|PageDown|Arrow(?:Up|Down|Left|Right)|F(?:[1-9]|1[0-9]|2[0-4])|Space|Control|Shift|Alt|Meta|ControlOrMeta|CapsLock|NumLock|ScrollLock|ContextMenu|Pause|PrintScreen|Key[A-Z]|Digit[0-9]|Numpad(?:[0-9]|Add|Subtract|Multiply|Divide|Decimal|Enter)|Minus|Equal|Comma|Period|Slash|Backslash|Semicolon|Quote|Backquote|BracketLeft|BracketRight)$/u;
+const typedText = (tool: string) => TYPED_TEXT_TOOL.test(tool);
+/** browser_keypress with more than a single key name (typed characters) is masked like typed text. */
+const typedKeys = (tool: string, value: string) => KEYPRESS_TOOL.test(tool) && !KEY_NAME.test(value);
 
 /** Every input field the card can show, in display order. */
 const SUMMARY_FIELDS: FieldSpec[] = [
@@ -196,9 +203,9 @@ const SUMMARY_FIELDS: FieldSpec[] = [
   { field: "sourceRef", label: "From element", max: 200 },
   { field: "targetRef", label: "To element", max: 200 },
   { field: "selector", label: "Element", max: 200 },
-  { field: "value", label: "Value", maskFor: TYPED_TEXT_TOOL },
-  { field: "text", label: "Text", maskFor: TYPED_TEXT_TOOL },
-  { field: "key", label: "Key", max: 100 },
+  { field: "value", label: "Value", mask: typedText },
+  { field: "text", label: "Text", mask: typedText },
+  { field: "key", label: "Key", max: 100, mask: typedKeys },
   { field: "button", label: "Button", max: 50 },
   { field: "doubleClick", label: "Double click", max: 10 },
   { field: "modifiers", label: "Modifiers", max: 100 },
@@ -272,7 +279,7 @@ export function permissionDetails(request: RequestLike): PermissionDetails {
     });
     if (cleaned.truncated || cleaned.altered) complete = false;
     if (lines.some((line) => line.label === spec.label && line.value === cleaned.text)) continue;
-    const masked = !!spec.maskFor && spec.maskFor.test(name);
+    const masked = !!spec.mask && spec.mask(name, cleaned.text);
     lines.push({ label: spec.label, value: cleaned.text, block: !!spec.block, ...(masked ? { masked: true } : {}) });
   }
   const dx = input.deltaX;

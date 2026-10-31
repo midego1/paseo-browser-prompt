@@ -5,6 +5,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { runLabels } from "../shared/report-back.ts";
+import { createRunTracker } from "../shared/run-tracker.ts";
 import {
   cleanPromptText,
   cleanPromptTextInfo,
@@ -216,6 +217,19 @@ test("typed values are masked by default; other values are not", () => {
   assert.match(ui, /`•••• \(\$\{length\} char/, "shown as •••• (N chars) until revealed");
 });
 
+test("browser_keypress: a key name or chord is shown; typed characters are masked", () => {
+  const keyLine = (key) => ownerPrompts([claude("mcp__paseo__browser_keypress", { key, browserId: "b1" })])[0].summary.find((line) => line.label === "Key");
+  for (const key of ["Enter", "a", "ArrowDown", "Control+A", "Shift+Tab", "F5", "KeyA", "ControlOrMeta+Shift+K"]) {
+    assert.equal(keyLine(key).masked, undefined, key);
+  }
+  for (const key of ["hunter2", "Password1", "ab", "Control+hello", "Enter Enter"]) {
+    assert.equal(keyLine(key).masked, true, key);
+  }
+  const [press] = ownerPrompts([claude("browser_keypress", { key: "s3cret", ref: "e2" })]);
+  assert.equal(press.summary.find((line) => line.label === "Key").masked, true, "without the MCP prefix too");
+  assert.equal(press.canAllow, true, "masking does not withhold Allow");
+});
+
 test("Allow on a permission needs a second tap; Deny does not", () => {
   const ui = readFileSync(new URL("../client/owner-prompt.tsx", import.meta.url), "utf8");
   assert.match(ui, /action\.behavior === "allow" \? setConfirming\(action\) : onAnswer\(permissionResponse\(action\)\)/);
@@ -361,4 +375,29 @@ test("owner questions are answered only from the card: nothing else calls respon
   walk(root);
   const callers = files.filter((file) => /respondToPermission\s*\(/.test(readFileSync(file, "utf8"))).map((file) => file.slice(root.length));
   assert.deepEqual(callers, ["client/owner-prompt.tsx"], "the server and the chat paths never answer for the owner");
+});
+
+test("a running run waits for its owner when the stream shows an unresolved permission request", () => {
+  // Paseo 0.14 keeps a live agent's attentionReason for finished and error, so the stream is the signal.
+  const run = createRunTracker(4, true, false);
+  assert.deepEqual([run.view().permissionPending, run.view().permissionEvents], [false, 0]);
+  run.event({ type: "permission_requested", provider: "claude", request: { id: "permission-1", kind: "question" } });
+  assert.deepEqual([run.view().permissionPending, run.view().permissionEvents], [true, 1]);
+  run.event({ type: "permission_requested", request: { id: "permission-2", kind: "tool" } });
+  run.event({ type: "permission_resolved", requestId: "permission-1", resolution: { behavior: "allow" } });
+  assert.equal(run.view().permissionPending, true, "one is still open");
+  run.event({ type: "permission_resolved", requestId: "permission-2", resolution: { behavior: "deny" } });
+  assert.deepEqual([run.view().permissionPending, run.view().permissionEvents], [false, 4]);
+  run.event({ type: "permission_requested", request: { id: "permission-3" } });
+  run.event({ type: "turn_canceled" });
+  assert.equal(run.view().permissionPending, false, "a finished turn has nothing left to answer");
+  assert.equal(run.view().permissionEvents, 6);
+});
+
+test("the card's needs-you state comes from the stream and the snapshot, not only attentionReason", () => {
+  const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
+  assert.match(card, /const runState = active && \(permissionPending \|\| owner\.pending > 0\) \? "needs-input" : observedState;/);
+  assert.match(card, /useOwnerPrompts\(runAgentId, active, ownerVersion, ownerCard, permissionPending\)/);
+  const hook = readFileSync(new URL("../client/owner-prompt.tsx", import.meta.url), "utf8");
+  assert.match(hook, /setPending\(requests\.length\)/, "the snapshot's pending count is kept");
 });

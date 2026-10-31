@@ -6,7 +6,7 @@ import { latestStep, type StepProgress } from "./steps.ts";
 import { MAX_REDIRECTS, parseQuestion, REDIRECT_PREFIX } from "./talk.ts";
 
 type Item = { type: string; text?: unknown; messageId?: unknown; name?: unknown };
-type StreamEvent = { type: string; item?: Item };
+type StreamEvent = { type: string; item?: Item; request?: { id?: unknown } | null; requestId?: unknown };
 
 /** Assistant text kept from the live stream to find the latest marker. */
 const STREAM_BUFFER = 4000;
@@ -25,6 +25,14 @@ export interface RunView {
   screenshotStep: number | null;
   /** A screenshot failed because the run's browser tab was not visible in the Paseo app. */
   screenshotsBlocked: boolean;
+  /**
+   * The live stream showed a permission request (a question or a tool permission) that is not
+   * resolved yet. Paseo keeps a live agent's `attentionReason` for finished and error, so this is
+   * how the card learns that a running run waits for its owner.
+   */
+  permissionPending: boolean;
+  /** Counts permission requests and resolutions seen in the stream: a new value means "read again". */
+  permissionEvents: number;
 }
 
 function isRedirect(item: Item): boolean {
@@ -49,6 +57,8 @@ export function createRunTracker(total: number, showSteps: boolean, showScreensh
   let screenshots = createScreenshotTracker(total);
   /** Kept when a later tail read no longer contains the failed call. */
   let blockedSeen = false;
+  const pendingPermissions = new Set<string>();
+  let permissionEvents = 0;
 
   /** Appends a chunk; a new message (new message id, or a marker at its start) starts a new line. */
   function append(text: string, chunk: string, newMessage: boolean): string {
@@ -66,6 +76,8 @@ export function createRunTracker(total: number, showSteps: boolean, showScreensh
         screenshots: showScreenshots ? screenshots.steps() : [],
         screenshotStep: showScreenshots ? screenshots.latestStep() : null,
         screenshotsBlocked: showScreenshots && (screenshots.blocked() || blockedSeen),
+        permissionPending: pendingPermissions.size > 0,
+        permissionEvents,
       };
     },
 
@@ -95,6 +107,25 @@ export function createRunTracker(total: number, showSteps: boolean, showScreensh
 
     /** One live stream event. */
     event(event: StreamEvent): void {
+      if (event.type === "permission_requested") {
+        const id = typeof event.request?.id === "string" ? event.request.id : `unnamed-${permissionEvents}`;
+        pendingPermissions.add(id);
+        permissionEvents++;
+        return;
+      }
+      if (event.type === "permission_resolved") {
+        if (typeof event.requestId === "string") pendingPermissions.delete(event.requestId);
+        else pendingPermissions.clear();
+        permissionEvents++;
+        return;
+      }
+      if (event.type === "turn_completed" || event.type === "turn_failed" || event.type === "turn_canceled") {
+        // A finished turn has nothing left to answer.
+        if (pendingPermissions.size) {
+          pendingPermissions.clear();
+          permissionEvents++;
+        }
+      }
       if (event.type === "turn_started") {
         turnItems = [];
         asking = false;
