@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.2 (unreleased)
+
+- Mode guard: only agents a card recorded in the host `runs` setting are checked and stopped, the
+  same check report back uses. An agent that only carries the plugin's labels is never archived.
+- The settings screen never stores a refused permission mode (Save stays disabled, and the save
+  handler checks again).
+- Documentation fixes for the 0.3.1 default.
+
 ## 0.3.1 (unreleased)
 
 - Claude **Auto mode** is now the default for Run with Paseo agent. Always Ask (`default`) and Plan
@@ -14,8 +22,8 @@
 ## 0.3.0 (unreleased)
 
 - Run with Paseo agent can use Claude **Auto mode** (`auto`, a model classifier reviews permission
-  prompts) as an explicit opt-in. The default stays Always Ask; bypass and accept-edits modes are
-  still refused. Settings show a warning for Auto mode, the confirmation names it, and the safety
+  prompts) as an explicit opt-in. The default stayed Always Ask (superseded in 0.3.1, where Auto
+  mode became the default); bypass and accept-edits modes are still refused. Settings show a warning for Auto mode, the confirmation names it, and the safety
   preamble gets an extra rule: an approved tool call is not the owner's approval, so the agent must
   ask with AskUserQuestion before secrets, destructive actions, merges, payments and security changes.
 - Mode guard: the card checks the mode a new run actually uses, and the server re-checks on every

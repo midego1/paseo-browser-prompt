@@ -1,5 +1,6 @@
 // Run: npm test  (Node 22+, uses --experimental-strip-types to load the shared TypeScript module)
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   AGENT_SAFETY_PREAMBLE,
@@ -265,10 +266,20 @@ test("mode guard: when stopping fails too, the card is told to stop it by hand",
   assert.match(result.message, /could not be stopped\. Stop it in Paseo now\./);
 });
 
-test("server mode guard checks browser runs on turn start and permission requests", async () => {
+/** Host settings whose `runs` record lists the given `[source:card, runId]` entries. */
+const recordedRuns = (entries) => ({
+  read: async () => ({ status: "ready", revision: "1", values: { runs: entries, reportBack: "auto" } }),
+});
+const captureHooks = () => {
   const handlers = new Map();
+  return { handlers, server: { on: (name, handler) => (handlers.set(name, handler), () => handlers.delete(name)) } };
+};
+
+test("server mode guard checks recorded browser runs on turn start and permission requests", async () => {
+  const { handlers, server } = captureHooks();
   const logs = [];
-  const guard = registerModeGuard({ on: (name, handler) => (handlers.set(name, handler), () => handlers.delete(name)) }, (m) => logs.push(m));
+  const settings = recordedRuns([1, 2, 3, 4, 5].map((n) => [`src:c${n}`, ["auto", "ask", "plan", "bypass", "edits"][n - 1]]));
+  const guard = registerModeGuard(server, settings, { log: (m) => logs.push(m), recordWaitMs: 0 });
   assert.ok(handlers.has("agent.turn_started") && handlers.has("agent.permission_requested"));
 
   const runs = {
@@ -296,4 +307,58 @@ test("server mode guard checks browser runs on turn start and permission request
   assert.equal(runs.bypass.calls.archive, 1, "stopped once");
   guard.dispose();
   assert.equal(handlers.size, 0);
+});
+
+test("server mode guard never archives an agent the card did not record, labels or not", async () => {
+  const { handlers, server } = captureHooks();
+  const logs = [];
+  // The record lists another run for this card, and nothing for the second card.
+  const settings = recordedRuns([["src:c1", "real-run"]]);
+  registerModeGuard(server, settings, { log: (m) => logs.push(m), recordWaitMs: 20, recordPollMs: 5 });
+  const runs = {
+    spoof: fakeRun({ modes: ["bypassPermissions"], labels: runLabels("src", "c1") }),
+    stray: fakeRun({ modes: ["bypassPermissions"], labels: runLabels("src", "c9") }),
+  };
+  const paseo = { agents: { ref: (id) => runs[id].handle } };
+  for (const id of Object.keys(runs)) {
+    await handlers.get("agent.turn_started")({ agent: { id, provider: "claude" }, turnId: "t" }, { paseo, signal: new AbortController().signal });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(runs.spoof.calls.archive, 0);
+  assert.equal(runs.stray.calls.archive, 0);
+  assert.deepEqual(logs.sort(), [
+    "agent spoof has browser run labels but no card record; mode not checked",
+    "agent stray has browser run labels but no card record; mode not checked",
+  ]);
+
+  // Unreadable settings are treated as no record: nothing is archived.
+  const broken = captureHooks();
+  registerModeGuard(broken.server, { read: async () => ({ status: "invalid", revision: "1", error: "bad" }) }, { log: () => {}, recordWaitMs: 0 });
+  const run = fakeRun({ modes: ["bypassPermissions"], labels: runLabels("src", "c1") });
+  await broken.handlers.get("agent.turn_started")({ agent: { id: "r", provider: "claude" }, turnId: "t" }, { paseo: { agents: { ref: () => run.handle } }, signal: new AbortController().signal });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(run.calls.archive, 0);
+});
+
+test("server mode guard waits briefly for the card to record a new run", async () => {
+  const { handlers, server } = captureHooks();
+  const entries = [];
+  registerModeGuard(server, recordedRuns(entries), { log: () => {}, recordWaitMs: 500, recordPollMs: 5 });
+  const run = fakeRun({ modes: ["bypassPermissions"], labels: runLabels("src", "c1") });
+  setTimeout(() => entries.push(["src:c1", "new-run"]), 30);
+  await handlers.get("agent.turn_started")({ agent: { id: "new-run", provider: "claude" }, turnId: "t" }, { paseo: { agents: { ref: () => run.handle } }, signal: new AbortController().signal });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(run.calls.archive, 1, "checked once the record appeared");
+});
+
+test("the settings screen cannot save a refused permission mode", () => {
+  // agentModeError gates the Save action: refused modes produce an error, allowed ones none.
+  for (const mode of ["bypassPermissions", "acceptEdits", "dontAsk", "full-access", "auto-review", "yolo"]) {
+    assert.notEqual(agentModeError("claude", mode), null, mode);
+  }
+  for (const mode of ["auto", "default", "plan"]) assert.equal(agentModeError("claude", mode), null, mode);
+  const screen = readFileSync(new URL("../client/settings-screen.tsx", import.meta.url), "utf8");
+  assert.match(screen, /const modeError = agentModeError\(/);
+  assert.match(screen, /disabled=\{!agentDirty \|\| modeError !== null\}/, "Save is disabled while the mode is refused");
+  assert.match(screen, /if \(modeError !== null\) return; \/\/ never store a refused mode/, "and the handler checks again");
 });

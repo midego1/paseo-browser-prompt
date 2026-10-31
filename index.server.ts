@@ -40,7 +40,7 @@ export default function contribute(server: PluginServerContext) {
   // Report back to chat: a finished browser run reports to the agent whose card started it.
   const reportBack = registerReportBack(server, settings, { store: fileReportedStore() });
   // Mode guard: a browser run that leaves its allowed permission mode is set back or stopped.
-  const modeGuard = registerModeGuard(server);
+  const modeGuard = registerModeGuard(server, settings);
 
   return async () => {
     modeGuard.dispose();

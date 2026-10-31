@@ -41,7 +41,8 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
   classifier may approve it. Set the permission mode to `default` (Always Ask) to approve every new
   tool yourself; review each approval there.
 - The plugin checks the mode a run actually uses and stops (archives) runs in a refused mode
-  (bypass, accept-edits and similar). Moving between Auto, Always Ask and Plan is not acted on.
+  (bypass, accept-edits and similar). Only agents a card recorded as its run are checked, so an
+  agent that copies the plugin's labels is never archived by it. Moving between Auto, Always Ask and Plan is not acted on.
   Stopping takes a moment after the agent starts or changes mode, so a few tool calls can happen
   before it.
 - Report back to chat can forward the browser agent's report, which can echo text from web pages,
