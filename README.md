@@ -177,6 +177,11 @@ The card's "Run with Paseo agent" button uses the app's own Paseo connection (`u
 
 ### Report back to chat
 
+The server hooks use `server.on("agent.turn_ended" | "agent.turn_started" | "agent.permission_requested")`.
+Paseo 0.14 renamed them (`server.addHook("agent.turn.after", …)` and so on) but still delivers the old
+names; they are deprecated until 2027-04-30. Moving to `addHook` needs the 0.14 plugin SDK and
+`requirements.paseo` `>=0.14.0`, so it is left for a later release.
+
 Setting **Report back to chat** (host setting `reportBack`): `auto` (default), `full` or `off`.
 Settings that cannot be read or are invalid count as `auto`, never `full`. A v5 boolean migrates
 `true` to `auto` and `false` to `off`. `server/report-back-hook.ts` registers
@@ -284,6 +289,15 @@ token, API key, 2FA or recovery code or other secret (skip it and say "screensho
   the renderer Paseo uses for these image messages in an agent's own chat, inside a pressable frame
   (max 240 px wide, rounded, theme border) that opens the run. The plugin API has no other way to
   show a daemon-side image, so on older apps the thumbnail is not shown.
+- Paseo's browser only captures a tab the desktop app is showing: a screenshot of a hidden tab
+  fails with "The tab has not painted yet". No browser tool or plugin API can make a hidden tab
+  paint or show the run's own tab (`browser_new_tab` always opens in the background;
+  `navigation.openBrowser` only creates and focuses a new tab, on Electron, and timeline cards get
+  no `navigation`). So rule 10 tells the agent to try once and, on that error, take no more
+  screenshots in the run (no retry, no question to the owner) and note
+  "(screenshots off: tab not visible)" in its next step line. Browser tool errors arrive as a
+  completed call whose output carries the error text; `isUnpaintedScreenshot` recognizes it and the
+  card shows a hint that screenshots need the run's browser tab visible in the Paseo app.
 - Screenshots never reach a chat. `finalAssistantText` skips image-only messages, and the shared
   chat escape (`escapeUntrusted`, used for reports, questions and error text) runs
   `stripImagesForChat` after NFKC normalization: inline Markdown images (titles, escaped brackets

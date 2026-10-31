@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.4 (unreleased)
+
+- Paseo cannot capture a browser tab the desktop app is not showing ("The tab has not painted
+  yet"), and no plugin API can show the run's tab. Rule 10 now tells the agent to try one
+  screenshot and, on that error, take no more for the run (no retry, no question to the owner)
+  and note it in its next step line. The card shows a hint that screenshots need the run's browser
+  tab visible in the Paseo app.
+
 ## 0.6.3 (unreleased)
 
 - Chat-bound text (reports, questions, error text and titles) defuses every `![` left after image

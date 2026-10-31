@@ -115,7 +115,37 @@ export function isScreenshotTool(name: unknown): boolean {
   return typeof name === "string" && /(^|__|[.:/])browser_screenshot$/.test(name);
 }
 
-type Item = { type: string; text?: unknown; name?: unknown };
+type Item = { type: string; text?: unknown; name?: unknown; detail?: unknown; error?: unknown };
+
+/**
+ * Shown on the card when a run's screenshot failed because its tab was hidden. Paseo's browser only
+ * captures a tab the desktop app is showing, and no plugin API can show the run's own tab.
+ */
+export const SCREENSHOT_BLOCKED_HINT =
+  "Screenshots need the run's browser tab to be visible in your Paseo app (for example in a split next to the chat). This run stopped taking them.";
+
+/** Paseo's browser host refuses screenshots of a tab the desktop app is not showing. */
+const UNPAINTED = /has not painted|not painted yet/i;
+
+/**
+ * A browser_screenshot call that failed because its tab was not visible in the owner's Paseo app.
+ * Browser tool errors come back as an ordinary result whose text carries the error, so the call's
+ * output and error are both checked (only their first 4,000 characters).
+ */
+export function isUnpaintedScreenshot(item: Item): boolean {
+  if (item.type !== "tool_call" || !isScreenshotTool(item.name)) return false;
+  for (const part of [item.detail, item.error]) {
+    if (part == null) continue;
+    let text: string;
+    try {
+      text = typeof part === "string" ? part : JSON.stringify(part);
+    } catch {
+      continue;
+    }
+    if (UNPAINTED.test(text.slice(0, 4000))) return true;
+  }
+  return false;
+}
 
 /**
  * Tracks the latest browser screenshot in a run's timeline: the first assistant message after a
@@ -125,10 +155,12 @@ type Item = { type: string; text?: unknown; name?: unknown };
 export function createScreenshotTracker() {
   let latest: string | null = null;
   let afterScreenshot = false;
+  let blocked = false;
   return {
     push(item: Item): void {
       if (item.type === "tool_call") {
         afterScreenshot = isScreenshotTool(item.name);
+        if (isUnpaintedScreenshot(item)) blocked = true;
         return;
       }
       if (item.type !== "assistant_message" || typeof item.text !== "string") {
@@ -145,6 +177,10 @@ export function createScreenshotTracker() {
     },
     latest(): string | null {
       return latest;
+    },
+    /** A screenshot failed because the run's tab was not visible; the run stops taking them. */
+    blocked(): boolean {
+      return blocked;
     },
   };
 }

@@ -19,6 +19,8 @@ export interface RunView {
   asking: boolean;
   /** Path or URL of the run's latest browser screenshot (one reference, never image data). */
   screenshot: string | null;
+  /** A screenshot failed because the run's browser tab was not visible in the Paseo app. */
+  screenshotsBlocked: boolean;
 }
 
 function isRedirect(item: Item): boolean {
@@ -41,6 +43,8 @@ export function createRunTracker(total: number, showSteps: boolean, showScreensh
   let turnItems: Item[] = [];
   let redirects = 0;
   let screenshots = createScreenshotTracker();
+  /** Kept when a later tail read no longer contains the failed call. */
+  let blockedSeen = false;
 
   /** Appends a chunk; a new message (new message id, or a marker at its start) starts a new line. */
   function append(text: string, chunk: string, newMessage: boolean): string {
@@ -51,7 +55,12 @@ export function createRunTracker(total: number, showSteps: boolean, showScreensh
 
   return {
     view(): RunView {
-      return { progress: showSteps ? progress : null, asking, screenshot: showScreenshots ? screenshots.latest() : null };
+      return {
+        progress: showSteps ? progress : null,
+        asking,
+        screenshot: showScreenshots ? screenshots.latest() : null,
+        screenshotsBlocked: showScreenshots && (screenshots.blocked() || blockedSeen),
+      };
     },
 
     /** A tail read of the run's timeline: recomputes the waiting state and the latest step. */
@@ -60,6 +69,7 @@ export function createRunTracker(total: number, showSteps: boolean, showScreensh
       if (showScreenshots) {
         const fromHistory = createScreenshotTracker();
         for (const item of items) fromHistory.push(item);
+        if (fromHistory.blocked() || screenshots.blocked()) blockedSeen = true;
         // A tail read without a screenshot keeps the one already shown (it may be older than the tail).
         if (fromHistory.latest()) screenshots = fromHistory;
       }
