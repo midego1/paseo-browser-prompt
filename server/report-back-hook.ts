@@ -4,7 +4,7 @@ import { DEFAULT_REPORT_MODE, MOST_RECENT_FALLBACK, parseReportMode, runKey, typ
 import { createReportBack, type ReportBackOptions, type ReportBackPaseo } from "./report-back.ts";
 
 type PreferencesState = PluginSettingsState<(typeof preferences)["schema"]>;
-type SettingsReader = { read(): Promise<PreferencesState> };
+export type SettingsReader = { read(): Promise<PreferencesState> };
 
 /** The setting's mode; invalid or unreadable settings fail closed to `auto`, never to `full`. */
 export async function readReportMode(settings: SettingsReader): Promise<ReportMode> {

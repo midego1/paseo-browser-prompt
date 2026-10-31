@@ -142,10 +142,13 @@ The card's "Run with Paseo agent" button uses the app's own Paseo connection (`u
   `<steps>`.
 - Mode guard (`shared/mode-guard.ts`): right after creating the agent the card reads its actual
   mode (`refresh()`, a few tries until it is reported). The server checks again whenever a run's
-  turn starts or it requests a permission (`server/mode-guard-hook.ts`). Drift between allowed
+  turn starts or it requests a permission (`server/mode-guard-hook.ts`), but only for agents a card
+  recorded in the host `runs` setting (`readRecordedRun`, polled up to 10 seconds, as for report
+  back); labels alone never get an agent archived. Drift between allowed
   modes (`runModeAllowed`: claude `auto`, `default`, `plan`) is ignored. A refused mode (bypass,
   accept-edits, ...) is set back if the SDK has a mode setter; the plugin SDK (0.11 to 0.14) has
-  none, so the run is stopped by archiving it, and the card shows the error.
+  none, so the run is stopped by archiving it, and the card shows the error. The settings screen
+  keeps Save disabled for a refused mode (`agentModeError`), so none is ever stored.
 - The card remembers `<agentId>:<cardId> -> startedAgentId` in host settings (plus `"most-recent"`
   when the run started outside the card agent's workspace; a save that loses a revision race is
   retried against the newest settings) and shows the

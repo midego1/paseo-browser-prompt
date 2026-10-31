@@ -66,7 +66,8 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
     agentModel: agentDraft.agentModel ?? values.agentModel,
     agentMode: agentDraft.agentMode ?? values.agentMode,
   };
-  // Only ask-first modes are allowed; bypass, auto-approve and accept-edits modes are refused.
+  // Allowed: ask-first modes (Claude default and plan, Oh My Pi ask) and Claude Auto mode (the
+  // default). Bypass, accept-edits and other auto-approve modes are refused: Save stays disabled.
   const modeError = agentModeError(agent.agentProvider || DEFAULT_AGENT_SETTINGS.agentProvider, agent.agentMode || DEFAULT_AGENT_SETTINGS.agentMode);
   const autoModeSelected = isClassifierMode(
     agent.agentProvider || DEFAULT_AGENT_SETTINGS.agentProvider,
@@ -191,6 +192,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
             actionLabel="Save"
             disabled={!agentDirty || modeError !== null}
             onPress={async () => {
+              if (modeError !== null) return; // never store a refused mode
               const next = {
                 agentProvider: agent.agentProvider.trim() || DEFAULT_AGENT_SETTINGS.agentProvider,
                 agentModel: agent.agentModel.trim() || DEFAULT_AGENT_SETTINGS.agentModel,
