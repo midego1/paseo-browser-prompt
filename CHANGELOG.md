@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.1 (unreleased)
+
+- Claude **Auto mode** is now the default for Run with Paseo agent. Always Ask (`default`) and Plan
+  stay selectable; bypass, accept-edits and similar modes are still refused and fall back to the
+  default mode. Settings schema v7 moves a stored Always Ask (or empty) mode to Auto mode once; a
+  later choice of Always Ask sticks.
+- Mode guard: drift between Auto, Always Ask and Plan is no longer acted on; only runs in a refused
+  mode are stopped (archived). The `browser-prompt-mode` label is no longer written or read.
+- The Auto mode note in settings is neutral; the launch confirmation still mentions Auto mode.
+- Report back is unchanged: a source chat in Auto mode gets only the status-only notice.
+
 ## 0.3.0 (unreleased)
 
 - Run with Paseo agent can use Claude **Auto mode** (`auto`, a model classifier reviews permission

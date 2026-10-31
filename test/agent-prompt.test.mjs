@@ -9,6 +9,7 @@ import {
   DEFAULT_AGENT_SETTINGS,
   MAX_AGENT_TITLE,
   CLASSIFIER_MODE_RULE,
+  defaultModeFor,
   isAskFirstMode,
   isClassifierMode,
   resolveAgentConfig,
@@ -71,17 +72,17 @@ test("agent title", () => {
   assert.ok(long.endsWith("…"));
 });
 
-test("settings defaults: Anthropic Claude Sonnet 5.5, thinking high, ask mode, confirm on", () => {
+test("settings defaults: Anthropic Claude Sonnet 5.5, thinking high, Auto mode, confirm on", () => {
   assert.deepEqual({ ...DEFAULT_AGENT_SETTINGS }, {
     agentProvider: "claude",
     agentModel: "claude-sonnet-5-5",
     agentThinking: "high",
-    agentMode: "default",
+    agentMode: "auto",
     confirmAgentLaunch: true,
   });
   assert.deepEqual(resolveAgentConfig(DEFAULT_AGENT_SETTINGS), {
     provider: "claude/claude-sonnet-5-5",
-    modeId: "default",
+    modeId: "auto",
     thinkingOptionId: "high",
   });
   assert.deepEqual(resolveAgentConfig({}), resolveAgentConfig(DEFAULT_AGENT_SETTINGS));
@@ -91,17 +92,19 @@ test("config resolution: blanks fall back, unsafe modes are refused", () => {
   assert.equal(resolveAgentConfig({ agentProvider: " ", agentModel: "" }).provider, "claude/claude-sonnet-5-5");
   assert.equal(resolveAgentConfig({ agentModel: "claude-opus-5-5" }).provider, "claude/claude-opus-5-5");
   assert.equal(resolveAgentConfig({ agentModel: "claude/claude-fable-5-1" }).provider, "claude/claude-fable-5-1");
-  for (const mode of ["bypassPermissions", "acceptEdits", "full-access", "auto-review", "dontAsk", "yolo"]) {
-    assert.equal(resolveAgentConfig({ agentMode: mode }).modeId, "default");
+  for (const mode of ["bypassPermissions", "acceptEdits", "full-access", "auto-review", "dontAsk", "yolo", "Auto", ""]) {
+    assert.equal(resolveAgentConfig({ agentMode: mode }).modeId, "auto", `${mode} falls back to the default mode`);
   }
+  assert.equal(resolveAgentConfig({ agentMode: "default" }).modeId, "default", "Always Ask stays selectable");
   assert.equal(resolveAgentConfig({ agentMode: "plan" }).modeId, "plan");
-  // custom provider ids of the claude family use claude's ask-first modes
+  // custom provider ids of the claude family use claude's modes
   assert.deepEqual(resolveAgentConfig({ agentProvider: "claude-work", agentMode: "bypassPermissions" }), {
     provider: "claude-work/claude-sonnet-5-5",
-    modeId: "default",
+    modeId: "auto",
     thinkingOptionId: "high",
   });
   assert.equal(resolveAgentConfig({ agentProvider: "omp", agentModel: "m", agentMode: "full" }).modeId, "ask");
+  assert.equal(resolveAgentConfig({ agentProvider: "omp", agentModel: "m", agentMode: "auto" }).modeId, "ask", "omp has no Auto mode");
   // providers without a known ask-first mode are refused rather than started
   assert.throws(() => resolveAgentConfig({ agentProvider: "codex", agentModel: "gpt-6" }), /no known ask-first mode/);
   assert.throws(() => resolveAgentConfig({ agentModel: "antigravity/x" }), /no known ask-first mode/);
@@ -111,8 +114,8 @@ test("config resolution: blanks fall back, unsafe modes are refused", () => {
     assert.match(agentModeError(provider, "default"), /no known ask-first mode/);
   }
   assert.equal(agentModeError("claude", "default"), null);
-  assert.equal(agentModeError("claude", "auto"), null, "Claude Auto mode is an allowed opt-in");
-  assert.match(agentModeError("claude", "bypassPermissions"), /not allowed for this provider\. Allowed: default, plan \(ask first\), or auto \(classifier-reviewed, opt-in\)\./);
+  assert.equal(agentModeError("claude", "auto"), null);
+  assert.match(agentModeError("claude", "bypassPermissions"), /not allowed for this provider\. Allowed: default, plan \(ask first\), or auto \(classifier-reviewed, the default\)\./);
   assert.match(agentModeError("omp", "auto"), /not allowed for this provider\. Allowed: ask \(ask first\)\.$/, "no classifier mode outside Claude");
   assert.equal("thinkingOptionId" in resolveAgentConfig({ agentThinking: "" }), false);
 });
@@ -128,7 +131,7 @@ test("run state", () => {
   assert.equal(runStateFrom({ status: "closed", attentionReason: null }, true), "stopped");
 });
 
-test("Claude Auto mode is an explicit opt-in, separate from ask-first modes", () => {
+test("Claude Auto mode is the default, kept separate from ask-first modes", () => {
   assert.equal(isAskFirstMode("claude", "default"), true);
   assert.equal(isAskFirstMode("claude", "plan"), true);
   assert.equal(isAskFirstMode("claude", "auto"), false, "auto is not ask-first");
@@ -136,30 +139,22 @@ test("Claude Auto mode is an explicit opt-in, separate from ask-first modes", ()
   assert.equal(isClassifierMode("claude-work", "auto"), true, "claude family");
   assert.equal(isClassifierMode("claude", "default"), false);
   for (const provider of ["omp", "codex", "opencode", "constructor"]) assert.equal(isClassifierMode(provider, "auto"), false, provider);
-
-  assert.deepEqual(resolveAgentConfig({ agentMode: "auto" }), {
-    provider: "claude/claude-sonnet-5-5",
-    modeId: "auto",
-    thinkingOptionId: "high",
-  });
+  assert.equal(defaultModeFor("claude"), "auto");
+  assert.equal(defaultModeFor("claude-work"), "auto");
+  assert.equal(defaultModeFor("omp"), "ask");
+  assert.equal(defaultModeFor("codex"), null);
   assert.equal(resolveAgentConfig({ agentMode: " auto " }).modeId, "auto");
-  assert.equal(resolveAgentConfig({ agentProvider: "claude-work", agentMode: "auto" }).modeId, "auto");
-  assert.equal(resolveAgentConfig({ agentProvider: "omp", agentModel: "m", agentMode: "auto" }).modeId, "ask", "omp has no auto");
-  for (const mode of ["bypassPermissions", "acceptEdits", "dontAsk", "Auto", "AUTO"]) {
-    assert.equal(resolveAgentConfig({ agentMode: mode }).modeId, "default", mode);
-  }
-  assert.equal(DEFAULT_AGENT_SETTINGS.agentMode, "default", "the default stays Always Ask");
   assert.throws(() => resolveAgentConfig({ agentProvider: "codex", agentModel: "gpt-6", agentMode: "auto" }), /no known ask-first mode/);
 });
 
 test("the Auto mode rule is added to the preamble only for Auto mode", () => {
-  const auto = buildAgentPrompt("Check WAF rule", steps, resolveAgentConfig({ agentMode: "auto" }));
+  const auto = buildAgentPrompt("Check WAF rule", steps, resolveAgentConfig({}));
   assert.ok(auto.startsWith(AGENT_SAFETY_PREAMBLE), "the full safety preamble stays");
-  assert.ok(auto.includes(`${AGENT_SAFETY_PREAMBLE}\n${CLASSIFIER_MODE_RULE}\n\n`));
+  assert.ok(auto.includes(`${AGENT_SAFETY_PREAMBLE}\n${CLASSIFIER_MODE_RULE}\n\n`), "default settings get rule 6");
   assert.match(CLASSIFIER_MODE_RULE, /classifier, not the owner, approves your tool calls/);
   assert.match(CLASSIFIER_MODE_RULE, /MUST ask the owner with AskUserQuestion, as a question and not as a permission request/);
   assert.match(auto, /3\. STOP and ask the owner with your question tool \(AskUserQuestion\)/, "rule 3 still present");
-  for (const config of [undefined, resolveAgentConfig({}), resolveAgentConfig({ agentMode: "plan" }), { provider: "omp/m", modeId: "auto" }]) {
+  for (const config of [undefined, resolveAgentConfig({ agentMode: "default" }), resolveAgentConfig({ agentMode: "plan" }), { provider: "omp/m", modeId: "auto" }]) {
     const prompt = buildAgentPrompt("Check WAF rule", steps, config);
     assert.ok(!prompt.includes(CLASSIFIER_MODE_RULE), JSON.stringify(config));
     assert.ok(prompt.startsWith(AGENT_SAFETY_PREAMBLE));
@@ -174,16 +169,14 @@ test("report back still treats a source in Auto mode as not ask-first", () => {
   assert.equal(sourceAllowsFullReport("full", "claude", "auto"), true, "only the explicit full setting forwards");
 });
 
-test("run modes: ask-first always allowed, Auto only when requested, everything else not", () => {
-  assert.equal(runModeAllowed("claude", "default", "default"), true);
-  assert.equal(runModeAllowed("claude", "default", "plan"), true, "stricter is fine");
-  assert.equal(runModeAllowed("claude", "auto", "default"), true);
-  assert.equal(runModeAllowed("claude", "auto", "auto"), true);
-  assert.equal(runModeAllowed("claude", "default", "auto"), false, "unrequested Auto mode");
-  assert.equal(runModeAllowed("claude", "", "auto"), false, "runs without a mode label");
-  assert.equal(runModeAllowed("claude", "auto", "bypassPermissions"), false);
-  assert.equal(runModeAllowed("claude", "default", "acceptEdits"), false);
-  assert.equal(runModeAllowed("omp", "auto", "auto"), false);
+test("run modes: Auto, Always Ask and Plan are all fine; refused modes are not", () => {
+  for (const mode of ["default", "plan", "auto", " auto "]) assert.equal(runModeAllowed("claude", mode), true, mode);
+  for (const mode of ["bypassPermissions", "acceptEdits", "dontAsk", "full-access", "yolo", ""]) {
+    assert.equal(runModeAllowed("claude", mode), false, mode);
+  }
+  assert.equal(runModeAllowed("omp", "ask"), true);
+  assert.equal(runModeAllowed("omp", "auto"), false);
+  assert.equal(runModeAllowed("codex", "default"), false, "unknown providers have no allowed modes");
 });
 
 /** Fake SDK agent handle whose mode reads come from a script; `setMode` is optional. */
@@ -212,56 +205,61 @@ function fakeRun({ modes, setMode, archiveError, labels } = {}) {
 }
 const noSleep = { sleep: async () => {}, attempts: 4 };
 
-test("mode guard: an allowed mode is left alone", async () => {
-  for (const [requested, actual] of [["default", "default"], ["default", "plan"], ["auto", "auto"], ["auto", "default"]]) {
+test("mode guard: drift between Auto, Always Ask and Plan is left alone", () => Promise.all(
+  ["default", "plan", "auto"].map(async (actual) => {
     const { handle, calls } = fakeRun({ modes: [actual] });
-    assert.deepEqual(await enforceRunMode(handle, "claude", requested, noSleep), { ok: true, actualMode: actual, corrected: false });
+    assert.deepEqual(await enforceRunMode(handle, "claude", { ...noSleep, restoreMode: "auto" }), { ok: true, actualMode: actual, corrected: false });
+    assert.equal(calls.archive, 0);
+    assert.deepEqual(calls.setMode, []);
+  }),
+));
+
+test("mode guard: waits for the mode to be reported, and an unreadable mode is not a violation", async () => {
+  const late = fakeRun({ modes: [null, null, "bypassPermissions"] });
+  const result = await enforceRunMode(late.handle, "claude", noSleep);
+  assert.equal(result.ok, false);
+  assert.equal(late.calls.refresh, 3);
+  const never = fakeRun({ modes: [null] });
+  assert.deepEqual(await enforceRunMode(never.handle, "claude", noSleep), { ok: true, actualMode: null, corrected: false });
+  assert.equal(never.calls.archive, 0);
+});
+
+test("mode guard: a refused mode is stopped when the SDK cannot set it back", async () => {
+  for (const mode of ["bypassPermissions", "acceptEdits"]) {
+    const { handle, calls } = fakeRun({ modes: [mode] });
+    const result = await enforceRunMode(handle, "claude", noSleep);
+    assert.equal(result.ok, false);
+    assert.equal(result.stopped, true);
+    assert.equal(result.actualMode, mode);
+    assert.match(result.message, new RegExp(`switched to mode "${mode}", which browser runs may not use, so it was stopped \\(archived\\)`));
+    assert.equal(calls.archive, 1);
+  }
+});
+
+test("mode guard: set back with setMode when the SDK offers it", async () => {
+  for (const [restoreMode, expected] of [["default", "default"], [undefined, "auto"], ["bypassPermissions", "auto"]]) {
+    let mode = "bypassPermissions";
+    const { handle, calls } = fakeRun({ modes: ["bypassPermissions"], setMode: (m) => (mode = m) });
+    handle.refresh = async () => ({ agent: { currentModeId: mode } });
+    const result = await enforceRunMode(handle, "claude", { ...noSleep, restoreMode });
+    assert.deepEqual(result, { ok: true, actualMode: expected, corrected: true });
+    assert.deepEqual(calls.setMode, [expected], "the requested mode, else the provider default");
     assert.equal(calls.archive, 0);
   }
 });
 
-test("mode guard: waits for the mode to be reported, and an unreadable mode is not a violation", async () => {
-  const late = fakeRun({ modes: [null, null, "auto"] });
-  const result = await enforceRunMode(late.handle, "claude", "default", noSleep);
-  assert.equal(result.ok, false);
-  assert.equal(late.calls.refresh, 3);
-  const never = fakeRun({ modes: [null] });
-  assert.deepEqual(await enforceRunMode(never.handle, "claude", "default", noSleep), { ok: true, actualMode: null, corrected: false });
-  assert.equal(never.calls.archive, 0);
-});
-
-test("mode guard: an unrequested Auto mode is stopped when the SDK cannot set it back", async () => {
-  const { handle, calls } = fakeRun({ modes: ["auto"] });
-  const result = await enforceRunMode(handle, "claude", "default", noSleep);
-  assert.equal(result.ok, false);
-  assert.equal(result.stopped, true);
-  assert.equal(result.actualMode, "auto");
-  assert.match(result.message, /switched to mode "auto" instead of "default", so it was stopped \(archived\)/);
-  assert.equal(calls.archive, 1);
-});
-
-test("mode guard: set back with setMode when the SDK offers it", async () => {
-  let mode = "bypassPermissions";
-  const { handle, calls } = fakeRun({ modes: ["bypassPermissions"], setMode: (m) => (mode = m) });
-  handle.refresh = async () => ({ agent: { currentModeId: mode } });
-  const result = await enforceRunMode(handle, "claude", "default", noSleep);
-  assert.deepEqual(result, { ok: true, actualMode: "default", corrected: true });
-  assert.deepEqual(calls.setMode, ["default"]);
-  assert.equal(calls.archive, 0);
-});
-
 test("mode guard: a failed setMode or one that does not stick still stops the run", async () => {
-  const throws = fakeRun({ modes: ["auto"], setMode: () => Promise.reject(new Error("unsupported")) });
-  assert.equal((await enforceRunMode(throws.handle, "claude", "default", noSleep)).stopped, true);
+  const throws = fakeRun({ modes: ["bypassPermissions"], setMode: () => Promise.reject(new Error("unsupported")) });
+  assert.equal((await enforceRunMode(throws.handle, "claude", noSleep)).stopped, true);
   assert.equal(throws.calls.archive, 1);
-  const ignored = fakeRun({ modes: ["auto"], setMode: () => undefined });
-  assert.equal((await enforceRunMode(ignored.handle, "claude", "default", noSleep)).stopped, true);
+  const ignored = fakeRun({ modes: ["acceptEdits"], setMode: () => undefined });
+  assert.equal((await enforceRunMode(ignored.handle, "claude", noSleep)).stopped, true);
   assert.equal(ignored.calls.archive, 1);
 });
 
 test("mode guard: when stopping fails too, the card is told to stop it by hand", async () => {
   const { handle } = fakeRun({ modes: ["acceptEdits"], archiveError: "rpc" });
-  const result = await enforceRunMode(handle, "claude", "auto", noSleep);
+  const result = await enforceRunMode(handle, "claude", noSleep);
   assert.equal(result.ok, false);
   assert.equal(result.stopped, false);
   assert.match(result.message, /could not be stopped\. Stop it in Paseo now\./);
@@ -274,24 +272,28 @@ test("server mode guard checks browser runs on turn start and permission request
   assert.ok(handlers.has("agent.turn_started") && handlers.has("agent.permission_requested"));
 
   const runs = {
-    flipped: fakeRun({ modes: ["auto"], labels: runLabels("src", "c1", "default") }),
-    optedIn: fakeRun({ modes: ["auto"], labels: runLabels("src", "c2", "auto") }),
-    legacy: fakeRun({ modes: ["auto"], labels: runLabels("src", "c3") }),
+    auto: fakeRun({ modes: ["auto"], labels: runLabels("src", "c1") }),
+    ask: fakeRun({ modes: ["default"], labels: runLabels("src", "c2") }),
+    plan: fakeRun({ modes: ["plan"], labels: runLabels("src", "c3") }),
+    bypass: fakeRun({ modes: ["bypassPermissions"], labels: runLabels("src", "c4") }),
+    edits: fakeRun({ modes: ["acceptEdits"], labels: runLabels("src", "c5") }),
     other: fakeRun({ modes: ["bypassPermissions"], labels: {} }),
   };
   const paseo = { agents: { ref: (id) => runs[id].handle } };
+  const context = { paseo, signal: new AbortController().signal };
   for (const id of Object.keys(runs)) {
-    await handlers.get("agent.turn_started")({ agent: { id, provider: "claude" }, turnId: "t" }, { paseo, signal: new AbortController().signal });
+    const name = id === "edits" ? "agent.permission_requested" : "agent.turn_started";
+    await handlers.get(name)({ agent: { id, provider: "claude" }, turnId: "t", request: {} }, context);
   }
   await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.equal(runs.flipped.calls.archive, 1, "unrequested Auto mode is stopped");
-  assert.equal(runs.optedIn.calls.archive, 0, "requested Auto mode is kept");
-  assert.equal(runs.legacy.calls.archive, 1, "0.2.0 runs may only be ask-first");
+  for (const id of ["auto", "ask", "plan"]) assert.equal(runs[id].calls.archive, 0, `${id} is allowed`);
+  assert.equal(runs.bypass.calls.archive, 1, "bypass is stopped");
+  assert.equal(runs.edits.calls.archive, 1, "accept-edits is stopped (on a permission request)");
   assert.equal(runs.other.calls.archive, 0, "never touches agents the plugin did not start");
-  assert.ok(logs.every((m) => /^run (flipped|legacy) was in mode auto; stopped \(archived\)$/.test(m)), logs.join("\n"));
+  assert.deepEqual(logs.sort(), ["run bypass was in mode bypassPermissions; stopped (archived)", "run edits was in mode acceptEdits; stopped (archived)"]);
 
-  await guard.check({ id: "flipped", provider: "claude" }, paseo);
-  assert.equal(runs.flipped.calls.archive, 1, "stopped once");
+  await guard.check({ id: "bypass", provider: "claude" }, paseo);
+  assert.equal(runs.bypass.calls.archive, 1, "stopped once");
   guard.dispose();
   assert.equal(handlers.size, 0);
 });

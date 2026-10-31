@@ -1,6 +1,6 @@
 // Keeps a browser run in the permission mode the card asked for. Import-free apart from other pure
 // shared modules, so tests can load it with `node --experimental-strip-types`.
-import { runModeAllowed } from "./agent-prompt.ts";
+import { defaultModeFor, runModeAllowed } from "./agent-prompt.ts";
 
 /** The slice of an SDK agent handle the guard uses. `setMode` is used only if the SDK offers it. */
 export interface ModeGuardAgent {
@@ -28,15 +28,15 @@ async function readMode(agent: ModeGuardAgent): Promise<string | null> {
 }
 
 /**
- * Checks the run's actual permission mode against the one requested. A mode outside the allowed set
+ * Checks the run's actual permission mode. Ask-first and classifier modes (Claude `default`, `plan`,
+ * `auto`) are all fine, so drift between them is ignored. A refused mode (bypass, accept-edits, ...)
  * is set back when the SDK can (the 0.11 to 0.14 plugin SDK cannot), else the run is stopped by
  * archiving it. A mode that never becomes readable is reported as unverified, not as a violation.
  */
 export async function enforceRunMode(
   agent: ModeGuardAgent,
   provider: string,
-  requestedMode: string,
-  options: ModeGuardOptions = {},
+  options: ModeGuardOptions & { restoreMode?: string } = {},
 ): Promise<ModeCheck> {
   const attempts = Math.max(1, options.attempts ?? 6);
   const sleep = options.sleep ?? defaultSleep;
@@ -46,14 +46,14 @@ export async function enforceRunMode(
     if (actual) break;
     if (attempt < attempts - 1) await sleep(options.delayMs ?? 500);
   }
-  if (!actual || runModeAllowed(provider, requestedMode, actual)) return { ok: true, actualMode: actual, corrected: false };
+  if (!actual || runModeAllowed(provider, actual)) return { ok: true, actualMode: actual, corrected: false };
 
-  const wanted = requestedMode || "an ask-first mode";
-  if (typeof agent.setMode === "function" && requestedMode) {
+  const restore = options.restoreMode && runModeAllowed(provider, options.restoreMode) ? options.restoreMode : defaultModeFor(provider);
+  if (typeof agent.setMode === "function" && restore) {
     try {
-      await agent.setMode(requestedMode);
+      await agent.setMode(restore);
       const after = await readMode(agent);
-      if (after && runModeAllowed(provider, requestedMode, after)) return { ok: true, actualMode: after, corrected: true };
+      if (after && runModeAllowed(provider, after)) return { ok: true, actualMode: after, corrected: true };
     } catch {
       // fall through to stopping the run
     }
@@ -64,14 +64,14 @@ export async function enforceRunMode(
       ok: false,
       actualMode: actual,
       stopped: true,
-      message: `The Paseo agent switched to mode "${actual}" instead of "${wanted}", so it was stopped (archived).`,
+      message: `The Paseo agent switched to mode "${actual}", which browser runs may not use, so it was stopped (archived).`,
     };
   } catch {
     return {
       ok: false,
       actualMode: actual,
       stopped: false,
-      message: `The Paseo agent switched to mode "${actual}" instead of "${wanted}" and could not be stopped. Stop it in Paseo now.`,
+      message: `The Paseo agent switched to mode "${actual}", which browser runs may not use, and could not be stopped. Stop it in Paseo now.`,
     };
   }
 }

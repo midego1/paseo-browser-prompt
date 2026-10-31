@@ -6,8 +6,11 @@ export const DEFAULT_AGENT_SETTINGS = {
   agentProvider: "claude",
   agentModel: "claude-sonnet-5-5",
   agentThinking: "high",
-  /** Claude's "Always Ask" mode: every new tool use asks the owner first. */
-  agentMode: "default",
+  /**
+   * Claude's "Auto mode": a model classifier reviews permission prompts. Always Ask ("default") and
+   * Plan stay selectable; bypass and accept-edits modes are refused.
+   */
+  agentMode: "auto",
   /** Ask "Start a Paseo agent to do these steps in your browser?" before launching. */
   confirmAgentLaunch: true,
 } as const;
@@ -25,8 +28,8 @@ export const ASK_FIRST_MODES: Readonly<Record<string, readonly string[]>> = {
 };
 
 /**
- * Modes where a model classifier, not the owner, reviews permission prompts. Allowed only when the
- * owner picks one explicitly; never used as a fallback, and never counted as ask-first.
+ * Modes where a model classifier, not the owner, reviews permission prompts. The provider's default
+ * for browser runs when it has one; never counted as ask-first (report back treats it as unsafe).
  */
 export const CLASSIFIER_MODES: Readonly<Record<string, readonly string[]>> = {
   /** Claude: "Auto mode" (needs the Anthropic API; Paseo refuses it on Bedrock and Vertex). */
@@ -35,7 +38,7 @@ export const CLASSIFIER_MODES: Readonly<Record<string, readonly string[]>> = {
 
 /**
  * Modes known to skip or auto-approve permission prompts, for clearer settings errors. Claude's
- * `auto` is the one exception the card accepts, as the opt-in classifier mode above.
+ * `auto` is the one exception the card accepts (and its default), as the classifier mode above.
  */
 export const UNSAFE_MODES: readonly string[] = [
   "bypassPermissions",
@@ -71,7 +74,7 @@ export function isAskFirstMode(provider: string, mode: string): boolean {
   return askFirstModes(provider)?.includes(mode.trim()) ?? false;
 }
 
-/** True for an opt-in mode where a model classifier, not the owner, approves tool calls. */
+/** True for a mode where a model classifier, not the owner, approves tool calls (Claude Auto mode). */
 export function isClassifierMode(provider: string, mode: string): boolean {
   return askFirstModes(provider) !== null && classifierModes(provider).includes(mode.trim());
 }
@@ -84,7 +87,7 @@ export function agentModeError(provider: string, mode: string): string | null {
   }
   if (isAskFirstMode(provider, mode) || isClassifierMode(provider, mode)) return null;
   const classifier = classifierModes(provider);
-  const extra = classifier.length ? `, or ${classifier.join(", ")} (classifier-reviewed, opt-in)` : "";
+  const extra = classifier.length ? `, or ${classifier.join(", ")} (classifier-reviewed, the default)` : "";
   return `Mode "${mode.trim()}" is not allowed for this provider. Allowed: ${allowed.join(", ")} (ask first)${extra}.`;
 }
 
@@ -106,13 +109,19 @@ export const AGENT_SAFETY_PREAMBLE = [
 ].join("\n");
 
 /**
- * Whether a run started in `requestedMode` may be in `actualMode`: any ask-first mode of the
- * provider (as strict or stricter than any allowed request), or the requested classifier mode when
- * the owner opted into it. Everything else, including a classifier mode nobody asked for, is not.
+ * Whether a browser run may be in `actualMode`: any ask-first or classifier mode of the provider
+ * (for Claude `default`, `plan` and `auto`; drift between them is fine). Bypass, accept-edits and
+ * every other mode are not.
  */
-export function runModeAllowed(provider: string, requestedMode: string, actualMode: string): boolean {
-  if (isAskFirstMode(provider, actualMode)) return true;
-  return actualMode.trim() === requestedMode.trim() && isClassifierMode(provider, requestedMode);
+export function runModeAllowed(provider: string, actualMode: string): boolean {
+  return isAskFirstMode(provider, actualMode) || isClassifierMode(provider, actualMode);
+}
+
+/** The mode a provider's browser runs use when none (or a refused one) is set: Auto mode for Claude. */
+export function defaultModeFor(provider: string): string | null {
+  const askFirst = askFirstModes(provider);
+  if (!askFirst) return null;
+  return classifierModes(provider)[0] ?? askFirst[0]!;
 }
 
 /** Provider id of a `provider/model` config value. */
@@ -168,10 +177,10 @@ export interface ResolvedAgentConfig {
 }
 
 /**
- * Turns the stored settings into an SDK agent config. Blank values fall back to the defaults. A mode
- * that is neither ask-first nor the provider's opt-in classifier mode falls back to its ask-first
- * mode. Throws for a provider with no known ask-first mode: the card never starts an agent that
- * skips permission prompts.
+ * Turns the stored settings into an SDK agent config. Blank values fall back to the defaults. A blank
+ * mode, or one that is neither ask-first nor classifier-reviewed (bypass, accept-edits, ...), falls
+ * back to the provider's default mode (Claude: Auto mode; Oh My Pi: Ask). Throws for a provider with
+ * no known ask-first mode: the card never starts an agent that skips permission prompts.
  */
 export function resolveAgentConfig(settings: AgentSettingsInput): ResolvedAgentConfig {
   const pick = (value: string | undefined, fallback: string) => (value && value.trim()) || fallback;
@@ -182,8 +191,9 @@ export function resolveAgentConfig(settings: AgentSettingsInput): ResolvedAgentC
   const providerId = providerModel.slice(0, providerModel.indexOf("/"));
   const allowed = askFirstModes(providerId);
   if (!allowed) throw new Error(agentModeError(providerId, "")!);
-  let modeId = pick(settings.agentMode, allowed[0]!);
-  if (!isAskFirstMode(providerId, modeId) && !isClassifierMode(providerId, modeId)) modeId = allowed[0]!;
+  const fallback = defaultModeFor(providerId) ?? allowed[0]!;
+  let modeId = pick(settings.agentMode, fallback);
+  if (!runModeAllowed(providerId, modeId)) modeId = fallback;
   return {
     provider: providerModel,
     modeId,

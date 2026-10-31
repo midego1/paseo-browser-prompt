@@ -90,9 +90,12 @@ export async function startBrowserAgent(
     config,
     title: agentTitle(input.cardTitle, input.displayTitle),
     prompt: buildAgentPrompt(input.cardTitle, input.steps, config),
-    labels: runLabels(input.sourceAgentId, input.cardId, config.modeId),
+    labels: runLabels(input.sourceAgentId, input.cardId),
   });
-  // Paseo or the provider can end up in another mode than requested; never leave such a run going.
-  const modeCheck = await enforceRunMode(agent as unknown as ModeGuardAgent, providerOf(config.provider), config.modeId);
+  // Paseo or the provider can end up in another mode than requested; never leave a run going in a
+  // refused mode (drift between Auto, Always Ask and Plan is fine).
+  const modeCheck = await enforceRunMode(agent as unknown as ModeGuardAgent, providerOf(config.provider), {
+    restoreMode: config.modeId,
+  });
   return { agentId: agent.id, workspaceId, workspaceSource: source, modeCheck };
 }

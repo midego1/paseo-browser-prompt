@@ -15,7 +15,7 @@ export const MAX_RUNS = 200;
 export const preferences = defineSettings({
   id: "preferences",
   scope: "host",
-  version: 6,
+  version: 7,
   schema: z.object({
     /**
      * Desktop and web clients.

@@ -724,12 +724,22 @@ test("the file store round-trips ids, logs a corrupt file, and keeps the file pr
   }
 });
 
-test("settings migration: v5 boolean becomes auto or off; other versions keep their values", () => {
-  const v5 = { startMode: "app", done: ["a:1"], runs: [["a:1", "r1"]] };
+test("settings migration: v5 boolean report mode; v7 makes Claude Auto mode the default once", () => {
+  const v5 = { startMode: "app", done: ["a:1"], runs: [["a:1", "r1"]], agentMode: "plan" };
   assert.deepEqual(migratePreferences({ ...v5, reportBack: true }, 5), { ...v5, reportBack: "auto" });
   assert.deepEqual(migratePreferences({ ...v5, reportBack: false }, 5), { ...v5, reportBack: "off" });
-  assert.deepEqual(migratePreferences(v5, 4), v5, "no reportBack: the default applies");
   assert.deepEqual(migratePreferences({ ...v5, reportBack: "full" }, 6), { ...v5, reportBack: "full" });
   assert.deepEqual(migratePreferences({ startMode: "web-agent", done: ["k"] }, 1), { done: ["k"] });
   assert.deepEqual(migratePreferences(undefined, 1), { done: [] });
+
+  // v7: a stored Always Ask or empty mode becomes Auto mode once.
+  assert.equal(migratePreferences({ agentMode: "default" }, 6).agentMode, "auto");
+  assert.equal(migratePreferences({ agentMode: "" }, 6).agentMode, "auto");
+  assert.equal(migratePreferences({}, 4).agentMode, "auto");
+  assert.equal(migratePreferences({ agentProvider: "claude-work", agentMode: "default" }, 6).agentMode, "auto");
+  assert.deepEqual(migratePreferences({ ...v5, reportBack: true, agentMode: "default" }, 5), { ...v5, reportBack: "auto", agentMode: "auto" }, "both steps");
+  // Plan, other providers and anything already on v7 are kept.
+  assert.equal(migratePreferences({ agentMode: "plan" }, 6).agentMode, "plan");
+  assert.equal(migratePreferences({ agentProvider: "omp", agentMode: "ask" }, 6).agentMode, "ask");
+  assert.equal(migratePreferences({ agentMode: "default" }, 7).agentMode, "default", "a later choice of Always Ask sticks");
 });
