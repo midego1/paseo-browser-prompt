@@ -1,48 +1,119 @@
 import type { PluginHostProps } from "@getpaseo/plugin/client";
+import { ScrollView } from "@getpaseo/plugin/client/react-native";
 import * as hostUi from "@getpaseo/plugin/client/ui";
-import type { ComponentType } from "react";
-import { Pressable, View } from "react-native";
-import { screenshotMarkdown } from "../shared/screenshot";
+import { type ComponentType, useState } from "react";
+import { type LayoutChangeEvent, Pressable, Text, View } from "react-native";
+import {
+  screenshotMarkdown,
+  type StepScreenshot,
+  THUMB_GAP,
+  thumbnailLayout,
+  type ThumbnailMode,
+} from "../shared/screenshot";
 
 // Paseo 0.13+ ships a host Markdown component, the same renderer Paseo uses for the image messages
 // in an agent's own chat. Older hosts have none, and no other plugin API shows a daemon-side image,
-// so there the thumbnail is simply not shown.
+// so there the thumbnails are simply not shown.
 const HostMarkdown = (hostUi as unknown as { Markdown?: ComponentType<{ children: string }> }).Markdown;
 
-export const THUMBNAIL_MAX_WIDTH = 240;
+type Theme = PluginHostProps["theme"];
 
-/** The run's latest browser screenshot, small, under the progress bar. Pressing it opens the run. */
-export function ScreenshotThumb({
-  source,
-  step,
+function Thumbnail({
+  shot,
+  size,
+  latest,
   theme,
   onOpen,
 }: {
-  source: string | null;
-  step: number | null;
-  theme: PluginHostProps["theme"];
+  shot: StepScreenshot;
+  size: number;
+  latest: boolean;
+  theme: Theme;
   onOpen: () => void;
 }) {
-  if (!source || !HostMarkdown) return null;
-  const label = step ? `Latest browser screenshot, step ${step}` : "Latest browser screenshot";
+  if (!HostMarkdown) return null;
+  const label = shot.step ? `Step ${shot.step}` : "Screenshot";
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={label}
+      accessibilityLabel={shot.step ? `Screenshot after step ${shot.step}` : "Latest browser screenshot"}
       accessibilityHint="Opens the Paseo agent"
       onPress={onOpen}
-      style={{
-        maxWidth: THUMBNAIL_MAX_WIDTH,
-        borderRadius: 8,
-        borderWidth: 1,
-        borderColor: theme.colors.border,
-        overflow: "hidden",
-        alignSelf: "flex-start",
-      }}
+      style={{ width: size, gap: 4 }}
     >
-      <View pointerEvents="none" style={{ maxWidth: THUMBNAIL_MAX_WIDTH }}>
-        <HostMarkdown>{screenshotMarkdown(source)}</HostMarkdown>
+      <Text
+        numberOfLines={1}
+        style={{
+          color: latest ? theme.colors.accent : theme.colors.foregroundMuted,
+          fontSize: 12,
+          fontWeight: latest ? "600" : "400",
+        }}
+      >
+        {label}
+      </Text>
+      <View
+        pointerEvents="none"
+        style={{
+          width: size,
+          borderRadius: 8,
+          borderWidth: latest ? 2 : 1,
+          borderColor: latest ? theme.colors.accent : theme.colors.border,
+          overflow: "hidden",
+        }}
+      >
+        <HostMarkdown>{screenshotMarkdown(shot.source, shot.step || undefined)}</HostMarkdown>
       </View>
     </Pressable>
+  );
+}
+
+/**
+ * The run's screenshots under the progress bar: one per step with its step number, the latest
+ * highlighted. The card's width (onLayout) picks the layout (see `thumbnailLayout`): a row when all
+ * fit, a horizontal scroll strip when only some do, the latest alone when narrow or when the
+ * setting asks for it. Pressing a thumbnail opens the run.
+ */
+export function ScreenshotStrip({
+  shots,
+  latestStep,
+  mode,
+  theme,
+  onOpen,
+}: {
+  shots: StepScreenshot[];
+  latestStep: number | null;
+  mode: ThumbnailMode;
+  theme: Theme;
+  onOpen: () => void;
+}) {
+  const [width, setWidth] = useState(0);
+  if (!HostMarkdown || shots.length === 0) return null;
+  const onLayout = (event: LayoutChangeEvent) => setWidth(Math.floor(event.nativeEvent.layout.width));
+  const layout = thumbnailLayout(width, shots.length, mode);
+  const latest = shots.find((shot) => shot.step === latestStep) ?? shots[shots.length - 1]!;
+
+  if (layout.kind === "latest") {
+    return (
+      <View onLayout={onLayout} style={{ alignSelf: "stretch" }}>
+        {width > 0 ? <Thumbnail shot={latest} size={layout.size} latest theme={theme} onOpen={onOpen} /> : null}
+      </View>
+    );
+  }
+  const items = shots.map((shot) => (
+    <Thumbnail key={shot.step} shot={shot} size={layout.size} latest={shot === latest} theme={theme} onOpen={onOpen} />
+  ));
+  if (layout.kind === "row") {
+    return (
+      <View onLayout={onLayout} style={{ alignSelf: "stretch", flexDirection: "row", gap: THUMB_GAP }}>
+        {items}
+      </View>
+    );
+  }
+  return (
+    <View onLayout={onLayout} style={{ alignSelf: "stretch" }}>
+      <ScrollView horizontal showsHorizontalScrollIndicator contentContainerStyle={{ gap: THUMB_GAP, paddingBottom: 4 }}>
+        {items}
+      </ScrollView>
+    </View>
   );
 }

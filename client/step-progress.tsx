@@ -7,12 +7,23 @@ import { createRunTracker, type RunTracker, type RunView } from "../shared/run-t
 import { stepProgressView } from "../shared/step-view";
 import type { StepProgress } from "../shared/steps";
 
-const EMPTY: RunView = { progress: null, asking: false, screenshot: null, screenshotsBlocked: false };
+const EMPTY: RunView = {
+  progress: null,
+  asking: false,
+  screenshot: null,
+  screenshots: [],
+  screenshotStep: null,
+  screenshotsBlocked: false,
+};
+
+const screenshotsKey = (view: RunView) => view.screenshots.map((shot) => `${shot.step}:${shot.source}`).join("|");
 
 function sameView(a: RunView, b: RunView): boolean {
   return (
     a.asking === b.asking &&
     a.screenshot === b.screenshot &&
+    a.screenshotStep === b.screenshotStep &&
+    screenshotsKey(a) === screenshotsKey(b) &&
     a.screenshotsBlocked === b.screenshotsBlocked &&
     a.progress?.step === b.progress?.step &&
     a.progress?.text === b.progress?.text &&

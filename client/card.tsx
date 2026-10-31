@@ -22,7 +22,7 @@ import { MessageMarkdown } from "./markdown";
 import { OwnerPromptBox, useOwnerPrompts } from "./owner-prompt";
 import { RUN_LABELS, runVisual, useRunState } from "./run-status";
 import { SCREENSHOT_BLOCKED_HINT } from "../shared/screenshot";
-import { ScreenshotThumb } from "./screenshot-thumb";
+import { ScreenshotStrip } from "./screenshot-thumb";
 import { StepProgressRow, useStepProgress } from "./step-progress";
 import { countSteps } from "../shared/steps";
 import { useUpdateOnUse } from "./update";
@@ -93,7 +93,9 @@ export function BrowserPromptCard({
     settings.status === "ready" ? settings.values.showStepProgress : DEFAULT_AGENT_SETTINGS.showStepProgress;
   const showScreenshot =
     settings.status === "ready" ? settings.values.showLiveScreenshot : DEFAULT_AGENT_SETTINGS.showLiveScreenshot;
-  const { progress: stepProgress, asking, screenshot, screenshotsBlocked } = useStepProgress(
+  const thumbnailMode =
+    settings.status === "ready" ? settings.values.thumbnailMode : DEFAULT_AGENT_SETTINGS.thumbnailMode;
+  const { progress: stepProgress, asking, screenshot, screenshots, screenshotStep, screenshotsBlocked } = useStepProgress(
     runAgentId,
     totalSteps,
     runState,
@@ -379,9 +381,10 @@ export function BrowserPromptCard({
         />
       ) : null}
       {runAgentId && showScreenshot ? (
-        <ScreenshotThumb
-          source={screenshot}
-          step={stepProgress?.step ?? null}
+        <ScreenshotStrip
+          shots={screenshots}
+          latestStep={screenshotStep}
+          mode={thumbnailMode}
           theme={theme}
           onOpen={() => {
             if (!openRunScreen(runAgentId, agentTitle(title, displayTitle), true)) toast.error("Cannot open the agent from here.");

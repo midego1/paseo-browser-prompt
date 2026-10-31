@@ -1,5 +1,6 @@
 // Pure helpers for the card's live screenshot thumbnail, and for keeping screenshots out of
-// anything sent to a chat. Import-free so `node --experimental-strip-types` can load it.
+// anything sent to a chat. Imports only pure shared modules so `node --experimental-strip-types` can load it.
+import { latestStep as latestStepMarker } from "./steps.ts";
 
 /**
  * An inline Markdown image, including a <bracketed> destination, escaped brackets and parentheses in
@@ -147,15 +148,32 @@ export function isUnpaintedScreenshot(item: Item): boolean {
   return false;
 }
 
+/** Screenshots remembered per run: one path string per step, at most this many steps. */
+export const MAX_STEP_SCREENSHOTS = 20;
+
+export interface StepScreenshot {
+  /** The step whose marker preceded the screenshot; 0 when no marker came before it. */
+  step: number;
+  source: string;
+}
+
 /**
- * Tracks the latest browser screenshot in a run's timeline: the first assistant message after a
- * browser_screenshot tool call, when it is a lone image with a Paseo attachment source. Keeps one
- * reference only (the image source), never image data.
+ * Tracks a run's browser screenshots in its timeline: the first assistant message after a
+ * browser_screenshot call, when it is a lone image with a Paseo attachment source. Each one belongs
+ * to the step whose `[browser-prompt step N/M]` marker came last before it; a later screenshot in
+ * the same step replaces the earlier one. Keeps path strings only, at most MAX_STEP_SCREENSHOTS
+ * steps (the least recently captured are dropped), never image data.
+ *
+ * `total` is the card's step count, used to read markers in whole messages; a live stream that
+ * splits markers across chunks passes the step it read itself through `setStep`.
  */
-export function createScreenshotTracker() {
-  let latest: string | null = null;
+export function createScreenshotTracker(total = 0) {
   let afterScreenshot = false;
   let blocked = false;
+  let currentStep = 0;
+  /** Step -> source, in order of capture (least recent first). */
+  const byStep = new Map<number, string>();
+  let latestStepNumber: number | null = null;
   return {
     push(item: Item): void {
       if (item.type === "tool_call") {
@@ -168,21 +186,59 @@ export function createScreenshotTracker() {
         return;
       }
       // Only the first assistant message after the call, and only when it is a lone image.
-      if (afterScreenshot) {
-        const source = soleImageSource(item.text);
-        const safe = source ? safeImageSource(source) : null;
-        if (safe) latest = safe;
-      }
+      const source = afterScreenshot ? soleImageSource(item.text) : null;
+      const safe = source ? safeImageSource(source) : null;
       afterScreenshot = false;
+      if (safe) {
+        byStep.delete(currentStep);
+        byStep.set(currentStep, safe);
+        while (byStep.size > MAX_STEP_SCREENSHOTS) byStep.delete(byStep.keys().next().value!);
+        latestStepNumber = currentStep;
+        return;
+      }
+      if (total > 0) {
+        const marker = latestStepMarker(item.text, total);
+        if (marker) currentStep = marker.step;
+      }
+    },
+    /** The step a live stream read from its own buffer (markers can be split across chunks). */
+    setStep(step: number | null | undefined): void {
+      if (typeof step === "number" && step >= 1) currentStep = step;
     },
     latest(): string | null {
-      return latest;
+      return latestStepNumber === null ? null : (byStep.get(latestStepNumber) ?? null);
+    },
+    /** The step of the latest screenshot, or null when there is none. */
+    latestStep(): number | null {
+      return latestStepNumber;
+    },
+    /** One screenshot per step, in step order. */
+    steps(): StepScreenshot[] {
+      return [...byStep.entries()].sort((a, b) => a[0] - b[0]).map(([step, source]) => ({ step, source }));
     },
     /** A screenshot failed because the run's tab was not visible; the run stops taking them. */
     blocked(): boolean {
       return blocked;
     },
+    /**
+     * Keeps steps an older tracker knew that this one (a newer, shorter tail read) does not; they
+     * count as captured before this tracker's own. The cap still applies.
+     */
+    adoptOlder(older: { steps(): StepScreenshot[] }): void {
+      const mine = [...byStep.entries()];
+      byStep.clear();
+      for (const { step, source } of older.steps()) if (!mine.some(([own]) => own === step)) byStep.set(step, source);
+      for (const [step, source] of mine) byStep.set(step, source);
+      while (byStep.size > MAX_STEP_SCREENSHOTS) byStep.delete(byStep.keys().next().value!);
+    },
   };
+}
+
+/** One screenshot per step from a list of timeline items (`total` = the card's step count). */
+export function stepScreenshots(items: readonly Item[], total: number): StepScreenshot[] {
+  const tracker = createScreenshotTracker(total);
+  for (const item of items) tracker.push(item);
+  return tracker.steps();
 }
 
 /** The latest browser screenshot reference in a list of timeline items, or null. */
@@ -193,6 +249,40 @@ export function latestScreenshot(items: readonly Item[]): string | null {
 }
 
 /** Markdown the host renders as the thumbnail; the source was checked by `safeImageSource`. */
-export function screenshotMarkdown(source: string): string {
-  return `![Latest browser screenshot](${source})`;
+export function screenshotMarkdown(source: string, step?: number): string {
+  return `![${step ? `Screenshot after step ${step}` : "Latest browser screenshot"}](${source})`;
+}
+
+export type ThumbnailMode = "all" | "latest";
+export const THUMBNAIL_MODES = ["all", "latest"] as const;
+
+/** Thumbnail sizes in the card, in layout pixels. */
+export const THUMB_MIN = 140;
+export const THUMB_MAX = 180;
+export const THUMB_GAP = 8;
+export const THUMB_SINGLE_MAX = 240;
+
+export type ThumbnailLayout =
+  | { kind: "latest"; size: number }
+  | { kind: "row"; size: number }
+  | { kind: "scroll"; size: number };
+
+/**
+ * How the card shows its screenshots in `width` layout pixels:
+ * - "row": every step side by side when all fit at 140 px or more (up to 180 px each);
+ * - "scroll": a horizontal strip of 160 px thumbnails when at least two fit but not all of them,
+ *   so step order stays readable and phones can swipe it;
+ * - "latest": only the newest one (up to 240 px) when there is one screenshot, the setting asks for
+ *   it, or the card is too narrow for two.
+ */
+export function thumbnailLayout(width: number, count: number, mode: ThumbnailMode): ThumbnailLayout {
+  const single = Math.max(0, Math.min(THUMB_SINGLE_MAX, Math.floor(width)));
+  if (mode === "latest" || count <= 1 || !(width > 0)) return { kind: "latest", size: single };
+  const allFit = count * THUMB_MIN + (count - 1) * THUMB_GAP;
+  if (width >= allFit) {
+    const size = Math.min(THUMB_MAX, Math.floor((width - (count - 1) * THUMB_GAP) / count));
+    return { kind: "row", size };
+  }
+  if (width >= 2 * THUMB_MIN + THUMB_GAP) return { kind: "scroll", size: 160 };
+  return { kind: "latest", size: single };
 }

@@ -8,6 +8,14 @@
   answers open the run. Only the owner's click answers; nothing is forwarded to the chat.
 - The card's "Paseo agent needs you" status is shown in the theme's warning color.
 
+## 0.7.0 (unreleased)
+
+- One screenshot thumbnail per step on the card, with "Step N" above it and the latest highlighted
+  with an accent border. Each screenshot belongs to the step marker before it; the last one per
+  step is kept (path strings only, at most 20 steps). The layout follows the card's width: a row
+  when all fit, a horizontal scroll strip when some do, the latest alone on very narrow screens.
+- New setting **Thumbnails**: All steps (default) or Latest only. Settings schema v11.
+
 ## 0.6.6 (unreleased)
 
 - The README tour GIF is the listing's interface image: `media` in `paseo-plugin.json` and in the
