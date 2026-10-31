@@ -2,9 +2,8 @@ import type { PluginHostProps } from "@getpaseo/plugin/client";
 import { usePaseo } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useState } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Platform, Pressable, Text, View } from "react-native";
 import {
-  answersOnClick,
   isComplete,
   type OwnerPrompt,
   ownerPrompts,
@@ -13,22 +12,33 @@ import {
   questionResponse,
   selectOption,
   type Selections,
+  verifiedRun,
 } from "../shared/owner-prompt";
+
+const MONO = Platform.select({ ios: "Menlo", android: "monospace", default: "ui-monospace, Menlo, monospace" });
 
 type Theme = PluginHostProps["theme"];
 
 /**
  * The run's pending questions and permission requests, read from its snapshot while the card says
- * "needs you" (again whenever the agent changes). `answer` sends the owner's choice with the SDK's
- * respondToPermission; the card calls it only from the owner's own click.
+ * "needs you" (again whenever the agent changes). They are offered for answering only when that
+ * same snapshot shows this card's run (`verifiedRun`). `answer` sends the owner's choice with the
+ * SDK's respondToPermission; the card calls it only from the owner's own click.
  */
-export function useOwnerPrompts(agentId: string | null, needsYou: boolean, version: string | null) {
+export function useOwnerPrompts(
+  agentId: string | null,
+  needsYou: boolean,
+  version: string | null,
+  card: { sourceAgentId: string; cardId: string },
+) {
   const paseo = usePaseo();
   const [prompts, setPrompts] = useState<OwnerPrompt[]>([]);
+  const [verified, setVerified] = useState(false);
   const [reload, setReload] = useState(0);
   useEffect(() => {
     if (!agentId || !needsYou) {
       setPrompts([]);
+      setVerified(false);
       return;
     }
     let cancelled = false;
@@ -37,14 +47,17 @@ export function useOwnerPrompts(agentId: string | null, needsYou: boolean, versi
       .refresh()
       .then(
         (result) => {
-          if (!cancelled) setPrompts(ownerPrompts(result?.agent.pendingPermissions ?? []));
+          if (cancelled) return;
+          const ok = verifiedRun(result?.agent.labels, card.sourceAgentId, card.cardId);
+          setVerified(ok);
+          setPrompts(ok ? ownerPrompts(result?.agent.pendingPermissions ?? []) : []);
         },
         () => undefined,
       );
     return () => {
       cancelled = true;
     };
-  }, [agentId, needsYou, version, reload, paseo]);
+  }, [agentId, needsYou, version, reload, paseo, card.sourceAgentId, card.cardId]);
 
   async function answer(requestId: string, response: PermissionResponse) {
     if (!agentId) return;
@@ -55,7 +68,7 @@ export function useOwnerPrompts(agentId: string | null, needsYou: boolean, versi
       setReload((value) => value + 1);
     }
   }
-  return { prompts, answer };
+  return { prompts, verified, answer };
 }
 
 function Chip({
@@ -148,7 +161,6 @@ function QuestionPrompt({
   onOpen: () => void;
 }) {
   const [selections, setSelections] = useState<Selections>({});
-  const immediate = answersOnClick(prompt);
   const allowOther = prompt.questions.some((question) => question.allowOther || question.options.length === 0);
   return (
     <View style={{ gap: 10 }}>
@@ -169,32 +181,24 @@ function QuestionPrompt({
                 selected={(selections[index] ?? []).includes(option.label)}
                 disabled={busy}
                 theme={theme}
-                onPress={() => {
-                  const next = selectOption(prompt, selections, index, option.label);
-                  setSelections(next);
-                  if (immediate) {
-                    const response = questionResponse(prompt, next);
-                    if (response) onAnswer(response);
-                  }
-                }}
+                onPress={() => setSelections(selectOption(prompt, selections, index, option.label))}
               />
             ))}
           </View>
         </View>
       ))}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-        {!immediate ? (
-          <Button
-            label="Send answer"
-            primary
-            disabled={busy || !isComplete(prompt, selections)}
-            theme={theme}
-            onPress={() => {
-              const response = questionResponse(prompt, selections);
-              if (response) onAnswer(response);
-            }}
-          />
-        ) : null}
+        {/* A tap only selects; Send confirms, so a mis-tap never answers. */}
+        <Button
+          label="Send answer"
+          primary
+          disabled={busy || !isComplete(prompt, selections)}
+          theme={theme}
+          onPress={() => {
+            const response = questionResponse(prompt, selections);
+            if (response) onAnswer(response);
+          }}
+        />
         <Button label={allowOther ? "Other answer: open run" : "Open run"} theme={theme} onPress={onOpen} />
       </View>
     </View>
@@ -222,6 +226,42 @@ function PermissionPrompt({
           {prompt.description}
         </Text>
       ) : null}
+      {prompt.summary.map((line) =>
+        line.block ? (
+          <View key={`${line.label}:${line.value}`} style={{ gap: 2 }}>
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{line.label}</Text>
+            <Text
+              selectable
+              style={{
+                color: theme.colors.foreground,
+                fontSize: 12,
+                lineHeight: 17,
+                fontFamily: MONO,
+                backgroundColor: theme.colors.surface1,
+                borderRadius: 6,
+                padding: 8,
+              }}
+            >
+              {line.value}
+            </Text>
+          </View>
+        ) : (
+          <Text key={`${line.label}:${line.value}`} selectable style={{ color: theme.colors.foreground, fontSize: 13, lineHeight: 18 }}>
+            <Text style={{ color: theme.colors.foregroundMuted }}>{line.label}: </Text>
+            {line.value}
+          </Text>
+        ),
+      )}
+      {prompt.plan ? (
+        <Text selectable style={{ color: theme.colors.foreground, fontSize: 13, lineHeight: 19 }}>
+          {prompt.plan}
+        </Text>
+      ) : null}
+      {!prompt.canAllow ? (
+        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+          The card cannot show what this would allow, so only Deny is offered here. Open the run to see it.
+        </Text>
+      ) : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         {prompt.actions.map((action) => (
           <Button
@@ -246,11 +286,14 @@ function PermissionPrompt({
  */
 export function OwnerPromptBox({
   prompts,
+  verified,
   theme,
   onAnswer,
   onOpen,
 }: {
   prompts: OwnerPrompt[];
+  /** The snapshot the requests came from shows this card's run; otherwise no answer buttons. */
+  verified: boolean;
   theme: Theme;
   onAnswer: (requestId: string, response: PermissionResponse) => Promise<void>;
   onOpen: () => void;
@@ -281,13 +324,13 @@ export function OwnerPromptBox({
         <Icon name="CircleAlert" size={16} color={theme.colors.statusWarning} />
         <Text style={{ color: theme.colors.statusWarning, fontSize: 14, fontWeight: "700" }}>The agent needs you</Text>
       </View>
-      {prompts.length === 0 ? (
+      {!verified || prompts.length === 0 ? (
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
           <Text style={{ color: theme.colors.foregroundMuted, fontSize: 13 }}>It is waiting for your answer in the run.</Text>
           <Button label="Answer in run" primary theme={theme} onPress={onOpen} />
         </View>
       ) : null}
-      {prompts.map((prompt) =>
+      {(verified ? prompts : []).map((prompt) =>
         prompt.kind === "question" ? (
           <QuestionPrompt
             key={prompt.requestId}

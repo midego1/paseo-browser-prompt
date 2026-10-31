@@ -3,9 +3,12 @@
 ## 0.8.0 (unreleased)
 
 - Answer on the card: when the run waits for the owner (AskUserQuestion or a permission request),
-  the card shows the question and its options, or the permission and its actions, in a
-  warning-bordered box and sends the owner's click with Paseo's `respondToPermission`. Free-text
-  answers open the run. Only the owner's click answers; nothing is forwarded to the chat.
+  the card shows the question and its options, or the permission with a summary of what it would
+  do (tool, command, URL, element, typed value, files, plan text), in a warning-bordered box and
+  sends the owner's choice with Paseo's `respondToPermission` after Send. Allow is offered only when
+  the details can be shown; buttons appear only for this card's verified run. Free-text answers open
+  the run. Only the owner's click answers; nothing is forwarded to the chat.
+- `thumbnailLayout` ignores non-finite widths and counts.
 - The card's "Paseo agent needs you" status is shown in the theme's warning color.
 
 ## 0.7.0 (unreleased)

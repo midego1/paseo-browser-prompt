@@ -276,8 +276,9 @@ export type ThumbnailLayout =
  *   it, or the card is too narrow for two.
  */
 export function thumbnailLayout(width: number, count: number, mode: ThumbnailMode): ThumbnailLayout {
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(count)) return { kind: "latest", size: 0 };
   const single = Math.max(0, Math.min(THUMB_SINGLE_MAX, Math.floor(width)));
-  if (mode === "latest" || count <= 1 || !(width > 0)) return { kind: "latest", size: single };
+  if (mode === "latest" || count <= 1) return { kind: "latest", size: single };
   const allFit = count * THUMB_MIN + (count - 1) * THUMB_GAP;
   if (width >= allFit) {
     const size = Math.min(THUMB_MAX, Math.floor((width - (count - 1) * THUMB_GAP) / count));

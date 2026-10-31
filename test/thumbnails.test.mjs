@@ -121,6 +121,9 @@ test("layout: a row when all fit, a scroll strip when some do, the latest alone 
   assert.deepEqual(thumbnailLayout(900, 1, "all"), { kind: "latest", size: 240 }, "one screenshot");
   assert.deepEqual(thumbnailLayout(900, 5, "latest"), { kind: "latest", size: 240 }, "setting: latest only");
   assert.deepEqual(thumbnailLayout(0, 5, "all"), { kind: "latest", size: 0 }, "not measured yet");
+  for (const [width, count] of [[Number.NaN, 3], [Number.POSITIVE_INFINITY, 3], [-5, 3], [900, Number.NaN], [900, Number.POSITIVE_INFINITY]]) {
+    assert.deepEqual(thumbnailLayout(width, count, "all"), { kind: "latest", size: 0 }, `${width} x ${count}`);
+  }
 });
 
 test("thumbnail alt text names the step", () => {

@@ -333,12 +333,20 @@ warning-bordered box:
 
 - `useOwnerPrompts` (`client/owner-prompt.tsx`) reads the run's `pendingPermissions` with
   `paseo.agents.ref(run).refresh()` while the card is in "needs you", again whenever the agent's
-  snapshot changes. `ownerPrompts` (`shared/owner-prompt.ts`) turns them into prompts: questions
-  with their header, text and options (at most 4 questions and 8 options; text NFKC-normalized,
-  invisible and control characters removed, capped), or permissions with their actions (Allow and
-  Deny when the request has none).
-- The owner answers with a click. One single-choice question answers on the click; several
-  questions or multiple choice use **Send answer**. The answer goes to the run with the SDK's
+  snapshot changes. Answer buttons appear only when that same snapshot carries this card's run
+  labels (`verifiedRun`: `browser-prompt: run`, this card's chat as source, this card's id);
+  otherwise the box offers **Answer in run** only. `ownerPrompts` (`shared/owner-prompt.ts`) turns
+  the requests into prompts: questions with their header, text and options (at most 4 questions
+  and 8 options; text NFKC-normalized, invisible and control characters removed, capped), or
+  permissions. Claude permission requests have no title or description, so the card shows a
+  bounded plain-text summary of the known fields in the request's input and Paseo's tool-call
+  detail (`permissionSummary`: the tool name humanized, command and script as blocks, URL, element,
+  value or typed text, key, files, search, purpose; at most 8 lines, values capped at 200 or 400
+  characters) and, for ExitPlanMode, the plan text with the plan's actions in full. When the card
+  cannot show what would be allowed (no plan text, no title, description or known field), it
+  offers only Deny and **Open run**.
+- The owner answers with clicks: a tap on an option only selects it, and **Send answer** sends it,
+  so a mis-tap never answers. The answer goes to the run with the SDK's
   `respondToPermission`: questions as `{ behavior: "allow", updatedInput: { answers } }` keyed by
   each question's full text (several choices joined with ", "), permissions with the pressed
   action's behavior and `selectedActionId`. **Other answer: open run** / **Open run** opens the run

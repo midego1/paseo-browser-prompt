@@ -87,7 +87,8 @@ export function BrowserPromptCard({
     updatedAt: runUpdatedAt,
   } = useRunState(runAgentId, localRun !== null && localRun === runAgentId);
   // The run's pending question or permission, answered here only by the owner's click.
-  const owner = useOwnerPrompts(runAgentId, runState === "needs-input", runUpdatedAt);
+  const ownerCard = useMemo(() => ({ sourceAgentId: agentId, cardId }), [agentId, cardId]);
+  const owner = useOwnerPrompts(runAgentId, runState === "needs-input", runUpdatedAt, ownerCard);
   const totalSteps = useMemo(() => countSteps(text), [text]);
   const showSteps =
     settings.status === "ready" ? settings.values.showStepProgress : DEFAULT_AGENT_SETTINGS.showStepProgress;
@@ -367,6 +368,7 @@ export function BrowserPromptCard({
       {runAgentId && runState === "needs-input" ? (
         <OwnerPromptBox
           prompts={owner.prompts}
+          verified={owner.verified}
           theme={theme}
           onAnswer={async (requestId, response) => {
             try {

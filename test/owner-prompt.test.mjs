@@ -4,9 +4,12 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { runLabels } from "../shared/report-back.ts";
 import {
-  answersOnClick,
   cleanPromptText,
+  humanizeToolName,
+  permissionSummary,
+  verifiedRun,
   isComplete,
   MAX_OPTIONS,
   MAX_QUESTION_TEXT,
@@ -61,7 +64,7 @@ test("a question request becomes a card prompt", () => {
   });
 });
 
-test("permission requests get their actions, or Allow and Deny", () => {
+test("provider-titled permissions keep their actions; a missing action list gets Allow and Deny", () => {
   const [withActions, plain] = ownerPrompts([
     {
       id: "perm-2",
@@ -75,22 +78,113 @@ test("permission requests get their actions, or Allow and Deny", () => {
         { id: "weird", label: "Weird", behavior: "maybe" },
       ],
     },
-    { id: "perm-3", kind: "tool", name: "browser_fill" },
+    { id: "perm-3", kind: "tool", name: "browser_fill", input: { ref: "e12", value: "hello" } },
   ]);
-  assert.deepEqual(withActions, {
-    kind: "permission",
-    requestId: "perm-2",
-    title: "Click “Delete project”",
-    description: "On example.com settings",
-    actions: [
-      { id: "allow-once", label: "Allow once", behavior: "allow" },
-      { id: "deny", label: "Deny", behavior: "deny" },
-    ],
-  });
+  assert.equal(withActions.title, "Click “Delete project”");
+  assert.equal(withActions.canAllow, true);
+  assert.deepEqual(withActions.actions, [
+    { id: "allow-once", label: "Allow once", behavior: "allow" },
+    { id: "deny", label: "Deny", behavior: "deny" },
+  ]);
   assert.deepEqual(plain.actions.map((action) => action.label), ["Allow", "Deny"]);
-  assert.equal(plain.title, "browser_fill");
+  assert.equal(plain.title, "Browser fill");
 });
 
+// Realistic Claude permission requests: no title or description, the arguments in `input`, Paseo's
+// tool-call detail in `detail` (see the Claude provider's handlePermissionRequest).
+const claude = (name, input, extra = {}) => ({ id: `permission-${name}`, provider: "claude", name, kind: "tool", input, ...extra });
+
+test("Claude browser tools: the card shows what would be done", () => {
+  const [fill, click, navigate] = ownerPrompts([
+    claude("mcp__paseo__browser_fill", { ref: "e42", value: "release-notes-v2", browserId: "b1" }),
+    claude("mcp__paseo__browser_click", { ref: "e7", browserId: "b1" }),
+    claude("mcp__paseo__browser_navigate", { url: "https://example.com/settings", browserId: "b1" }),
+  ]);
+  assert.deepEqual(fill.summary, [
+    { label: "Tool", value: "Browser fill", block: false },
+    { label: "Element", value: "e42", block: false },
+    { label: "Value", value: "release-notes-v2", block: false },
+  ]);
+  assert.equal(fill.canAllow, true);
+  assert.deepEqual(click.summary.map((line) => `${line.label}: ${line.value}`), ["Tool: Browser click", "Element: e7"]);
+  assert.deepEqual(navigate.summary.map((line) => `${line.label}: ${line.value}`), ["Tool: Browser navigate", "URL: https://example.com/settings"]);
+  assert.ok(!fill.summary.some((line) => /b1/.test(line.value)), "browserId is not shown");
+});
+
+test("Claude Bash: the command from the input or the shell detail, as a block", () => {
+  const [bash] = ownerPrompts([
+    claude("Bash", { command: "git push origin main\nrm -rf build", description: "Push the release" }, { detail: { type: "shell", command: "git push origin main\nrm -rf build" } }),
+  ]);
+  assert.deepEqual(bash.summary, [
+    { label: "Tool", value: "Bash", block: false },
+    { label: "Command", value: "git push origin main\nrm -rf build", block: true },
+    { label: "Purpose", value: "Push the release", block: false },
+  ]);
+  const [fromDetail] = ownerPrompts([claude("Bash", {}, { detail: { type: "shell", command: "ls" } })]);
+  assert.deepEqual(fromDetail.summary.at(-1), { label: "Command", value: "ls", block: true });
+  assert.equal(fromDetail.canAllow, true);
+});
+
+test("summaries are bounded: values capped, at most 8 lines, control characters removed", () => {
+  const long = "x".repeat(1000);
+  const lines = permissionSummary(claude("Bash", { command: `echo ${long}`, url: long, text: "a\u0007b\u200bc", key: "Enter", value: "v", pattern: "p", path: "/tmp/a", function: "() => 1", description: "d" }));
+  assert.ok(lines.length <= 8);
+  assert.ok(lines.find((line) => line.label === "Command").value.length <= 400);
+  assert.ok(lines.find((line) => line.label === "URL").value.length <= 200);
+  assert.equal(lines.find((line) => line.label === "Text").value, "a bc".replace(" ", " "));
+});
+
+test("no usable detail: only Deny (and Open run), never Allow", () => {
+  const [bare] = ownerPrompts([claude("mcp__paseo__browser_snapshot", { browserId: "b1" }, { actions: [{ id: "allow", label: "Allow", behavior: "allow" }] })]);
+  assert.equal(bare.canAllow, false);
+  assert.deepEqual(bare.actions, [{ id: null, label: "Deny", behavior: "deny" }]);
+  const [nothing] = ownerPrompts([{ id: "p", kind: "tool" }]);
+  assert.equal(nothing.canAllow, false);
+  assert.ok(nothing.actions.every((action) => action.behavior === "deny"));
+});
+
+test("Claude ExitPlanMode: the plan text and its actions in full", () => {
+  const planText = "1. Open the settings page\n2. Rename the project\n3. Save";
+  const [plan] = ownerPrompts([
+    {
+      id: "permission-plan",
+      provider: "claude",
+      name: "ExitPlanMode",
+      kind: "plan",
+      input: { plan: planText },
+      metadata: { planText, toolUseId: "toolu_1" },
+      actions: [
+        { id: "reject", label: "Reject", behavior: "deny" },
+        { id: "implement", label: "Implement", behavior: "allow" },
+        { id: "implement_resume", label: "Implement with Auto mode and keep going without asking each time", behavior: "allow" },
+      ],
+    },
+  ]);
+  assert.equal(plan.title, "Plan");
+  assert.equal(plan.plan, planText);
+  assert.equal(plan.canAllow, true);
+  assert.deepEqual(plan.summary, []);
+  assert.equal(plan.actions[2].label, "Implement with Auto mode and keep going without asking each time", "not cut");
+  const [empty] = ownerPrompts([{ id: "p2", kind: "plan", name: "ExitPlanMode", actions: plan.actions }]);
+  assert.equal(empty.canAllow, false, "no plan text: no Implement on the card");
+  assert.deepEqual(empty.actions.map((action) => action.id), ["reject"]);
+});
+
+test("tool names are humanized", () => {
+  assert.equal(humanizeToolName("mcp__paseo__browser_fill"), "Browser fill");
+  assert.equal(humanizeToolName("mcp__my_server__do_thing"), "Do thing");
+  assert.equal(humanizeToolName("Bash"), "Bash");
+  assert.equal(humanizeToolName("WebFetch"), "Web Fetch");
+  assert.equal(humanizeToolName(undefined), "");
+});
+
+test("answer buttons only for this card's run, from the same snapshot", () => {
+  assert.equal(verifiedRun(runLabels("chat-1", "card-1"), "chat-1", "card-1"), true);
+  assert.equal(verifiedRun(runLabels("chat-2", "card-1"), "chat-1", "card-1"), false, "another chat's run");
+  assert.equal(verifiedRun(runLabels("chat-1", "card-2"), "chat-1", "card-1"), false, "another card's run");
+  assert.equal(verifiedRun({ "browser-prompt-source": "chat-1", "browser-prompt-card": "card-1" }, "chat-1", "card-1"), false, "no run label");
+  assert.equal(verifiedRun(null, "chat-1", "card-1"), false);
+});
 test("unusable requests are left to the run view; counts are capped", () => {
   assert.deepEqual(ownerPrompts([question({ id: "" }), question({ input: { questions: [] } }), question({ input: null })]), []);
   assert.deepEqual(ownerPrompts(null), []);
@@ -117,17 +211,16 @@ test("text from the run is cleaned and capped for display; the answer key stays 
   assert.equal(prompt.questions[0].key, long, "Paseo matches answers on the full question text");
 });
 
-test("one single-choice question answers on click; others need Send", () => {
+test("questions never answer on a tap: every question needs a selection, then Send", () => {
   const [single] = ownerPrompts([question()]);
-  assert.equal(answersOnClick(single), true);
-  const [multi] = ownerPrompts([question({ input: { questions: [{ question: "Pick", options: [{ label: "A" }], multiSelect: true }] } })]);
-  assert.equal(answersOnClick(multi), false);
-  const [two] = ownerPrompts([question({ input: { questions: [{ question: "One?", options: [{ label: "A" }] }, { question: "Two?", options: [{ label: "B" }] }] } })]);
-  assert.equal(answersOnClick(two), false);
-  const [free] = ownerPrompts([question({ input: { questions: [{ question: "Type the code?" }] } })]);
-  assert.equal(answersOnClick(free), false, "no options: only Open run");
+  assert.equal(isComplete(single, {}), false);
+  assert.equal(questionResponse(single, {}), null, "nothing is sent before a choice and Send");
+  const selected = selectOption(single, {}, 0, "Top");
+  assert.deepEqual(questionResponse(single, selected), { behavior: "allow", updatedInput: { answers: { "Which of the two Save buttons should I use?": "Top" } } });
+  const screen = readFileSync(new URL("../client/owner-prompt.tsx", import.meta.url), "utf8");
+  assert.match(screen, /onPress=\{\(\) => setSelections\(selectOption\(/, "a tap on an option only selects it");
+  assert.match(screen, /label="Send answer"/);
 });
-
 test("selections: single choice replaces, multiple choice toggles, unknown labels are ignored", () => {
   const [single] = ownerPrompts([question()]);
   let selections = selectOption(single, {}, 0, "Top");
