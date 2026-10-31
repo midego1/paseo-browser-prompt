@@ -9,7 +9,7 @@ import {
   type ReportMode,
   type ReportOutcome,
 } from "../shared/report-back.ts";
-import { buildQuestionMessage, buildQuestionRedirect, parseQuestion, type RedirectReason } from "../shared/talk.ts";
+import { buildQuestionMessage, buildQuestionRedirect, MAX_REDIRECTS, parseQuestion, type RedirectReason } from "../shared/talk.ts";
 
 /** Timeline items read from the end of the browser agent's chat to find its report. */
 export const REPORT_TAIL_ITEMS = 60;
@@ -26,11 +26,7 @@ export const NOT_A_RUN_TTL_MS = 60 * 1000;
 /** How long to wait for the card to record a new run in host settings. */
 export const RECORD_WAIT_MS = 10 * 1000;
 const RECORD_POLL_MS = 500;
-/**
- * "Ask the owner instead" notices one run can get. Past this, a question turn is handled as the
- * run's report, so a run that keeps asking cannot loop unattended or suppress its report.
- */
-export const MAX_REDIRECTS = 2;
+export { MAX_REDIRECTS };
 /** Run ids remembered (and persisted) as already reported. */
 export const MAX_REPORTED = 200;
 

@@ -237,10 +237,18 @@ With **Show step progress** on (default), the card counts its steps (`countSteps
 each numbered step, write one plain line `[browser-prompt step N/M] <at most 60 characters>`. It is
 ordinary assistant text, not a message to the chat, and does not end the turn.
 
-- The card reads the markers without polling: one tail read of the run's timeline per run
-  (`timeline.refetch`, last 40 items), then the run's live timeline stream (`timeline.subscribe`)
-  only while it is starting, running or needs you. `useAgent` (what the card uses for status) has no
-  message text, so this is the cheapest source.
+- The card reads the markers without polling (`useAgent`, the card's status source, has no message
+  text): one tail read of the run's timeline (`timeline.refetch`, last 40 items) when the card shows
+  the run, also for finished runs so a waiting question can be told from a report (skipped for
+  stopped runs; redone if a dependency change cancels it); the live timeline stream
+  (`timeline.subscribe`) only while the agent's own status is running or initializing; and one more
+  tail read when a live run settles, because its idle status can arrive before the stream's
+  `turn_completed`. An idle run that this card session did not just start is shown as done.
+- The pure `createRunTracker` (`shared/run-tracker.ts`) holds this state: the latest marker (a new
+  message id starts a new line, so a marker is never glued to the previous message) and whether the
+  latest turn's final message is a question still waiting for the chat. After `MAX_REDIRECTS`
+  redirect notices in the run's timeline a question turn is the run's report, so it is not shown
+  as waiting.
 - `latestStep` takes the last well-formed marker at a line start; N is clamped to 1..M, the card's own
   count is M (the run's M is ignored), malformed markers are skipped. The text is NFKC-normalized,
   stripped of control and invisible characters, kept on one line and cut at 60 characters. It is

@@ -7,6 +7,8 @@ import { createReportBack } from "../server/report-back.ts";
 import {
   buildAgentPrompt,
   DEFAULT_AGENT_SETTINGS,
+  liveSubscription,
+  runStateFrom,
   MAX_STEP_TEXT,
   QUESTION_MARKER,
   resolveAgentConfig,
@@ -17,7 +19,8 @@ import { runLabels } from "../shared/report-back.ts";
 import { migratePreferences } from "../shared/settings-migrate.ts";
 import { stepProgressView } from "../shared/step-view.ts";
 import { cleanStepText, countSteps, latestStep, stripLeadingStepMarkers } from "../shared/steps.ts";
-import { parseQuestion } from "../shared/talk.ts";
+import { createRunTracker } from "../shared/run-tracker.ts";
+import { buildQuestionRedirect, MAX_REDIRECTS, parseQuestion } from "../shared/talk.ts";
 
 test("step count: numbered lines, else non-empty lines", () => {
   const card = [
@@ -161,4 +164,96 @@ test("step lines before a question still route it to the chat, not as the report
   const w = world(`[browser-prompt step 1/2] Looking for Save\n${QUESTION_MARKER} Which of the two Save buttons?`);
   assert.equal(await createReportBack(options).onTurnEnded(ended, w.paseo), "question-sent");
   assert.match(w.sent[0].text, /<browser-agent-question>\nWhich of the two Save buttons\?\n<\/browser-agent-question>/);
+});
+
+// ---- run tracker (card state) ----
+
+const assistant = (text, messageId) => ({ type: "timeline", item: { type: "assistant_message", text, ...(messageId ? { messageId } : {}) } });
+const user = (text) => ({ type: "user_message", text });
+
+test("1: only a running or initializing agent is followed live; an old idle run is done", () => {
+  for (const status of ["running", "initializing"]) assert.equal(liveSubscription(status), true, status);
+  for (const status of ["idle", "error", "closed", null, undefined, "unknown"]) assert.equal(liveSubscription(status), false, String(status));
+  assert.equal(runStateFrom({ status: "idle", attentionReason: null }, false), "done", "old idle run: done, not starting");
+  assert.equal(runStateFrom({ status: "idle", attentionReason: null }, false, true), "starting", "only when started in this card session");
+  assert.deepEqual(stepProgressView({ step: 2, total: 4, text: "x" }, 4, runStateFrom({ status: "idle", attentionReason: null }, false)), {
+    label: "Step 4 of 4 · done ✓",
+    step: 4,
+    fraction: 1,
+    tone: "success",
+  });
+});
+
+test("3: a read after the run settles decides between waiting for the chat and done", () => {
+  const tracker = createRunTracker(3, true);
+  // The stream ended before turn_completed arrived: no waiting state yet.
+  tracker.event({ type: "turn_started" });
+  tracker.event(assistant(`${QUESTION_MARKER} Which Save button?`, "m1"));
+  assert.equal(tracker.view().asking, false);
+  tracker.history([user("go"), { type: "assistant_message", text: "[browser-prompt step 2/3] Choosing", messageId: "m0" }, { type: "tool_call" }, { type: "assistant_message", text: `${QUESTION_MARKER} Which Save button?`, messageId: "m1" }]);
+  assert.deepEqual(tracker.view(), { progress: { step: 2, total: 3, text: "Choosing" }, asking: true });
+  tracker.resumed();
+  assert.equal(tracker.view().asking, false, "an answer made it run again");
+  tracker.history([user("go"), { type: "assistant_message", text: "Done: Example Domain.", messageId: "m2" }]);
+  assert.equal(tracker.view().asking, false, "a final report is not waiting");
+});
+
+test("the turn's final message decides, so narration before a question does not hide it", () => {
+  const tracker = createRunTracker(3, true);
+  tracker.event({ type: "turn_started" });
+  tracker.event(assistant("I opened the page and see two Save buttons.", "m1"));
+  tracker.event({ type: "timeline", item: { type: "tool_call" } });
+  tracker.event(assistant(`${QUESTION_MARKER} Which one?`, "m2"));
+  tracker.event({ type: "turn_completed" });
+  assert.equal(tracker.view().asking, true);
+  tracker.event({ type: "turn_started" });
+  assert.equal(tracker.view().asking, false);
+  tracker.event(assistant("Done.", "m3"));
+  tracker.event({ type: "turn_completed" });
+  assert.equal(tracker.view().asking, false);
+});
+
+test("4: a marker at the start of a new message is not glued to the previous one", () => {
+  const tracker = createRunTracker(4, true);
+  tracker.event(assistant("Opened the page", "m1"));
+  // Different message id, chunk does not start with the marker prefix (leading text split oddly).
+  tracker.event(assistant("[browser-prompt step 2/4] Reading", "m2"));
+  assert.deepEqual(tracker.view().progress, { step: 2, total: 4, text: "Reading" });
+  const split = createRunTracker(4, true);
+  split.event(assistant("Narration", "a"));
+  split.event(assistant("[browser-prompt ", "b"));
+  split.event(assistant("step 3/4] Saving", "b"));
+  assert.deepEqual(split.view().progress, { step: 3, total: 4, text: "Saving" }, "chunks of one message are not split");
+  const sameMessage = createRunTracker(4, true);
+  sameMessage.event(assistant("Narration then [browser-prompt step 3/4] inline", "a"));
+  assert.equal(sameMessage.view().progress, null, "inline mentions are not markers");
+});
+
+test("5: after the redirect cap a question turn is the report, so the card is done, not waiting", () => {
+  const redirect = buildQuestionRedirect("talk-off", 0);
+  const history = (redirects) => [
+    ...Array.from({ length: redirects }, () => user(redirect)),
+    user("go"),
+    { type: "assistant_message", text: `${QUESTION_MARKER} Which one?`, messageId: "m" },
+  ];
+  const tracker = createRunTracker(2, true);
+  tracker.history(history(MAX_REDIRECTS - 1));
+  assert.equal(tracker.view().asking, true, "still waiting while the server would redirect");
+  tracker.history(history(MAX_REDIRECTS));
+  assert.equal(tracker.view().asking, false, "fall-through: handled as the report");
+
+  const live = createRunTracker(2, true);
+  for (let i = 0; i < MAX_REDIRECTS; i++) {
+    live.event({ type: "turn_started" });
+    live.event({ type: "timeline", item: user(redirect) });
+    live.event(assistant(`${QUESTION_MARKER} Which one?`, `q${i}`));
+    live.event({ type: "turn_completed" });
+  }
+  assert.equal(live.view().asking, false, "the stream counts redirect notices too");
+});
+
+test("with step progress off the tracker still tracks waiting, without steps", () => {
+  const tracker = createRunTracker(2, false);
+  tracker.history([user("go"), { type: "assistant_message", text: `[browser-prompt step 1/2] x\n${QUESTION_MARKER} Q?` }]);
+  assert.deepEqual(tracker.view(), { progress: null, asking: true });
 });

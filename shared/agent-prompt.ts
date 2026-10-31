@@ -284,6 +284,7 @@ export type RunState = "starting" | "running" | "needs-input" | "done" | "failed
 export function runStateFrom(
   snapshot: { status: string; attentionReason: string | null } | null,
   seenRunning: boolean,
+  startedHere = false,
 ): RunState {
   if (!snapshot) return "unknown";
   if (snapshot.status === "error") return "failed";
@@ -293,8 +294,18 @@ export function runStateFrom(
   if (snapshot.status === "initializing") return "starting";
   if (snapshot.status === "idle") {
     if (snapshot.attentionReason === "error") return "failed";
-    if (snapshot.attentionReason === "finished" || seenRunning) return "done";
+    // Idle before its first turn only happens right after this card session started it; any
+    // other idle run (an old one, or one whose attention was cleared) is done.
+    if (snapshot.attentionReason === "finished" || seenRunning || !startedHere) return "done";
     return "starting";
   }
   return "unknown";
+}
+
+/**
+ * Whether the card follows a run's live timeline: only while the agent itself is running or
+ * initializing. An idle, failed or closed agent gets no subscription.
+ */
+export function liveSubscription(status: string | null | undefined): boolean {
+  return status === "running" || status === "initializing";
 }

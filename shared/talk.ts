@@ -57,6 +57,14 @@ export function buildQuestionMessage(input: {
   ].join("\n");
 }
 
+/** Start of the notice that sends a run back to the owner (see `buildQuestionRedirect`). */
+export const REDIRECT_PREFIX = "[browser-prompt] Your question was not forwarded to the chat";
+/**
+ * "Ask the owner instead" notices one run can get. Past this, a question turn is handled as the
+ * run's report, so a run that keeps asking cannot loop unattended or suppress its report.
+ */
+export const MAX_REDIRECTS = 2;
+
 export type RedirectReason = "talk-off" | "limit" | "chat-unavailable" | "chat-busy";
 
 const REASONS: Record<RedirectReason, (max: number) => string> = {
@@ -69,7 +77,7 @@ const REASONS: Record<RedirectReason, (max: number) => string> = {
 /** Tells the run its question did not reach the chat, so it asks the owner instead. */
 export function buildQuestionRedirect(reason: RedirectReason, max: number): string {
   return (
-    `[browser-prompt] Your question was not forwarded to the chat: ${REASONS[reason](max)}. ` +
+    `${REDIRECT_PREFIX}: ${REASONS[reason](max)}. ` +
     "Ask the owner with AskUserQuestion instead, or continue without the answer if the steps allow it. Do not end your turn with another question for the chat."
   );
 }

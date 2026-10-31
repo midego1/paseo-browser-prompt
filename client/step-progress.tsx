@@ -2,106 +2,128 @@ import type { PluginHostProps } from "@getpaseo/plugin/client";
 import { usePaseo } from "@getpaseo/plugin/client";
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import type { RunState } from "../shared/agent-prompt";
-import { finalAssistantText } from "../shared/report-back";
-import { latestStep, type StepProgress } from "../shared/steps";
-import { parseQuestion } from "../shared/talk";
+import { liveSubscription, type RunState } from "../shared/agent-prompt";
+import { createRunTracker, type RunTracker, type RunView } from "../shared/run-tracker";
 import { stepProgressView } from "../shared/step-view";
+import type { StepProgress } from "../shared/steps";
 
-/** Assistant text kept from the live stream to find the latest marker. */
-const STREAM_BUFFER = 4000;
-const LIVE_STATES: readonly RunState[] = ["starting", "running", "needs-input", "unknown"];
+const EMPTY: RunView = { progress: null, asking: false };
 
-export interface RunProgress {
-  progress: StepProgress | null;
-  /** The run's latest turn ended with a question for the chat: it waits for the answer. */
-  asking: boolean;
+function sameView(a: RunView, b: RunView): boolean {
+  return (
+    a.asking === b.asking &&
+    a.progress?.step === b.progress?.step &&
+    a.progress?.text === b.progress?.text &&
+    (a.progress === null) === (b.progress === null)
+  );
 }
 
 /**
- * The run's latest `[browser-prompt step N/M]` marker, and whether its latest turn ended with a
- * question for the chat. No polling: one tail read of the run's timeline per run (skipped once it is
- * done), then the live timeline stream only while the run is active. `useAgent` gives status but
- * no text, so this is the cheapest source of the markers.
+ * The run's latest `[browser-prompt step N/M]` marker, and whether its latest turn is a question
+ * still waiting for the chat. `useAgent` (the status source) has no message text, so markers come
+ * from the run's timeline, without polling:
+ * - one tail read when the card shows the run (also for finished runs, to tell a waiting question
+ *   from a report; skipped for stopped runs, redone if a dependency change cancels it),
+ * - the live timeline stream only while the agent's own status is running or initializing,
+ * - one more tail read when a live run settles, since its idle status can arrive before the stream's
+ *   turn_completed.
  */
-export function useStepProgress(agentId: string | null, total: number, state: RunState, enabled: boolean): RunProgress {
+export function useStepProgress(
+  agentId: string | null,
+  total: number,
+  state: RunState,
+  status: string | null,
+  showSteps: boolean,
+): RunView {
   const paseo = usePaseo();
-  const [progress, setProgress] = useState<StepProgress | null>(null);
-  const [asking, setAsking] = useState(false);
+  const tracker = useRef<RunTracker | null>(null);
   const fetchedFor = useRef<string | null>(null);
-  const live = !!agentId && LIVE_STATES.includes(state);
-  // Read once per run, also when done: the latest turn may be a question waiting for the chat.
-  const wantsHistory = !!agentId && state !== "stopped";
+  const wasLive = useRef(false);
+  const [view, setView] = useState<RunView>(EMPTY);
+  const live = !!agentId && liveSubscription(status);
+  const stopped = state === "stopped";
 
-  useEffect(() => {
-    setProgress(null);
-    setAsking(false);
-    fetchedFor.current = null;
-  }, [agentId]);
+  const publish = () => {
+    const next = tracker.current?.view() ?? EMPTY;
+    setView((current) => (sameView(current, next) ? current : next));
+  };
 
-  useEffect(() => {
-    if (state === "running" || state === "starting") setAsking(false);
-  }, [state]);
-
-  useEffect(() => {
-    if (!wantsHistory || !agentId || fetchedFor.current === agentId) return;
-    fetchedFor.current = agentId;
+  const readTail = (id: string) => {
     let cancelled = false;
+    let settled = false;
     void paseo.agents
-      .ref(agentId)
+      .ref(id)
       .timeline.refetch({ direction: "tail", limit: 40 })
       .then(
         (page) => {
-          if (cancelled) return;
-          const items = page.entries.map(({ item }) => item);
-          setAsking(parseQuestion(finalAssistantText(items)) !== null);
-          if (!enabled) return;
-          const text = items
-            .map((item) => (item.type === "assistant_message" ? item.text : ""))
-            .filter(Boolean)
-            .join("\n");
-          const found = latestStep(text, total);
-          if (found) setProgress(found);
+          settled = true;
+          if (cancelled || !tracker.current) return;
+          tracker.current.history(page.entries.map(({ item }) => item));
+          publish();
         },
-        () => undefined,
+        () => {
+          settled = true;
+        },
       );
-    return () => {
-      cancelled = true;
+    return {
+      cancel() {
+        cancelled = true;
+      },
+      get settled() {
+        return settled;
+      },
     };
-  }, [agentId, wantsHistory, enabled, total, paseo]);
+  };
 
   useEffect(() => {
-    if (!live || !agentId) return;
-    let buffer = "";
-    let turnText = "";
-    const append = (text: string, chunk: string) => {
-      // A marker that starts a new message must start a line in the buffer too.
-      const separator = text && !text.endsWith("\n") && chunk.trimStart().startsWith("[browser-prompt ") ? "\n" : "";
-      return (text + separator + chunk).slice(-STREAM_BUFFER);
-    };
-    const unsubscribe = paseo.agents.ref(agentId).timeline.subscribe((message) => {
-      const event = message.event;
-      if (event.type === "turn_started") {
-        turnText = "";
-        setAsking(false);
-        return;
-      }
-      if (event.type === "turn_completed") {
-        setAsking(parseQuestion(turnText) !== null);
-        return;
-      }
-      if (event.type !== "timeline" || event.item.type !== "assistant_message") return;
-      const chunk = event.item.text;
-      turnText = append(turnText, chunk);
-      if (!enabled) return;
-      buffer = append(buffer, chunk);
-      const found = latestStep(buffer, total);
-      if (found) setProgress(found);
-    });
-    return () => unsubscribe();
-  }, [agentId, live, enabled, total, paseo]);
+    tracker.current = agentId ? createRunTracker(total, showSteps) : null;
+    fetchedFor.current = null;
+    wasLive.current = false;
+    setView(EMPTY);
+  }, [agentId, total, showSteps]);
 
-  return { progress: enabled && agentId ? progress : null, asking: !!agentId && asking };
+  // One read when the card shows the run. A read cancelled by a dependency change is redone.
+  useEffect(() => {
+    if (!agentId || stopped || fetchedFor.current === agentId) return;
+    fetchedFor.current = agentId;
+    const read = readTail(agentId);
+    return () => {
+      read.cancel();
+      if (!read.settled) fetchedFor.current = null;
+    };
+  }, [agentId, stopped, total, showSteps, paseo]);
+
+  // Live -> settled: one final read decides between waiting for the chat and done.
+  useEffect(() => {
+    const settledNow = wasLive.current && !live;
+    wasLive.current = live;
+    if (live) {
+      tracker.current?.resumed();
+      publish();
+      return;
+    }
+    if (!settledNow || !agentId) return;
+    const read = readTail(agentId);
+    return () => read.cancel();
+  }, [live, agentId, paseo]);
+
+  // The live stream, only while the agent is running or initializing.
+  useEffect(() => {
+    if (!live || !agentId) return;
+    const subscription = paseo.agents.ref(agentId).timeline.subscribe((message) => {
+      const event = message.event as { type: string; item?: { type: string; text?: unknown; messageId?: unknown } };
+      if (event.type === "replacement" || event.type === "subscription_restored") {
+        readTail(agentId);
+        return;
+      }
+      tracker.current?.event(event);
+      publish();
+    });
+    void subscription.ready?.catch(() => undefined);
+    return () => subscription();
+  }, [agentId, live, total, showSteps, paseo]);
+
+  return agentId ? view : EMPTY;
 }
 
 /** "Step N of M · text" and a thin progress bar, colored by the run's state. */

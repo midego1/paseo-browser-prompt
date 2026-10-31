@@ -76,11 +76,12 @@ export function BrowserPromptCard({
   const storedRun =
     settings.status === "ready" ? (settings.values.runs.find(([key]) => key === doneKey)?.[1] ?? null) : null;
   const runAgentId = localRun ?? storedRun;
-  const runState = useRunState(runAgentId);
+  // Started in this card session: an idle snapshot before its first turn means "starting".
+  const { state: runState, status: runStatus } = useRunState(runAgentId, localRun !== null && localRun === runAgentId);
   const totalSteps = useMemo(() => countSteps(text), [text]);
   const showSteps =
     settings.status === "ready" ? settings.values.showStepProgress : DEFAULT_AGENT_SETTINGS.showStepProgress;
-  const { progress: stepProgress, asking } = useStepProgress(runAgentId, totalSteps, runState, showSteps);
+  const { progress: stepProgress, asking } = useStepProgress(runAgentId, totalSteps, runState, runStatus, showSteps);
   // An idle run whose latest turn is a question waits for the chat; it is not done yet.
   const shownState = asking && runState === "done" ? "asking" : runState;
   const confirmLaunch =

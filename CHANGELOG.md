@@ -5,7 +5,8 @@
 - Step progress on the card (setting **Show step progress**, on by default): the agent writes
   `[browser-prompt step N/M] …` before each numbered step, and the card shows "Step N of M · …" with
   a progress bar (done = full bar ✓; failed, needs you and waiting for the chat keep the last step).
-  Markers are read from the run's timeline (one read, then the live stream while it runs; no polling).
+  Markers are read from the run's timeline without polling: one read when the card shows the run,
+  the live stream only while the agent is running, and one read when it settles.
 - The card shows "Waiting for the chat's answer" for an idle run whose latest turn is a question,
   instead of done.
 - Question detection ignores leading step marker lines; a final message starting with a marker is
