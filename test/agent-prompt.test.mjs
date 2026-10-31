@@ -83,6 +83,7 @@ test("settings defaults: Anthropic Claude Sonnet 5.5, thinking high, Auto mode, 
     openAgentOnStart: false,
     talkToChat: true,
     maxChatQuestions: 10,
+    showStepProgress: true,
   });
   assert.deepEqual(resolveAgentConfig(DEFAULT_AGENT_SETTINGS), {
     provider: "claude/claude-sonnet-5-5",
@@ -130,7 +131,8 @@ test("run state", () => {
   assert.equal(runStateFrom({ status: "running", attentionReason: "permission" }, true), "needs-input");
   assert.equal(runStateFrom({ status: "idle", attentionReason: "finished" }, false), "done");
   assert.equal(runStateFrom({ status: "idle", attentionReason: null }, true), "done");
-  assert.equal(runStateFrom({ status: "idle", attentionReason: null }, false), "starting");
+  assert.equal(runStateFrom({ status: "idle", attentionReason: null }, false), "done", "an old idle run is done");
+  assert.equal(runStateFrom({ status: "idle", attentionReason: null }, false, true), "starting", "just started in this card session");
   assert.equal(runStateFrom({ status: "error", attentionReason: "error" }, true), "failed");
   assert.equal(runStateFrom({ status: "closed", attentionReason: null }, true), "stopped");
 });

@@ -19,7 +19,22 @@ export const DEFAULT_AGENT_SETTINGS = {
   talkToChat: true,
   /** Questions a run may send to the chat; 0 behaves like Talk to the chat off. */
   maxChatQuestions: 10,
+  /** Ask the run to mark each step, and show "Step N of M" with a progress bar on the card. */
+  showStepProgress: true,
 } as const;
+
+/** Start of a step marker line: `[browser-prompt step N/M] what the run is doing`. */
+export const STEP_MARKER_PREFIX = "[browser-prompt step";
+/** Longest step text the run is asked to write; the card cuts longer text. */
+export const MAX_STEP_TEXT = 60;
+
+/** Rule asking the run to mark each step as plain text in its reply. */
+export function stepProgressRule(totalSteps: number): string {
+  return (
+    `9. Progress: before you start each numbered step, write one short line on its own in your reply: ${STEP_MARKER_PREFIX} N/${totalSteps}] followed by what you are doing (at most ${MAX_STEP_TEXT} characters), where N is the step number. ` +
+    "It is plain text for the card's progress bar, not a message to the chat and not a question: keep working after it, do not end your turn for it, and never put a secret or text copied from a page in it."
+  );
+}
 
 /** Bounds for "Max questions to the chat per run". */
 export const MAX_CHAT_QUESTIONS_LIMIT = 50;
@@ -208,10 +223,12 @@ export function buildAgentPrompt(
   steps: string,
   config?: { provider: string; modeId: string },
   chat?: { sourceAgentId: string; maxQuestions: number },
+  progress?: { totalSteps: number },
 ): string {
   const task = cardTitle.trim() ? `Task: ${cardTitle.trim()}\n\n` : "";
   let rules = usesClassifierMode(config) ? `${AGENT_SAFETY_PREAMBLE}\n${CLASSIFIER_MODE_RULE}` : AGENT_SAFETY_PREAMBLE;
   if (chat && chat.sourceAgentId && chat.maxQuestions > 0) rules += `\n${chatQuestionRule(chat.sourceAgentId, chat.maxQuestions)}`;
+  if (progress && progress.totalSteps > 0) rules += `\n${stepProgressRule(progress.totalSteps)}`;
   return (
     `${rules}\n\n` +
     `${task}Steps (from the owner's browser-prompt card, verbatim):\n` +
@@ -225,6 +242,7 @@ export interface AgentSettingsInput {
   talkToChat?: boolean;
   maxChatQuestions?: number;
   openAgentOnStart?: boolean;
+  showStepProgress?: boolean;
   agentThinking?: string;
   agentMode?: string;
 }
@@ -266,6 +284,7 @@ export type RunState = "starting" | "running" | "needs-input" | "done" | "failed
 export function runStateFrom(
   snapshot: { status: string; attentionReason: string | null } | null,
   seenRunning: boolean,
+  startedHere = false,
 ): RunState {
   if (!snapshot) return "unknown";
   if (snapshot.status === "error") return "failed";
@@ -275,8 +294,18 @@ export function runStateFrom(
   if (snapshot.status === "initializing") return "starting";
   if (snapshot.status === "idle") {
     if (snapshot.attentionReason === "error") return "failed";
-    if (snapshot.attentionReason === "finished" || seenRunning) return "done";
+    // Idle before its first turn only happens right after this card session started it; any
+    // other idle run (an old one, or one whose attention was cleared) is done.
+    if (snapshot.attentionReason === "finished" || seenRunning || !startedHere) return "done";
     return "starting";
   }
   return "unknown";
+}
+
+/**
+ * Whether the card follows a run's live timeline: only while the agent itself is running or
+ * initializing. An idle, failed or closed agent gets no subscription.
+ */
+export function liveSubscription(status: string | null | undefined): boolean {
+  return status === "running" || status === "initializing";
 }

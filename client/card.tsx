@@ -20,6 +20,8 @@ import {
 import { openRunScreen, startBrowserAgent } from "./agent-run";
 import { MessageMarkdown } from "./markdown";
 import { RUN_LABELS, runVisual, useRunState } from "./run-status";
+import { StepProgressRow, useStepProgress } from "./step-progress";
+import { countSteps } from "../shared/steps";
 import { useUpdateOnUse } from "./update";
 
 const DESKTOP_HINT = "Your Paseo desktop app must be open: the agent drives the browser tabs there.";
@@ -74,7 +76,14 @@ export function BrowserPromptCard({
   const storedRun =
     settings.status === "ready" ? (settings.values.runs.find(([key]) => key === doneKey)?.[1] ?? null) : null;
   const runAgentId = localRun ?? storedRun;
-  const runState = useRunState(runAgentId);
+  // Started in this card session: an idle snapshot before its first turn means "starting".
+  const { state: runState, status: runStatus } = useRunState(runAgentId, localRun !== null && localRun === runAgentId);
+  const totalSteps = useMemo(() => countSteps(text), [text]);
+  const showSteps =
+    settings.status === "ready" ? settings.values.showStepProgress : DEFAULT_AGENT_SETTINGS.showStepProgress;
+  const { progress: stepProgress, asking } = useStepProgress(runAgentId, totalSteps, runState, runStatus, showSteps);
+  // An idle run whose latest turn is a question waits for the chat; it is not done yet.
+  const shownState = asking && runState === "done" ? "asking" : runState;
   const confirmLaunch =
     settings.status === "ready" ? settings.values.confirmAgentLaunch : DEFAULT_AGENT_SETTINGS.confirmAgentLaunch;
   /** The next run uses Claude Auto mode (classifier-reviewed, the default); the confirmation says so. */
@@ -249,7 +258,7 @@ export function BrowserPromptCard({
     else void launchAgent();
   }
 
-  const runVisuals = runVisual(runState, theme);
+  const runVisuals = shownState === "asking" ? { icon: "CircleAlert", color: theme.colors.statusWarning } : runVisual(runState, theme);
 
   return (
     <View style={styles.card}>
@@ -311,7 +320,7 @@ export function BrowserPromptCard({
         <View style={styles.runRow}>
           <Icon name={runVisuals.icon} size={14} color={runVisuals.color} />
           <Text style={[styles.runText, runState === "done" || runState === "failed" ? { color: runVisuals.color } : null]}>
-            {RUN_LABELS[runState]}
+            {shownState === "asking" ? "Waiting for the chat's answer" : RUN_LABELS[runState]}
           </Text>
           <Text style={styles.hint}>·</Text>
           <Pressable
@@ -324,6 +333,9 @@ export function BrowserPromptCard({
             <Text style={styles.link}>Open</Text>
           </Pressable>
         </View>
+      ) : null}
+      {runAgentId && showSteps ? (
+        <StepProgressRow progress={stepProgress} total={totalSteps} state={shownState} theme={theme} compact={layout.compact} />
       ) : null}
       {runError ? (
         <View style={styles.runRow}>

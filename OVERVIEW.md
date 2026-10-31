@@ -39,6 +39,8 @@ The plugin checks the mode the agent actually runs in, right after starting it a
 
 The safety preamble is always included. It tells the agent to use only the Paseo browser tools (no shell commands, no file edits, no browser on the server), to stop and ask before typing any secret, before anything destructive or irreversible and whenever the page differs from the steps, never to repeat secret values shown on a page, and to finish with a summary of what it did and what is left for you. Secrets and confirmations of destructive, security, billing, merge or publish actions are a hard rule that no setting changes: they are always asked of you, never of the chat.
 
+With **Show step progress** (on by default) the agent writes a short line as it starts each numbered step, and the card shows "Step N of M" with what it is doing and a progress bar; done fills the bar, and failed, needs you or waiting for the chat keep the last step. The card reads these lines from the agent's own chat; nothing extra is sent anywhere.
+
 By default the agent starts in the background: the card shows its state (running, needs you for a question or permission, done, failed) with a link to open it. Turn on **Open the agent when started** to open its view right away.
 
 **Talk to the chat** (on by default) lets the agent ask the chat that showed the card about the task itself, for example which of two buttons to use, which value to fill in, or how to go on when the page differs from the steps. The agent ends its turn with the question, the plugin forwards it to that chat marked as untrusted text that may come from web pages, and that chat's agent answers by sending a message to the browser agent. A run asks at most 10 questions by default (0 to 50 in settings; 0 works like off); after that, when talking is off, or when the chat is not available, the agent asks you instead. If it keeps asking the chat anyway, its third such turn is treated as its final report. Questions never count as the final report.
@@ -59,7 +61,7 @@ For Git installs, the plugin checks the branch it was installed from when a card
 
 - Start in ChatGPT on desktop (ChatGPT app, ChatGPT web, or copy only) and on iOS and Android (copy only or ChatGPT web).
 - ChatGPT app deep link template (default `codex://new?prompt={prompt}`), and clearing done marks.
-- Run with Paseo agent: confirm before starting, open the agent when started, report back to chat (Auto, Always, Off), talk to the chat, max questions to the chat per run, provider, model, permission mode, thinking level, and clearing card-to-agent links.
+- Run with Paseo agent: confirm before starting, open the agent when started, show step progress, report back to chat (Auto, Always, Off), talk to the chat, max questions to the chat per run, provider, model, permission mode, thinking level, and clearing card-to-agent links.
 - ChatGPT launcher: status, bind address (empty means the detected Tailscale address) and port (default 5299).
 - Updates: auto-update on use, installed and latest commit, last check, Check now, and an optional branch to follow.
 

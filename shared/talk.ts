@@ -3,6 +3,7 @@
 // other pure shared modules so `node --experimental-strip-types` can load it.
 import { ANSWER_MARKER, QUESTION_MARKER } from "./agent-prompt.ts";
 import { escapeUntrusted, MAX_REPORT_TITLE, oneLine } from "./report-back.ts";
+import { stripLeadingStepMarkers } from "./steps.ts";
 
 /** Questions longer than this are cut; they are meant to be one short question. */
 export const MAX_QUESTION_CHARS = 1500;
@@ -12,10 +13,11 @@ export const QUESTION_CLOSE = "</browser-agent-question>";
 
 /**
  * The question in a run's final message, or null when the message is not a question (a final
- * report). Only a message that starts with the marker counts.
+ * report). Only a message that starts with the marker counts; step progress lines before it are
+ * ignored, and a message of step lines followed by anything else is a report.
  */
 export function parseQuestion(finalText: string): string | null {
-  const text = finalText.trim();
+  const text = stripLeadingStepMarkers(finalText).trim();
   if (!text.startsWith(QUESTION_MARKER)) return null;
   return text.slice(QUESTION_MARKER.length).trim();
 }
@@ -55,6 +57,14 @@ export function buildQuestionMessage(input: {
   ].join("\n");
 }
 
+/** Start of the notice that sends a run back to the owner (see `buildQuestionRedirect`). */
+export const REDIRECT_PREFIX = "[browser-prompt] Your question was not forwarded to the chat";
+/**
+ * "Ask the owner instead" notices one run can get. Past this, a question turn is handled as the
+ * run's report, so a run that keeps asking cannot loop unattended or suppress its report.
+ */
+export const MAX_REDIRECTS = 2;
+
 export type RedirectReason = "talk-off" | "limit" | "chat-unavailable" | "chat-busy";
 
 const REASONS: Record<RedirectReason, (max: number) => string> = {
@@ -67,7 +77,7 @@ const REASONS: Record<RedirectReason, (max: number) => string> = {
 /** Tells the run its question did not reach the chat, so it asks the owner instead. */
 export function buildQuestionRedirect(reason: RedirectReason, max: number): string {
   return (
-    `[browser-prompt] Your question was not forwarded to the chat: ${REASONS[reason](max)}. ` +
+    `${REDIRECT_PREFIX}: ${REASONS[reason](max)}. ` +
     "Ask the owner with AskUserQuestion instead, or continue without the answer if the steps allow it. Do not end your turn with another question for the chat."
   );
 }

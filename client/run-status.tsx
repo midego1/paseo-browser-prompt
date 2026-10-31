@@ -7,7 +7,7 @@ import { runStateFrom, type RunState } from "../shared/agent-prompt";
  * Observes a started agent through the app's agent cache (no extra subscription).
  * Only for timeline renderers, panels and button content; not for screens (see run-screen.tsx).
  */
-export function useRunState(agentId: string | null): RunState {
+export function useRunState(agentId: string | null, startedHere = false): { state: RunState; status: string | null } {
   const snapshot = useAgent(agentId ?? "", (agent) => ({
     status: agent.status,
     attentionReason: agent.attentionReason,
@@ -19,8 +19,8 @@ export function useRunState(agentId: string | null): RunState {
   useEffect(() => {
     if (snapshot?.status === "running") setSeenRunning(true);
   }, [snapshot?.status]);
-  if (!agentId) return "unknown";
-  return runStateFrom(snapshot, seenRunning);
+  if (!agentId) return { state: "unknown", status: null };
+  return { state: runStateFrom(snapshot, seenRunning, startedHere), status: snapshot?.status ?? null };
 }
 
 export const RUN_LABELS: Record<RunState, string> = {
