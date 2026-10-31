@@ -10,8 +10,6 @@ export const RUN_LABEL_VALUE = "run";
 export const SOURCE_LABEL = "browser-prompt-source";
 /** Card id within that agent's timeline. */
 export const CARD_LABEL = "browser-prompt-card";
-/** Permission mode the card requested; the server's mode guard checks the run against it. */
-export const MODE_LABEL = "browser-prompt-mode";
 
 /** Third element of a `runs` entry when the run did not start in the card agent's workspace. */
 export const MOST_RECENT_FALLBACK = "most-recent";
@@ -34,13 +32,8 @@ export const REPORT_OPEN = "<browser-agent-report>";
 export const REPORT_CLOSE = "</browser-agent-report>";
 
 /** Labels for an agent started from a card. */
-export function runLabels(sourceAgentId: string, cardId: string, modeId?: string): Record<string, string> {
-  return {
-    [RUN_LABEL]: RUN_LABEL_VALUE,
-    [SOURCE_LABEL]: sourceAgentId,
-    [CARD_LABEL]: cardId,
-    ...(modeId ? { [MODE_LABEL]: modeId } : {}),
-  };
+export function runLabels(sourceAgentId: string, cardId: string): Record<string, string> {
+  return { [RUN_LABEL]: RUN_LABEL_VALUE, [SOURCE_LABEL]: sourceAgentId, [CARD_LABEL]: cardId };
 }
 
 export function isBrowserRun(labels: Record<string, unknown> | null | undefined): boolean {

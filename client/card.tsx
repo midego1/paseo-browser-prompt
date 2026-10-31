@@ -77,7 +77,7 @@ export function BrowserPromptCard({
   const runState = useRunState(runAgentId);
   const confirmLaunch =
     settings.status === "ready" ? settings.values.confirmAgentLaunch : DEFAULT_AGENT_SETTINGS.confirmAgentLaunch;
-  /** The next run would use Claude Auto mode (classifier-reviewed); the confirmation says so. */
+  /** The next run uses Claude Auto mode (classifier-reviewed, the default); the confirmation says so. */
   const launchesInAutoMode = useMemo(() => {
     try {
       return usesClassifierMode(resolveAgentConfig(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS));
@@ -341,9 +341,9 @@ export function BrowserPromptCard({
         <Modal.Content>
           <Text style={styles.modalText}>Start a Paseo agent to do these steps in your browser?</Text>
           {launchesInAutoMode ? (
-            <Text style={[styles.hint, { color: theme.colors.statusWarning }]}>
-              It runs in Claude Auto mode: a model classifier, not you, approves its tool calls. It uses only the Paseo
-              browser tabs and is told to ask you, as a question, before secrets or anything destructive.
+            <Text style={styles.hint}>
+              It runs in Claude Auto mode: a model classifier reviews its tool calls. It uses only the Paseo browser
+              tabs and is told to ask you, as a question, before secrets or anything destructive.
             </Text>
           ) : (
             <Text style={styles.hint}>

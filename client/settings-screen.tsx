@@ -172,18 +172,18 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
           <SettingsInput
             ref={modeInput}
             label="Permission mode"
-            hint="Default: default (Always Ask), so you approve tool use. Ask-first modes: default and plan (Claude), ask (Oh My Pi). Opt-in: auto (Claude Auto mode). Bypass and accept-edits modes are refused."
+            hint="Default: auto (Claude Auto mode). Also allowed: default (Always Ask) and plan for Claude, ask for Oh My Pi. Bypass and accept-edits modes are refused."
             error={modeError ?? undefined}
             initialValue={values.agentMode}
             placeholder={DEFAULT_AGENT_SETTINGS.agentMode}
             onChangeText={(agentMode) => setAgentDraft((d) => ({ ...d, agentMode }))}
           />
           {autoModeSelected ? (
-            <Text style={{ color: theme.colors.statusWarning, fontSize: 13, lineHeight: 18, paddingHorizontal: 16, paddingVertical: 10 }}>
-              Auto mode: a model classifier approves this agent&apos;s tool calls, not you. The agent is still told to stop
-              and ask you, as a question, before secrets, anything destructive or irreversible, merges, payments and
-              security changes, but a classifier approval is not your approval. Not available when Claude Code uses
-              Bedrock or Vertex.
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 13, lineHeight: 18, paddingHorizontal: 16, paddingVertical: 10 }}>
+              In Auto mode a model classifier reviews this agent&apos;s tool calls instead of asking you each time. The
+              agent is told to ask you, as a question, before secrets, anything destructive or irreversible, merges,
+              payments and security changes. Choose default (Always Ask) to approve every new tool yourself. Auto mode
+              needs Claude Code on the Anthropic API (not Bedrock or Vertex).
             </Text>
           ) : null}
           <SettingsAction
@@ -207,7 +207,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
           />
           <SettingsAction
             label="Reset agent settings to default"
-            hint="Claude Sonnet 5.5, thinking high, Always Ask."
+            hint="Claude Sonnet 5.5, thinking high, Auto mode."
             actionLabel="Reset"
             disabled={agentIsDefault && !agentDirty}
             onPress={async () => {
