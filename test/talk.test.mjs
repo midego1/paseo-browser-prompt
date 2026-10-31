@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readTalkSettings } from "../server/report-back-hook.ts";
-import { createReportBack } from "../server/report-back.ts";
+import { createReportBack, MAX_REDIRECTS } from "../server/report-back.ts";
 import {
   AGENT_SAFETY_PREAMBLE,
   ANSWER_MARKER,
@@ -152,7 +152,12 @@ function world({ source = {}, finals = [], runLabels: labels = runLabels(SOURCE,
           timeline: {
             async refetch() {
               const text = finals[Math.min(turn, finals.length - 1)] ?? "";
-              return { entries: [{ item: { type: "user_message", text: "go" } }, { item: { type: "assistant_message", text } }] };
+              return {
+                entries: [
+                  { item: { type: "user_message", text: "go" } },
+                  { item: { type: "assistant_message", text, messageId: `m${turn}` } },
+                ],
+              };
             },
           },
           async waitForFinish() {
@@ -283,4 +288,54 @@ test("talk settings from host settings fail closed to off", async () => {
   assert.deepEqual(await readTalkSettings(ready({ talkToChat: true, maxChatQuestions: 0 })), { maxQuestions: 0 });
   assert.deepEqual(await readTalkSettings({ read: async () => ({ status: "invalid", revision: "1", error: "bad" }) }), { maxQuestions: 0 });
   assert.deepEqual(await readTalkSettings({ read: async () => Promise.reject(new Error("io")) }), { maxQuestions: 0 });
+});
+
+test("a run that keeps asking is redirected at most twice, then its turn is handled as the report", async () => {
+  assert.equal(MAX_REDIRECTS, 2);
+  const w = world({ finals: [QUESTION] });
+  const reportBack = createReportBack(options({ talk: async () => ({ maxQuestions: 0 }) }));
+  assert.equal(await reportBack.onTurnEnded(ended("t1"), w.paseo), "question-redirected");
+  assert.equal(await reportBack.onTurnEnded(ended("t2"), w.paseo), "question-redirected");
+  assert.equal(await reportBack.onTurnEnded(ended("t3"), w.paseo), "sent", "third question turn: the report path");
+  assert.equal(await reportBack.onTurnEnded(ended("t4"), w.paseo), "duplicate", "claimed: nothing more is sent");
+  assert.equal(await reportBack.onTurnEnded(ended("t5"), w.paseo), "duplicate");
+  assert.deepEqual(w.sent.map((m) => m.id), [RUN, RUN, SOURCE], "two notices to the run, then one report to the chat");
+  const report = w.sent[2].text;
+  assert.match(report, /^\[browser-prompt\] Browser agent "Browser: Example" finished\./);
+  assert.ok(report.includes("<browser-agent-report>\n[browser-prompt question] Which of the two Save buttons should I use?\n</browser-agent-report>"), "escaped like any report");
+});
+
+test("past the cap the same limit applies: questions, two redirects, then the report", async () => {
+  const w = world({ finals: [QUESTION] });
+  const reportBack = createReportBack(options({ talk: async () => ({ maxQuestions: 1 }) }));
+  const results = [];
+  for (const turn of ["t1", "t2", "t3", "t4", "t5"]) results.push(await reportBack.onTurnEnded(ended(turn), w.paseo));
+  assert.deepEqual(results, ["question-sent", "question-redirected", "question-redirected", "sent", "duplicate"]);
+  assert.deepEqual(w.sent.map((m) => m.id), [SOURCE, RUN, RUN, SOURCE]);
+});
+
+test("the fall-through follows the report policy and still never loops", async () => {
+  const off = world({ finals: [QUESTION] });
+  const quiet = createReportBack(options({ talk: async () => ({ maxQuestions: 0 }), mode: async () => "off" }));
+  const results = [];
+  for (let turn = 1; turn <= 6; turn++) results.push(await quiet.onTurnEnded(ended(`t${turn}`), off.paseo));
+  assert.deepEqual(results, ["question-redirected", "question-redirected", "disabled", "disabled", "disabled", "disabled"]);
+  assert.deepEqual(off.sent.map((m) => m.id), [RUN, RUN], "report off: nothing to the chat, and no more notices to the run");
+
+  const bypass = world({ finals: [QUESTION], source: { currentModeId: "bypassPermissions" } });
+  const auto = createReportBack(options({ talk: async () => ({ maxQuestions: 0 }) }));
+  await auto.onTurnEnded(ended("t1"), bypass.paseo);
+  await auto.onTurnEnded(ended("t2"), bypass.paseo);
+  assert.equal(await auto.onTurnEnded(ended("t3"), bypass.paseo), "sent-status", "status-only for a chat that acts without approval");
+  assert.doesNotMatch(bypass.sent[2].text, /Save buttons/);
+});
+
+test("without a turn id, the same turn is recognized by its last assistant message id", async () => {
+  const w = world({ finals: [QUESTION] });
+  const reportBack = createReportBack(options());
+  assert.equal(await reportBack.onTurnEnded(ended(undefined), w.paseo), "question-sent");
+  assert.equal(await reportBack.onTurnEnded(ended(undefined), w.paseo), "duplicate", "same message m0");
+  w.next();
+  assert.equal(await reportBack.onTurnEnded(ended(undefined), w.paseo), "question-sent", "a new turn has a new message id");
+  assert.equal(w.sent.length, 2);
 });

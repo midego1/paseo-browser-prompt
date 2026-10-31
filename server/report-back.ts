@@ -26,6 +26,11 @@ export const NOT_A_RUN_TTL_MS = 60 * 1000;
 /** How long to wait for the card to record a new run in host settings. */
 export const RECORD_WAIT_MS = 10 * 1000;
 const RECORD_POLL_MS = 500;
+/**
+ * "Ask the owner instead" notices one run can get. Past this, a question turn is handled as the
+ * run's report, so a run that keeps asking cannot loop unattended or suppress its report.
+ */
+export const MAX_REDIRECTS = 2;
 /** Run ids remembered (and persisted) as already reported. */
 export const MAX_REPORTED = 200;
 
@@ -187,6 +192,8 @@ export function createReportBack(options: ReportBackOptions) {
   const questionCounts = new Map<string, number>();
   /** Turns whose question was already handled, so a repeated event is not forwarded twice. */
   const handledQuestionTurns = new Set<string>();
+  /** Redirect notices each run got (in memory, like the question counts). */
+  const redirectCounts = new Map<string, number>();
   /** Agents seen without the run label, until when they are skipped. Labels can change, hence the TTL. */
   const notRuns = new Map<string, number>();
   /** Per source agent: the tail of its delivery queue. */
@@ -267,16 +274,40 @@ export function createReportBack(options: ReportBackOptions) {
     return next;
   }
 
-  async function readFinalText(event: TurnEndedEvent, run: ReturnType<ReportBackPaseo["agents"]["ref"]>): Promise<string> {
+  /** The turn's final assistant text, and the id of its last assistant message when known. */
+  async function readFinal(
+    event: TurnEndedEvent,
+    run: ReturnType<ReportBackPaseo["agents"]["ref"]>,
+  ): Promise<{ text: string; messageId: string | null }> {
     const fromEvent = event.timeline ?? [];
-    const items = fromEvent.some((item) => item.type === "assistant_message")
+    const items: readonly { type: string; text?: unknown; messageId?: unknown }[] = fromEvent.some((item) => item.type === "assistant_message")
       ? fromEvent
       : (await run.timeline.refetch({ direction: "tail", limit: REPORT_TAIL_ITEMS })).entries.map((entry) => entry.item);
-    return finalAssistantText(items);
+    let messageId: string | null = null;
+    for (let i = items.length - 1; i >= 0; i--) {
+      const item = items[i]!;
+      if (item.type === "user_message") break;
+      if (item.type === "assistant_message") {
+        messageId = typeof item.messageId === "string" && item.messageId ? item.messageId : null;
+        break;
+      }
+    }
+    return { text: finalAssistantText(items), messageId };
   }
 
-  /** Tells the run its question did not reach the chat, so it asks the owner instead. */
+  /**
+   * Tells the run its question did not reach the chat, so it asks the owner instead. Returns null,
+   * sending nothing, once the run had MAX_REDIRECTS notices: the caller then treats the turn as the
+   * run's report.
+   */
   async function redirect(run: ReturnType<ReportBackPaseo["agents"]["ref"]>, runId: string, reason: RedirectReason, max: number) {
+    const count = redirectCounts.get(runId) ?? 0;
+    if (count >= MAX_REDIRECTS) {
+      log(`run ${runId} kept asking after ${count} redirects; handling its turn as the report`);
+      return null;
+    }
+    redirectCounts.set(runId, count + 1);
+    if (redirectCounts.size > 1000) redirectCounts.delete(redirectCounts.keys().next().value!);
     await run.send(buildQuestionRedirect(reason, max), { activeTurnBehavior: "steer" });
     log(`question of run ${runId} not forwarded (${reason}); run told to ask the owner`);
     return "question-redirected" as const;
@@ -285,7 +316,8 @@ export function createReportBack(options: ReportBackOptions) {
   /**
    * A run ended its turn with a question for the chat. It is never claimed as the run's report.
    * Forwarded, framed by the plugin, only while "Talk to the chat" is on and under the run's cap,
-   * and only for runs a card recorded; otherwise the run is told to ask the owner.
+   * and only for runs a card recorded; otherwise the run is told to ask the owner. Returns null when
+   * the run is past its redirects: the turn is then handled as the run's report.
    */
   async function handleQuestion(
     event: TurnEndedEvent,
@@ -293,12 +325,14 @@ export function createReportBack(options: ReportBackOptions) {
     labels: Record<string, string> | null,
     runSnapshot: AgentSnapshotLike | null,
     question: string,
+    messageId: string | null,
     signal: AbortSignal,
-  ): Promise<ReportResult> {
+  ): Promise<ReportResult | null> {
     const runId = event.agent.id;
     const run = paseo.agents.ref(runId);
-    const turnKey = `${runId}:${event.turnId ?? ""}`;
-    if (event.turnId && handledQuestionTurns.has(turnKey)) return "duplicate";
+    // Same-turn dedupe: the turn id, else the id of the turn's last assistant message.
+    const turnKey = event.turnId ? `${runId}:t:${event.turnId}` : messageId ? `${runId}:m:${messageId}` : null;
+    if (turnKey && handledQuestionTurns.has(turnKey)) return "duplicate";
     const target = reportTarget(runId, labels);
     if (!target) return "no-source";
     const { sourceId, cardId } = target;
@@ -308,7 +342,7 @@ export function createReportBack(options: ReportBackOptions) {
       log(`run ${runId} is not recorded by a card of agent ${sourceId}; question not forwarded`);
       return "unrecorded";
     }
-    if (event.turnId) {
+    if (turnKey) {
       handledQuestionTurns.add(turnKey);
       if (handledQuestionTurns.size > 2000) handledQuestionTurns.delete(handledQuestionTurns.values().next().value!);
     }
@@ -384,9 +418,14 @@ export function createReportBack(options: ReportBackOptions) {
 
       // The final message decides: a question for the chat, or the run's final report. Read it now,
       // since the run's next turn would make a later read return the wrong message.
-      const finalText = event.outcome.kind === "completed" || event.outcome.kind === "failed" ? await readFinalText(event, run) : "";
+      const final = event.outcome.kind === "completed" || event.outcome.kind === "failed" ? await readFinal(event, run) : null;
+      const finalText = final?.text ?? "";
       const question = event.outcome.kind === "completed" ? parseQuestion(finalText) : null;
-      if (question !== null) return await handleQuestion(event, paseo, labels, runSnapshot, question, signal);
+      if (question !== null) {
+        const handled = await handleQuestion(event, paseo, labels, runSnapshot, question, final?.messageId ?? null, signal);
+        if (handled !== null) return handled;
+        // Past its redirects: fall through and handle this turn as the run's report.
+      }
 
       if (reported.includes(runId)) return "duplicate";
       const mode = await options.mode();

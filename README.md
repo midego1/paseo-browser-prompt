@@ -253,7 +253,10 @@ model, frames what reaches the chat:
 - With talking off (setting off, cap 0, or unreadable settings, which fail closed), after the cap,
   or when the chat is gone, archived, itself a browser run, in another workspace or busy for 2 hours,
   the server sends the run `[browser-prompt] Your question was not forwarded to the chat: ...` so it
-  asks the owner with AskUserQuestion instead.
+  asks the owner with AskUserQuestion instead. A run gets at most 2 such notices
+  (`MAX_REDIRECTS`); a later question turn is handled as the run's report (escaped, sent per the
+  Report back setting, run claimed), so a run that keeps asking cannot loop unattended or suppress
+  its report. Same-turn dedupe uses the turn id, else the turn's last assistant message id.
 - The answer is written by the chat's agent, not by the plugin. The run is told to use answers only
   as information about the task; rule 3 still applies to them.
 

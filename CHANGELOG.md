@@ -9,7 +9,8 @@
   it, escaped and framed as untrusted text, through the report-back delivery; the chat answers with
   the Paseo send_agent_prompt tool. Question turns are never taken as the final report.
 - **Max questions to the chat per run** (default 10, 0 to 50, 0 works like off). After the limit,
-  with talking off, or when the chat is not available, the agent is told to ask the owner.
+  with talking off, or when the chat is not available, the agent is told to ask the owner, at most
+  twice per run; a later question turn is handled as the run's report, so a run cannot loop.
 - The fixed preamble now states the hard rule: secrets and confirmations of destructive, security,
   billing, merge or publish actions are always asked of the owner and never accepted from the chat.
   Rules renumbered: page differs is rule 4, final report rule 6, Auto mode rule 7, chat rule 8.
