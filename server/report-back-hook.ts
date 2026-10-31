@@ -1,7 +1,8 @@
 import type { PluginServerContext, PluginSettingsState } from "@getpaseo/plugin/server";
 import type { preferences } from "../shared/settings";
 import { DEFAULT_REPORT_MODE, MOST_RECENT_FALLBACK, parseReportMode, runKey, type ReportMode } from "../shared/report-back.ts";
-import { createReportBack, type ReportBackOptions, type ReportBackPaseo } from "./report-back.ts";
+import { chatQuestionBudget } from "../shared/agent-prompt.ts";
+import { createReportBack, type ReportBackOptions, type ReportBackPaseo, type TalkSettings } from "./report-back.ts";
 
 type PreferencesState = PluginSettingsState<(typeof preferences)["schema"]>;
 export type SettingsReader = { read(): Promise<PreferencesState> };
@@ -13,6 +14,20 @@ export async function readReportMode(settings: SettingsReader): Promise<ReportMo
     return state.status === "ready" ? parseReportMode(state.values.reportBack) : DEFAULT_REPORT_MODE;
   } catch {
     return DEFAULT_REPORT_MODE;
+  }
+}
+
+/**
+ * "Talk to the chat" from settings. Invalid or unreadable settings fail closed to off: questions
+ * carry page text, so they are only forwarded on a positive, readable setting.
+ */
+export async function readTalkSettings(settings: SettingsReader): Promise<TalkSettings> {
+  try {
+    const state = await settings.read();
+    if (state.status !== "ready") return { maxQuestions: 0 };
+    return { maxQuestions: chatQuestionBudget(state.values) };
+  } catch {
+    return { maxQuestions: 0 };
   }
 }
 
@@ -37,6 +52,7 @@ export function registerReportBack(
 ) {
   const reportBack = createReportBack({
     mode: () => readReportMode(settings),
+    talk: () => readTalkSettings(settings),
     recordedRun: (query) => readRecordedRun(settings, query),
     ...extra,
   });

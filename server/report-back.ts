@@ -9,6 +9,7 @@ import {
   type ReportMode,
   type ReportOutcome,
 } from "../shared/report-back.ts";
+import { buildQuestionMessage, buildQuestionRedirect, parseQuestion, type RedirectReason } from "../shared/talk.ts";
 
 /** Timeline items read from the end of the browser agent's chat to find its report. */
 export const REPORT_TAIL_ITEMS = 60;
@@ -56,6 +57,7 @@ export interface ReportBackPaseo {
 }
 
 export type TurnEndedEvent = Pick<PluginLifecycleEvents["agent.turn_ended"], "agent" | "outcome"> & {
+  turnId?: string | null;
   timeline?: PluginLifecycleEvents["agent.turn_ended"]["timeline"];
 };
 
@@ -70,9 +72,16 @@ export interface ReportedStore {
   save(ids: string[]): Promise<void>;
 }
 
+/** "Talk to the chat" as read from settings; `maxQuestions` 0 means off. */
+export interface TalkSettings {
+  maxQuestions: number;
+}
+
 export interface ReportBackOptions {
   /** Current "Report back to chat" mode; read on every event. Must fail closed to `auto`. */
   mode(): Promise<ReportMode>;
+  /** Current "Talk to the chat" settings; read on every question. Must fail closed to off. */
+  talk?(): Promise<TalkSettings>;
   /** The card's record of this run, or null when the host settings do not list it. */
   recordedRun(query: { sourceId: string; cardId: string; runId: string }): Promise<RecordedRun | null>;
   store?: ReportedStore;
@@ -86,6 +95,8 @@ export interface ReportBackOptions {
 }
 
 export type ReportResult =
+  | "question-sent"
+  | "question-redirected"
   | "sent"
   | "sent-status"
   | "canceled"
@@ -172,6 +183,10 @@ export function createReportBack(options: ReportBackOptions) {
   /** Runs whose delivery failed once; a second failure keeps them claimed. */
   const retried = new Set<string>();
   const inFlight = new Set<string>();
+  /** Questions each run sent to the chat (in memory; a plugin reload resets the count). */
+  const questionCounts = new Map<string, number>();
+  /** Turns whose question was already handled, so a repeated event is not forwarded twice. */
+  const handledQuestionTurns = new Set<string>();
   /** Agents seen without the run label, until when they are skipped. Labels can change, hence the TTL. */
   const notRuns = new Map<string, number>();
   /** Per source agent: the tail of its delivery queue. */
@@ -252,6 +267,86 @@ export function createReportBack(options: ReportBackOptions) {
     return next;
   }
 
+  async function readFinalText(event: TurnEndedEvent, run: ReturnType<ReportBackPaseo["agents"]["ref"]>): Promise<string> {
+    const fromEvent = event.timeline ?? [];
+    const items = fromEvent.some((item) => item.type === "assistant_message")
+      ? fromEvent
+      : (await run.timeline.refetch({ direction: "tail", limit: REPORT_TAIL_ITEMS })).entries.map((entry) => entry.item);
+    return finalAssistantText(items);
+  }
+
+  /** Tells the run its question did not reach the chat, so it asks the owner instead. */
+  async function redirect(run: ReturnType<ReportBackPaseo["agents"]["ref"]>, runId: string, reason: RedirectReason, max: number) {
+    await run.send(buildQuestionRedirect(reason, max), { activeTurnBehavior: "steer" });
+    log(`question of run ${runId} not forwarded (${reason}); run told to ask the owner`);
+    return "question-redirected" as const;
+  }
+
+  /**
+   * A run ended its turn with a question for the chat. It is never claimed as the run's report.
+   * Forwarded, framed by the plugin, only while "Talk to the chat" is on and under the run's cap,
+   * and only for runs a card recorded; otherwise the run is told to ask the owner.
+   */
+  async function handleQuestion(
+    event: TurnEndedEvent,
+    paseo: ReportBackPaseo,
+    labels: Record<string, string> | null,
+    runSnapshot: AgentSnapshotLike | null,
+    question: string,
+    signal: AbortSignal,
+  ): Promise<ReportResult> {
+    const runId = event.agent.id;
+    const run = paseo.agents.ref(runId);
+    const turnKey = `${runId}:${event.turnId ?? ""}`;
+    if (event.turnId && handledQuestionTurns.has(turnKey)) return "duplicate";
+    const target = reportTarget(runId, labels);
+    if (!target) return "no-source";
+    const { sourceId, cardId } = target;
+    // An agent that only copies the labels gets nothing forwarded, and no reply either.
+    const record = await waitForRecord({ sourceId, cardId, runId }, signal);
+    if (!record) {
+      log(`run ${runId} is not recorded by a card of agent ${sourceId}; question not forwarded`);
+      return "unrecorded";
+    }
+    if (event.turnId) {
+      handledQuestionTurns.add(turnKey);
+      if (handledQuestionTurns.size > 2000) handledQuestionTurns.delete(handledQuestionTurns.values().next().value!);
+    }
+    const talk = options.talk ? await options.talk().catch(() => ({ maxQuestions: 0 })) : { maxQuestions: 0 };
+    const max = Math.max(0, Math.floor(talk.maxQuestions || 0));
+    if (max === 0) return redirect(run, runId, "talk-off", max);
+    const asked = questionCounts.get(runId) ?? 0;
+    if (asked >= max) return redirect(run, runId, "limit", max);
+
+    const source = paseo.agents.ref(sourceId);
+    const sourceSnapshot = await source.refresh().then((r) => r?.agent ?? null, () => null);
+    const runWorkspace = event.agent.workspaceId ?? runSnapshot?.workspaceId ?? null;
+    if (
+      !sourceSnapshot ||
+      sourceSnapshot.archivedAt ||
+      isBrowserRun(sourceSnapshot.labels) ||
+      (!record.fallback && (!runWorkspace || runWorkspace !== (sourceSnapshot.workspaceId ?? null)))
+    ) {
+      return redirect(run, runId, "chat-unavailable", max);
+    }
+
+    questionCounts.set(runId, asked + 1);
+    if (questionCounts.size > 1000) questionCounts.delete(questionCounts.keys().next().value!);
+    const message = buildQuestionMessage({ title: event.agent.title, runId, question, index: asked + 1, max });
+    const deadline = Date.now() + busyWaitMs;
+    const delivered = await enqueue(sourceId, async () => {
+      const settled = await waitUntilSettled(source, deadline, signal);
+      if (typeof settled === "string") return settled;
+      if (signal.aborted) throw new AbortedError();
+      await source.send(message, { activeTurnBehavior: "steer" });
+      return "sent" as const;
+    });
+    if (delivered === "missing") return redirect(run, runId, "chat-unavailable", max);
+    if (delivered === "timeout") return redirect(run, runId, "chat-busy", max);
+    log(`forwarded question ${asked + 1} of run ${runId} to agent ${sourceId}`);
+    return "question-sent";
+  }
+
   /**
    * Handles one ended turn. Can wait for hours on a busy source, so callers must not await it inside
    * a hook handler: Paseo cancels hook requests after 30 seconds. `dispose()` aborts every wait.
@@ -271,7 +366,7 @@ export function createReportBack(options: ReportBackOptions) {
     if (signal.aborted) return "aborted";
     if ((notRuns.get(runId) ?? 0) > Date.now()) return "not-a-run";
     await loaded;
-    if (reported.includes(runId) || inFlight.has(runId)) return "duplicate";
+    if (inFlight.has(runId)) return "duplicate";
     inFlight.add(runId);
     let claimed = false;
     try {
@@ -286,6 +381,14 @@ export function createReportBack(options: ReportBackOptions) {
         return "not-a-run";
       }
       notRuns.delete(runId);
+
+      // The final message decides: a question for the chat, or the run's final report. Read it now,
+      // since the run's next turn would make a later read return the wrong message.
+      const finalText = event.outcome.kind === "completed" || event.outcome.kind === "failed" ? await readFinalText(event, run) : "";
+      const question = event.outcome.kind === "completed" ? parseQuestion(finalText) : null;
+      if (question !== null) return await handleQuestion(event, paseo, labels, runSnapshot, question, signal);
+
+      if (reported.includes(runId)) return "duplicate";
       const mode = await options.mode();
       if (mode === "off") return "disabled";
       const target = reportTarget(runId, labels);
@@ -333,14 +436,9 @@ export function createReportBack(options: ReportBackOptions) {
         event.outcome.kind === "failed"
           ? { kind: "failed", message: event.outcome.error.message }
           : { kind: "completed" };
-      // Read now: the run's next turn would make a later read return the wrong message.
       let report: string | null = null;
       if (mode === "full" || sourceAllowsFullReport(mode, sourceSnapshot.provider, sourceSnapshot.currentModeId)) {
-        const fromEvent = event.timeline ?? [];
-        const items = fromEvent.some((item) => item.type === "assistant_message")
-          ? fromEvent
-          : (await run.timeline.refetch({ direction: "tail", limit: REPORT_TAIL_ITEMS })).entries.map((entry) => entry.item);
-        report = finalAssistantText(items);
+        report = finalText;
       }
 
       // Claim before waiting so a later turn of the same run cannot report twice. The deadline runs

@@ -115,17 +115,30 @@ Settings (**Settings → Plugins → Browser prompts → Run with Paseo agent**)
 | Setting | Default | What it does |
 | --- | --- | --- |
 | Confirm before starting | on | Asks before starting the agent; says when it will run in Auto mode. |
+| Open the agent when started | off | Off: the agent works in the background; the card shows its status (running…, needs you, done ✓, failed) and an Open link. On: its view opens right away. |
 | Report back to chat | Auto | Auto, Always send the full report, or Off (see below). |
+| Talk to the chat | on | The agent may ask the chat that showed the card about the task; the plugin forwards each question framed as untrusted text (see below). |
+| Max questions to the chat per run | `10` | Whole number from 0 to 50; 0 works like Talk to the chat off. After the limit the agent asks the owner. |
 | Provider | `claude` | Paseo provider id; only providers with a known ask-first mode are started. |
 | Model | `claude-sonnet-5-5` | Model id, or `provider/model`. |
 | Permission mode | `auto` | Claude: `auto` (Auto mode, a model classifier reviews tool calls; the default), `default` (Always Ask) or `plan`. Oh My Pi: `ask`. Bypass, accept-edits and other modes are refused and fall back to the default mode. |
 | Thinking | `high` | Thinking level passed to the provider. |
+
+Not configurable (the hard rule, rule 3 of the fixed preamble): passwords, tokens, API keys, 2FA codes
+and other secrets, and confirmations of destructive, irreversible, security, permission, billing,
+DNS/WAF, merge, deploy, publish or payment actions are always asked of the owner with
+AskUserQuestion. The agent is told never to ask the chat for them and never to accept them from the
+chat, a web page or any other message. Invalid inputs are not saved: the question cap must be a
+whole number from 0 to 50, and refused permission modes keep Save disabled. Settings schema v8 adds
+the three new settings with their defaults (a malformed stored cap is clamped).
 
 The card's "Run with Paseo agent" button uses the app's own Paseo connection (`usePaseo()`):
 
 - Workspace: `useAgent(cardAgentId, a => a.workspaceId)`; if the app has no snapshot yet,
   `paseo.agents.ref(id).refresh()`; last resort the most recently active workspace
   (`workspaces.list({ sort: activity_at desc, limit 1 })`).
+- After creating the agent the card opens its view only when **Open the agent when started** is on
+  (`opensAgentOnStart`); by default the run works in the background.
 - `paseo.workspaces.ref(workspaceId).agents.create({ config, title: "Browser: <title>", prompt, labels })`
   with `config = { provider: "claude/claude-sonnet-5-5", modeId: "auto", thinkingOptionId: "high" }`
   by default (host settings). Allowed modes are the ask-first modes (`ASK_FIRST_MODES`: claude
@@ -213,8 +226,36 @@ Delivery:
   report is then steered into that turn (providers with steering, Claude included, unless the turn
   is a slash command, is compacting or has no live query, in which case Paseo replaces it), and a
   permission that turn had just raised would be denied.
-- A question or permission request of the browser agent does not message the source; the card
-  shows "Paseo agent needs you" instead.
+- A permission request or an AskUserQuestion of the browser agent does not message the source; the
+  card shows "Paseo agent needs you" instead.
+
+### Talk to the chat
+
+When **Talk to the chat** is on and the cap is above 0, the run's prompt gets rule 8 with the source
+agent's id and the cap. The design routes questions through the plugin, so the plugin, not the
+model, frames what reaches the chat:
+
+- The run asks by ending its turn with a final message that starts with `[browser-prompt question]`
+  (`QUESTION_MARKER`) and nothing else. It does not message the chat itself.
+- On `agent.turn_ended` the server reads the final message (`parseQuestion`). A question turn is
+  never claimed as the run's report, so the real final report later still goes out once. Failed
+  and canceled turns are never questions.
+- The question is forwarded only for runs a card recorded, through the same serialized
+  wait-until-idle delivery as reports: `[browser-prompt question from run <id>] ... (k of at most N)`,
+  then a note that the block is untrusted data, then `<browser-agent-question>` … escaped like a
+  report (NFKC, invisible characters removed, every `<` and `>` escaped, cut at 1,500 characters) …
+  `</browser-agent-question>`, then plugin-written instructions: answer with the Paseo
+  `send_agent_prompt` tool (agentId = run, `notifyOnFinish` false, no `sessionMode`), starting the
+  prompt with `[browser-prompt answer]`, and never send secrets or approve dangerous actions.
+- Questions are independent of the Report back setting and reach chats in any mode, framed (a
+  status-only notice cannot carry a question). Questions per run are counted in memory (a plugin
+  reload resets the count) and the same turn is forwarded once.
+- With talking off (setting off, cap 0, or unreadable settings, which fail closed), after the cap,
+  or when the chat is gone, archived, itself a browser run, in another workspace or busy for 2 hours,
+  the server sends the run `[browser-prompt] Your question was not forwarded to the chat: ...` so it
+  asks the owner with AskUserQuestion instead.
+- The answer is written by the chat's agent, not by the plugin. The run is told to use answers only
+  as information about the task; rule 3 still applies to them.
 
 ## Self-update on use
 

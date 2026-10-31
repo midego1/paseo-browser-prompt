@@ -11,7 +11,13 @@ import {
 } from "@getpaseo/plugin/client/ui";
 import { useRef, useState } from "react";
 import { Text } from "react-native";
-import { agentModeError, DEFAULT_AGENT_SETTINGS, isClassifierMode } from "../shared/agent-prompt";
+import {
+  agentModeError,
+  DEFAULT_AGENT_SETTINGS,
+  isClassifierMode,
+  MAX_CHAT_QUESTIONS_LIMIT,
+  parseMaxChatQuestions,
+} from "../shared/agent-prompt";
 import { DEFAULT_APP_LINK_TEMPLATE, validateAppLinkTemplate } from "../shared/browser-prompt";
 import { parseReportMode, type ReportMode } from "../shared/report-back";
 import { preferences } from "../shared/settings";
@@ -53,6 +59,8 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
   const providerInput = useRef<SettingsInputHandle>(null);
   const modelInput = useRef<SettingsInputHandle>(null);
   const modeInput = useRef<SettingsInputHandle>(null);
+  const maxQuestionsInput = useRef<SettingsInputHandle>(null);
+  const [maxQuestionsDraft, setMaxQuestionsDraft] = useState<string | null>(null);
 
   if (settings.status !== "ready") {
     const message = settings.status === "loading" ? "Loading..." : `Settings unavailable: ${settings.error}`;
@@ -73,6 +81,9 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
     agent.agentProvider || DEFAULT_AGENT_SETTINGS.agentProvider,
     agent.agentMode || DEFAULT_AGENT_SETTINGS.agentMode,
   );
+  const maxQuestionsText = maxQuestionsDraft ?? String(values.maxChatQuestions);
+  const maxQuestionsParsed = parseMaxChatQuestions(maxQuestionsText);
+  const maxQuestionsError = "error" in maxQuestionsParsed ? maxQuestionsParsed.error : null;
   const agentDirty =
     agent.agentProvider !== values.agentProvider ||
     agent.agentModel !== values.agentModel ||
@@ -146,6 +157,37 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
             hint="Ask “Start a Paseo agent to do these steps in your browser?” first."
             value={values.confirmAgentLaunch}
             onValueChange={(confirmAgentLaunch) => void settings.save({ ...values, confirmAgentLaunch }, revision)}
+          />
+          <SettingsSwitch
+            label="Open the agent when started"
+            hint="Off: the agent works in the background and the card shows its status and an Open link. On: its view opens right away."
+            value={values.openAgentOnStart}
+            onValueChange={(openAgentOnStart) => void settings.save({ ...values, openAgentOnStart }, revision)}
+          />
+          <SettingsSwitch
+            label="Talk to the chat"
+            hint="The agent may ask the chat that showed the card about the task (which button, which value, how to go on when the page differs). The plugin forwards each question marked as untrusted text. Not configurable: passwords, tokens, 2FA codes and approvals of destructive, security, billing, merge or publish actions are always asked of you, never of the chat."
+            value={values.talkToChat}
+            onValueChange={(talkToChat) => void settings.save({ ...values, talkToChat }, revision)}
+          />
+          <SettingsInput
+            ref={maxQuestionsInput}
+            label="Max questions to the chat per run"
+            hint={`0 to ${MAX_CHAT_QUESTIONS_LIMIT}; 0 works like Talk to the chat off. After the limit the agent asks you instead. Default: ${DEFAULT_AGENT_SETTINGS.maxChatQuestions}.`}
+            error={maxQuestionsError ?? undefined}
+            initialValue={String(values.maxChatQuestions)}
+            placeholder={String(DEFAULT_AGENT_SETTINGS.maxChatQuestions)}
+            disabled={!values.talkToChat}
+            onChangeText={setMaxQuestionsDraft}
+          />
+          <SettingsAction
+            label="Save max questions"
+            actionLabel="Save"
+            disabled={maxQuestionsDraft === null || maxQuestionsError !== null || ("value" in maxQuestionsParsed && maxQuestionsParsed.value === values.maxChatQuestions)}
+            onPress={async () => {
+              if (!("value" in maxQuestionsParsed)) return; // never store an invalid cap
+              if (await settings.save({ ...values, maxChatQuestions: maxQuestionsParsed.value }, revision)) setMaxQuestionsDraft(null);
+            }}
           />
           <SettingsSelect
             label="Report back to chat"

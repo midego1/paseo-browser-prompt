@@ -4,7 +4,7 @@ import { Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
 import { z } from "zod";
-import { agentTitle, DEFAULT_AGENT_SETTINGS, resolveAgentConfig, usesClassifierMode } from "../shared/agent-prompt";
+import { agentTitle, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, resolveAgentConfig, usesClassifierMode } from "../shared/agent-prompt";
 import { MOST_RECENT_FALLBACK } from "../shared/report-back";
 import { MAX_DONE, MAX_RUNS, preferences } from "../shared/settings";
 import { stashPrompt } from "../shared/trampoline";
@@ -228,11 +228,11 @@ export function BrowserPromptCard({
       }
       setRunError(null);
       const where = started.workspaceSource === "most-recent" ? " in your most recent workspace" : "";
-      toast.show(
-        layout.compact ? `Paseo agent started${where}. ${DESKTOP_HINT}` : `Paseo agent started${where}.`,
-        { variant: "success", durationMs: 5000 },
-      );
-      openRunScreen(started.agentId, agentTitle(title, displayTitle), true);
+      // Background by default: the card shows the run's status and its Open link.
+      const open = opensAgentOnStart(values);
+      const notice = open ? `Paseo agent started${where}.` : `Paseo agent started in the background${where}. The card shows its status.`;
+      toast.show(layout.compact ? `${notice} ${DESKTOP_HINT}` : notice, { variant: "success", durationMs: 5000 });
+      if (open) openRunScreen(started.agentId, agentTitle(title, displayTitle), true);
     } catch (error) {
       const message = `Could not start a Paseo agent: ${error instanceof Error ? error.message : String(error)}`;
       setRunError(message);

@@ -1,5 +1,12 @@
 import type { PluginOpenScreenInput, usePaseo } from "@getpaseo/plugin/client";
-import { agentTitle, buildAgentPrompt, providerOf, resolveAgentConfig, type AgentSettingsInput } from "../shared/agent-prompt";
+import {
+  agentTitle,
+  buildAgentPrompt,
+  chatQuestionBudget,
+  providerOf,
+  resolveAgentConfig,
+  type AgentSettingsInput,
+} from "../shared/agent-prompt";
 import { enforceRunMode, type ModeCheck, type ModeGuardAgent } from "../shared/mode-guard";
 import { runLabels } from "../shared/report-back";
 
@@ -89,7 +96,10 @@ export async function startBrowserAgent(
   const agent = await paseo.workspaces.ref(workspaceId).agents.create({
     config,
     title: agentTitle(input.cardTitle, input.displayTitle),
-    prompt: buildAgentPrompt(input.cardTitle, input.steps, config),
+    prompt: buildAgentPrompt(input.cardTitle, input.steps, config, {
+      sourceAgentId: input.sourceAgentId,
+      maxQuestions: chatQuestionBudget(input.settings),
+    }),
     labels: runLabels(input.sourceAgentId, input.cardId),
   });
   // Paseo or the provider can end up in another mode than requested; never leave a run going in a
