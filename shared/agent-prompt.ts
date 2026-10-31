@@ -24,7 +24,19 @@ export const ASK_FIRST_MODES: Readonly<Record<string, readonly string[]>> = {
   omp: ["ask"],
 };
 
-/** Modes known to skip or auto-approve permission prompts, for clearer settings errors. */
+/**
+ * Modes where a model classifier, not the owner, reviews permission prompts. Allowed only when the
+ * owner picks one explicitly; never used as a fallback, and never counted as ask-first.
+ */
+export const CLASSIFIER_MODES: Readonly<Record<string, readonly string[]>> = {
+  /** Claude: "Auto mode" (needs the Anthropic API; Paseo refuses it on Bedrock and Vertex). */
+  claude: ["auto"],
+};
+
+/**
+ * Modes known to skip or auto-approve permission prompts, for clearer settings errors. Claude's
+ * `auto` is the one exception the card accepts, as the opt-in classifier mode above.
+ */
 export const UNSAFE_MODES: readonly string[] = [
   "bypassPermissions",
   "bypass",
@@ -49,16 +61,31 @@ function askFirstModes(provider: string): readonly string[] | null {
   return Object.hasOwn(ASK_FIRST_MODES, family) ? ASK_FIRST_MODES[family]! : null;
 }
 
+function classifierModes(provider: string): readonly string[] {
+  const family = providerFamily(provider);
+  return Object.hasOwn(CLASSIFIER_MODES, family) ? CLASSIFIER_MODES[family]! : [];
+}
+
+/** True only for a known ask-first mode: the owner approves each new tool use. */
+export function isAskFirstMode(provider: string, mode: string): boolean {
+  return askFirstModes(provider)?.includes(mode.trim()) ?? false;
+}
+
+/** True for an opt-in mode where a model classifier, not the owner, approves tool calls. */
+export function isClassifierMode(provider: string, mode: string): boolean {
+  return askFirstModes(provider) !== null && classifierModes(provider).includes(mode.trim());
+}
+
 /** Error text for a provider/mode pair the card refuses to start, or null when it is allowed. */
 export function agentModeError(provider: string, mode: string): string | null {
   const allowed = askFirstModes(provider);
   if (!allowed) {
     return `Provider "${provider.trim()}" has no known ask-first mode. Use ${Object.keys(ASK_FIRST_MODES).join(" or ")}.`;
   }
-  if (!allowed.includes(mode.trim())) {
-    return `Mode "${mode.trim()}" is not an ask-first mode for this provider. Allowed: ${allowed.join(", ")}.`;
-  }
-  return null;
+  if (isAskFirstMode(provider, mode) || isClassifierMode(provider, mode)) return null;
+  const classifier = classifierModes(provider);
+  const extra = classifier.length ? `, or ${classifier.join(", ")} (classifier-reviewed, opt-in)` : "";
+  return `Mode "${mode.trim()}" is not allowed for this provider. Allowed: ${allowed.join(", ")} (ask first)${extra}.`;
 }
 
 export const AGENT_TITLE_PREFIX = "Browser: ";
@@ -78,17 +105,50 @@ export const AGENT_SAFETY_PREAMBLE = [
   "5. When finished, report: what was done, step by step; what is left for the owner; and a screenshot path if one is useful.",
 ].join("\n");
 
+/**
+ * Whether a run started in `requestedMode` may be in `actualMode`: any ask-first mode of the
+ * provider (as strict or stricter than any allowed request), or the requested classifier mode when
+ * the owner opted into it. Everything else, including a classifier mode nobody asked for, is not.
+ */
+export function runModeAllowed(provider: string, requestedMode: string, actualMode: string): boolean {
+  if (isAskFirstMode(provider, actualMode)) return true;
+  return actualMode.trim() === requestedMode.trim() && isClassifierMode(provider, requestedMode);
+}
+
+/** Provider id of a `provider/model` config value. */
+export function providerOf(providerModel: string): string {
+  const slash = providerModel.indexOf("/");
+  return slash >= 0 ? providerModel.slice(0, slash) : providerModel;
+}
+
+/**
+ * Extra rule for classifier-reviewed modes: a tool call being approved is not the owner's approval,
+ * so rule 3's stops must be real questions to the owner.
+ */
+export const CLASSIFIER_MODE_RULE = [
+  "6. You run in Auto mode: a model classifier, not the owner, approves your tool calls. An approved tool call is NOT the owner's approval. Before every action listed in rule 3 (secrets, anything destructive or irreversible, merges, deploys, publishing, payments, security, permission, billing, DNS or WAF changes, or a page that differs from the steps), you MUST ask the owner with AskUserQuestion, as a question and not as a permission request, and wait for their answer. If you cannot ask, stop and report instead of acting.",
+].join("\n");
+
 export function agentTitle(cardTitle: string, fallback = "browser steps"): string {
   const name = cardTitle.trim().replace(/\s+/g, " ") || fallback;
   const title = `${AGENT_TITLE_PREFIX}${name}`;
   return title.length > MAX_AGENT_TITLE ? `${title.slice(0, MAX_AGENT_TITLE - 1)}…` : title;
 }
 
-/** The agent's initial prompt: fixed safety preamble, then the card's steps verbatim. */
-export function buildAgentPrompt(cardTitle: string, steps: string): string {
+/** Whether a resolved config runs in a classifier-reviewed mode. */
+export function usesClassifierMode(config: { provider: string; modeId: string } | undefined): boolean {
+  return !!config && isClassifierMode(providerOf(config.provider), config.modeId);
+}
+
+/**
+ * The agent's initial prompt: fixed safety preamble (plus the Auto mode rule when the agent runs in
+ * a classifier-reviewed mode), then the card's steps verbatim.
+ */
+export function buildAgentPrompt(cardTitle: string, steps: string, config?: { provider: string; modeId: string }): string {
   const task = cardTitle.trim() ? `Task: ${cardTitle.trim()}\n\n` : "";
+  const rules = usesClassifierMode(config) ? `${AGENT_SAFETY_PREAMBLE}\n${CLASSIFIER_MODE_RULE}` : AGENT_SAFETY_PREAMBLE;
   return (
-    `${AGENT_SAFETY_PREAMBLE}\n\n` +
+    `${rules}\n\n` +
     `${task}Steps (from the owner's browser-prompt card, verbatim):\n` +
     `<steps>\n${steps}\n</steps>\n`
   );
@@ -108,9 +168,10 @@ export interface ResolvedAgentConfig {
 }
 
 /**
- * Turns the stored settings into an SDK agent config. Blank values fall back to the defaults, and a
- * mode outside the provider's ask-first list falls back to its ask-first mode. Throws for a provider
- * with no known ask-first mode: the card never starts an agent that skips permission prompts.
+ * Turns the stored settings into an SDK agent config. Blank values fall back to the defaults. A mode
+ * that is neither ask-first nor the provider's opt-in classifier mode falls back to its ask-first
+ * mode. Throws for a provider with no known ask-first mode: the card never starts an agent that
+ * skips permission prompts.
  */
 export function resolveAgentConfig(settings: AgentSettingsInput): ResolvedAgentConfig {
   const pick = (value: string | undefined, fallback: string) => (value && value.trim()) || fallback;
@@ -122,7 +183,7 @@ export function resolveAgentConfig(settings: AgentSettingsInput): ResolvedAgentC
   const allowed = askFirstModes(providerId);
   if (!allowed) throw new Error(agentModeError(providerId, "")!);
   let modeId = pick(settings.agentMode, allowed[0]!);
-  if (!allowed.includes(modeId)) modeId = allowed[0]!;
+  if (!isAskFirstMode(providerId, modeId) && !isClassifierMode(providerId, modeId)) modeId = allowed[0]!;
   return {
     provider: providerModel,
     modeId,

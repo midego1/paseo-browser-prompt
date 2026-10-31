@@ -1,7 +1,7 @@
 // Pure logic for "Report back to chat": the labels that link a browser agent to the agent whose card
 // started it, picking the browser agent's final report, and framing it as a prompt.
 // Imports only other dependency-free shared modules so `node --experimental-strip-types` can load it.
-import { agentModeError } from "./agent-prompt.ts";
+import { isAskFirstMode } from "./agent-prompt.ts";
 
 /** Marks agents the plugin started; only these are ever reported back. */
 export const RUN_LABEL = "browser-prompt";
@@ -10,6 +10,8 @@ export const RUN_LABEL_VALUE = "run";
 export const SOURCE_LABEL = "browser-prompt-source";
 /** Card id within that agent's timeline. */
 export const CARD_LABEL = "browser-prompt-card";
+/** Permission mode the card requested; the server's mode guard checks the run against it. */
+export const MODE_LABEL = "browser-prompt-mode";
 
 /** Third element of a `runs` entry when the run did not start in the card agent's workspace. */
 export const MOST_RECENT_FALLBACK = "most-recent";
@@ -32,8 +34,13 @@ export const REPORT_OPEN = "<browser-agent-report>";
 export const REPORT_CLOSE = "</browser-agent-report>";
 
 /** Labels for an agent started from a card. */
-export function runLabels(sourceAgentId: string, cardId: string): Record<string, string> {
-  return { [RUN_LABEL]: RUN_LABEL_VALUE, [SOURCE_LABEL]: sourceAgentId, [CARD_LABEL]: cardId };
+export function runLabels(sourceAgentId: string, cardId: string, modeId?: string): Record<string, string> {
+  return {
+    [RUN_LABEL]: RUN_LABEL_VALUE,
+    [SOURCE_LABEL]: sourceAgentId,
+    [CARD_LABEL]: cardId,
+    ...(modeId ? { [MODE_LABEL]: modeId } : {}),
+  };
 }
 
 export function isBrowserRun(labels: Record<string, unknown> | null | undefined): boolean {
@@ -64,11 +71,14 @@ export function parseReportMode(value: unknown): ReportMode {
   return (REPORT_MODES as readonly unknown[]).includes(value) ? (value as ReportMode) : DEFAULT_REPORT_MODE;
 }
 
-/** Whether the source agent may get page-derived text: only in a known ask-first mode. */
+/**
+ * Whether the source agent may get page-derived text: only in a known ask-first mode. Classifier
+ * modes such as Claude's Auto mode do not count: a classifier, not the owner, approves their tools.
+ */
 export function sourceAllowsFullReport(mode: ReportMode, provider: string | null | undefined, modeId: string | null | undefined): boolean {
   if (mode === "full") return true;
   if (mode !== "auto" || !provider || !modeId) return false;
-  return agentModeError(provider, modeId) === null;
+  return isAskFirstMode(provider, modeId);
 }
 
 type TimelineItemLike = { type: string; text?: unknown; messageId?: unknown };

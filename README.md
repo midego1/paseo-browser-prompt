@@ -65,8 +65,9 @@ Rules:
   first fetch. The prompt is never in the launcher URL, and prompt text is never logged.
 - ChatGPT web mode puts the prompt in the `chatgpt.com` URL only when it is short and has nothing
   that looks like a credential.
-- Run with Paseo agent starts agents only in ask-first permission modes and always prepends the
-  fixed safety preamble.
+- Run with Paseo agent starts agents in an ask-first permission mode (Always Ask by default), or in
+  Claude Auto mode only when you choose it, and always prepends the fixed safety preamble. A run
+  that ends up in any other mode is set back or stopped.
 - Links in rendered messages open only when they are http(s) URLs; the ChatGPT app deep link may
   use only the `codex:` or `https:` scheme.
 - No telemetry. Self-update only from the `https://` remote the plugin was installed from, and only
@@ -111,6 +112,17 @@ changes restart the listener. The client only uses the URL the server returns.
 
 ## Run with Paseo agent
 
+Settings (**Settings → Plugins → Browser prompts → Run with Paseo agent**):
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Confirm before starting | on | Asks before starting the agent; says so when it will run in Auto mode. |
+| Report back to chat | Auto | Auto, Always send the full report, or Off (see below). |
+| Provider | `claude` | Paseo provider id; only providers with a known ask-first mode are started. |
+| Model | `claude-sonnet-5-5` | Model id, or `provider/model`. |
+| Permission mode | `default` | Ask-first: `default` (Always Ask) or `plan` for Claude, `ask` for Oh My Pi. Opt-in: `auto` (Claude Auto mode, a model classifier approves tool calls; shows a warning). Bypass, accept-edits and other modes fall back to the ask-first mode. |
+| Thinking | `high` | Thinking level passed to the provider. |
+
 The card's "Run with Paseo agent" button uses the app's own Paseo connection (`usePaseo()`):
 
 - Workspace: `useAgent(cardAgentId, a => a.workspaceId)`; if the app has no snapshot yet,
@@ -118,10 +130,23 @@ The card's "Run with Paseo agent" button uses the app's own Paseo connection (`u
   (`workspaces.list({ sort: activity_at desc, limit 1 })`).
 - `paseo.workspaces.ref(workspaceId).agents.create({ config, title: "Browser: <title>", prompt, labels })`
   with `config = { provider: "claude/claude-sonnet-5-5", modeId: "default", thinkingOptionId: "high" }`
-  by default (host settings). Only ask-first modes are used (`ASK_FIRST_MODES`: claude `default`/`plan`,
-  omp `ask`); other modes fall back to the ask-first mode and providers without one are refused.
-- `prompt = buildAgentPrompt(title, steps)`: fixed safety preamble (`AGENT_SAFETY_PREAMBLE`)
-  plus the steps verbatim inside `<steps>`.
+  by default (host settings). Allowed modes are the ask-first modes (`ASK_FIRST_MODES`: claude
+  `default`/`plan`, omp `ask`) and, only when chosen explicitly, the classifier-reviewed modes
+  (`CLASSIFIER_MODES`: claude `auto`, the provider's "Auto mode"). Other modes fall back to the
+  ask-first mode and providers without one are refused. Auto mode is never a fallback and never
+  counts as ask-first (report back treats a source in Auto mode as unsafe).
+- `prompt = buildAgentPrompt(title, steps, config)`: fixed safety preamble (`AGENT_SAFETY_PREAMBLE`),
+  in Auto mode followed by `CLASSIFIER_MODE_RULE` (an approved tool call is not the owner's
+  approval; the stops of rule 3 must be AskUserQuestion questions), then the steps verbatim inside
+  `<steps>`.
+- Mode guard (`shared/mode-guard.ts`): right after creating the agent the card reads its actual
+  mode (`refresh()`, a few tries until it is reported). The server checks again whenever a run's
+  turn starts or it requests a permission (`server/mode-guard-hook.ts`). A mode outside the allowed
+  set for the requested mode (`runModeAllowed`: any ask-first mode, or the requested Auto mode) is
+  set back if the SDK has a mode setter; the plugin SDK (0.11 to 0.14) has none, so the run is
+  stopped by archiving it, and the card shows the error. Runs from 0.2.0 carry no
+  `browser-prompt-mode` label and may only be in an ask-first mode. Switching a run to another mode
+  yourself also stops it.
 - The card remembers `<agentId>:<cardId> -> startedAgentId` in host settings (plus `"most-recent"`
   when the run started outside the card agent's workspace; a save that loses a revision race is
   retried against the newest settings) and shows the
@@ -131,7 +156,8 @@ The card's "Run with Paseo agent" button uses the app's own Paseo connection (`u
   `useAgent`/`useWorkspace` (they throw "Plugin state hooks must run inside a workspace
   panel"); `test/screen-hooks.test.mjs` checks every registered screen's import graph.
 - Labels (`shared/report-back.ts` `runLabels`): `browser-prompt: run`,
-  `browser-prompt-source: <card agent id>`, `browser-prompt-card: <card id>`.
+  `browser-prompt-source: <card agent id>`, `browser-prompt-card: <card id>`,
+  `browser-prompt-mode: <requested mode id>`.
 - Nothing is appended to timelines and prompt text is never logged.
 
 ### Report back to chat

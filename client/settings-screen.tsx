@@ -11,7 +11,7 @@ import {
 } from "@getpaseo/plugin/client/ui";
 import { useRef, useState } from "react";
 import { Text } from "react-native";
-import { agentModeError, DEFAULT_AGENT_SETTINGS } from "../shared/agent-prompt";
+import { agentModeError, DEFAULT_AGENT_SETTINGS, isClassifierMode } from "../shared/agent-prompt";
 import { DEFAULT_APP_LINK_TEMPLATE, validateAppLinkTemplate } from "../shared/browser-prompt";
 import { parseReportMode, type ReportMode } from "../shared/report-back";
 import { preferences } from "../shared/settings";
@@ -68,6 +68,10 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
   };
   // Only ask-first modes are allowed; bypass, auto-approve and accept-edits modes are refused.
   const modeError = agentModeError(agent.agentProvider || DEFAULT_AGENT_SETTINGS.agentProvider, agent.agentMode || DEFAULT_AGENT_SETTINGS.agentMode);
+  const autoModeSelected = isClassifierMode(
+    agent.agentProvider || DEFAULT_AGENT_SETTINGS.agentProvider,
+    agent.agentMode || DEFAULT_AGENT_SETTINGS.agentMode,
+  );
   const agentDirty =
     agent.agentProvider !== values.agentProvider ||
     agent.agentModel !== values.agentModel ||
@@ -168,12 +172,20 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
           <SettingsInput
             ref={modeInput}
             label="Permission mode"
-            hint="Default: default (Always Ask), so you approve tool use. Only ask-first modes are accepted; bypass, auto and accept-edits modes are refused."
+            hint="Default: default (Always Ask), so you approve tool use. Ask-first modes: default and plan (Claude), ask (Oh My Pi). Opt-in: auto (Claude Auto mode). Bypass and accept-edits modes are refused."
             error={modeError ?? undefined}
             initialValue={values.agentMode}
             placeholder={DEFAULT_AGENT_SETTINGS.agentMode}
             onChangeText={(agentMode) => setAgentDraft((d) => ({ ...d, agentMode }))}
           />
+          {autoModeSelected ? (
+            <Text style={{ color: theme.colors.statusWarning, fontSize: 13, lineHeight: 18, paddingHorizontal: 16, paddingVertical: 10 }}>
+              Auto mode: a model classifier approves this agent&apos;s tool calls, not you. The agent is still told to stop
+              and ask you, as a question, before secrets, anything destructive or irreversible, merges, payments and
+              security changes, but a classifier approval is not your approval. Not available when Claude Code uses
+              Bedrock or Vertex.
+            </Text>
+          ) : null}
           <SettingsAction
             label="Save agent provider, model and mode"
             actionLabel="Save"

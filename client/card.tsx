@@ -4,7 +4,7 @@ import { Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
 import { z } from "zod";
-import { agentTitle, DEFAULT_AGENT_SETTINGS } from "../shared/agent-prompt";
+import { agentTitle, DEFAULT_AGENT_SETTINGS, resolveAgentConfig, usesClassifierMode } from "../shared/agent-prompt";
 import { MOST_RECENT_FALLBACK } from "../shared/report-back";
 import { MAX_DONE, MAX_RUNS, preferences } from "../shared/settings";
 import { stashPrompt } from "../shared/trampoline";
@@ -57,6 +57,7 @@ export function BrowserPromptCard({
   const toast = useToast();
   const [localDone, setLocalDone] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
   const [localRun, setLocalRun] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const paseo = usePaseo();
@@ -76,6 +77,14 @@ export function BrowserPromptCard({
   const runState = useRunState(runAgentId);
   const confirmLaunch =
     settings.status === "ready" ? settings.values.confirmAgentLaunch : DEFAULT_AGENT_SETTINGS.confirmAgentLaunch;
+  /** The next run would use Claude Auto mode (classifier-reviewed); the confirmation says so. */
+  const launchesInAutoMode = useMemo(() => {
+    try {
+      return usesClassifierMode(resolveAgentConfig(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS));
+    } catch {
+      return false;
+    }
+  }, [settings]);
 
   useEffect(() => {
     updates.onFirstRender();
@@ -211,6 +220,13 @@ export function BrowserPromptCard({
         settings: values,
       });
       await rememberRun(started.agentId, started.workspaceSource === "most-recent");
+      if (!started.modeCheck.ok) {
+        // The run left its permission mode and was stopped (or could not be): keep it on the card.
+        setRunError(started.modeCheck.message);
+        toast.error(started.modeCheck.message);
+        return;
+      }
+      setRunError(null);
       const where = started.workspaceSource === "most-recent" ? " in your most recent workspace" : "";
       toast.show(
         layout.compact ? `Paseo agent started${where}. ${DESKTOP_HINT}` : `Paseo agent started${where}.`,
@@ -218,7 +234,9 @@ export function BrowserPromptCard({
       );
       openRunScreen(started.agentId, agentTitle(title, displayTitle), true);
     } catch (error) {
-      toast.error(`Could not start a Paseo agent: ${error instanceof Error ? error.message : String(error)}`);
+      const message = `Could not start a Paseo agent: ${error instanceof Error ? error.message : String(error)}`;
+      setRunError(message);
+      toast.error(message);
     } finally {
       setBusy(false);
     }
@@ -307,6 +325,12 @@ export function BrowserPromptCard({
           </Pressable>
         </View>
       ) : null}
+      {runError ? (
+        <View style={styles.runRow}>
+          <Icon name="CircleX" size={14} color={theme.colors.statusDanger} />
+          <Text style={[styles.hint, { color: theme.colors.statusDanger, flexShrink: 1 }]}>{runError}</Text>
+        </View>
+      ) : null}
       {runAgentId && layout.compact ? <Text style={styles.hint}>{DESKTOP_HINT}</Text> : null}
       <Modal
         title="Run with Paseo agent"
@@ -316,10 +340,17 @@ export function BrowserPromptCard({
       >
         <Modal.Content>
           <Text style={styles.modalText}>Start a Paseo agent to do these steps in your browser?</Text>
-          <Text style={styles.hint}>
-            It uses only the Paseo browser tabs, asks before every new tool, and stops to ask you before secrets or
-            anything destructive.
-          </Text>
+          {launchesInAutoMode ? (
+            <Text style={[styles.hint, { color: theme.colors.statusWarning }]}>
+              It runs in Claude Auto mode: a model classifier, not you, approves its tool calls. It uses only the Paseo
+              browser tabs and is told to ask you, as a question, before secrets or anything destructive.
+            </Text>
+          ) : (
+            <Text style={styles.hint}>
+              It uses only the Paseo browser tabs, asks before every new tool, and stops to ask you before secrets or
+              anything destructive.
+            </Text>
+          )}
           {layout.compact ? <Text style={styles.hint}>{DESKTOP_HINT}</Text> : null}
           <View style={styles.modalActions}>
             <Pressable accessibilityRole="button" onPress={() => setConfirmOpen(false)} style={styles.secondary}>

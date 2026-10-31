@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+
+- Run with Paseo agent can use Claude **Auto mode** (`auto`, a model classifier reviews permission
+  prompts) as an explicit opt-in. The default stays Always Ask; bypass and accept-edits modes are
+  still refused. Settings show a warning for Auto mode, the confirmation names it, and the safety
+  preamble gets an extra rule: an approved tool call is not the owner's approval, so the agent must
+  ask with AskUserQuestion before secrets, destructive actions, merges, payments and security changes.
+- Mode guard: the card checks the mode a new run actually uses, and the server re-checks on every
+  turn start and permission request. A run outside the allowed modes is stopped (archived) and the
+  card shows an error; the plugin SDK has no way to set the mode back.
+- Report back: a source chat in Auto mode still gets only the status-only notice.
+- New label `browser-prompt-mode` on runs.
+
 ## 0.2.0 (unreleased)
 
 - Report back to chat: when a browser agent started from a card finishes or fails, the agent whose
