@@ -7,7 +7,13 @@ scripts/demo/record.sh
 ```
 
 It needs Docker (rootless is fine) and network access to pull `ghcr.io/getpaseo/paseo` and the
-Playwright image. Set `PASEO_IMAGE` to record against another Paseo release.
+Playwright image. The Paseo image is pinned to the release the tour was recorded with
+(`PASEO_VERSION`, default `0.14.0`); set `PASEO_VERSION` or `PASEO_IMAGE` to record against another.
+Only committed files of this checkout are installed into the demo daemon, so commit changes to the
+plugin or `stand-in-model/` first. Frames and outputs go to a private work directory (mode 700,
+`DEMO_WORK` to choose it); the recorder runs as your user (`--user` on regular Docker; on rootless
+Docker the container's root already is your user). Its dependencies are installed with `npm ci` from
+`package-lock.json`.
 
 ## What runs where
 

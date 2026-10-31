@@ -15,8 +15,13 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 DEMO="$REPO/scripts/demo"
+# Private work dir for frames and outputs (DEMO_WORK to pick one; it is made private too).
 WORK="${DEMO_WORK:-$(mktemp -d /tmp/browser-prompt-demo.XXXXXX)}"
-PASEO_IMAGE="${PASEO_IMAGE:-ghcr.io/getpaseo/paseo:latest}"
+mkdir -p "$WORK"
+chmod 700 "$WORK"
+# The Paseo release the tour was recorded with; PASEO_VERSION or PASEO_IMAGE to record another.
+PASEO_VERSION="${PASEO_VERSION:-0.14.0}"
+PASEO_IMAGE="${PASEO_IMAGE:-ghcr.io/getpaseo/paseo:$PASEO_VERSION}"
 TOOLS_IMAGE="browser-prompt-demo-tools"
 DAEMON="browser-prompt-demo-daemon"
 
@@ -24,6 +29,15 @@ cleanup() { docker rm -f "$DAEMON" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 as_paseo() { docker exec --user paseo "$DAEMON" "$@"; }
+
+# The recorder writes into $WORK, so it runs as you: --user with your uid and gid on regular Docker.
+# On rootless Docker the container's root already is your user, and any other uid would map to a
+# subordinate one that cannot write the private $WORK, so no --user there.
+if docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless; then
+  RUN_AS=()
+else
+  RUN_AS=(--user "$(id -u):$(id -g)")
+fi
 
 echo "Building the recorder image"
 docker build -q -t "$TOOLS_IMAGE" "$DEMO" >/dev/null
@@ -35,9 +49,10 @@ docker run -d --name "$DAEMON" --hostname demo-host \
   "$PASEO_IMAGE" >/dev/null
 timeout 120 bash -c "until docker logs $DAEMON 2>&1 | grep -q 'WebSocket server initialized'; do sleep 2; done"
 
-echo "Installing this checkout of the plugin and the demo stand-in model"
+echo "Installing the committed files of this checkout and the demo stand-in model"
 docker exec "$DAEMON" mkdir -p /opt/browser-prompt
-(cd "$REPO" && git ls-files -z --cached --others --exclude-standard | xargs -0 tar -c) | docker exec -i "$DAEMON" tar -x -C /opt/browser-prompt
+# Tracked files only: commit changes to the plugin or stand-in-model/ before recording.
+(cd "$REPO" && git ls-files -z --cached | xargs -0 tar -c) | docker exec -i "$DAEMON" tar -x -C /opt/browser-prompt
 docker exec "$DAEMON" chown -R paseo:paseo /opt/browser-prompt
 as_paseo paseo daemon config set pluginsEnabled true >/dev/null
 as_paseo paseo reload --json >/dev/null
@@ -53,11 +68,12 @@ WORKSPACE_ID="$(as_paseo paseo agent run --provider claude-demo/stand-in --mode 
 test -n "$WORKSPACE_ID"
 
 echo "Recording and encoding"
-mkdir -p "$WORK"
-cp "$DEMO"/capture.mjs "$DEMO"/overlay.mjs "$DEMO"/screencast.mjs "$DEMO"/encode.mjs "$DEMO"/package.json "$WORK"/
-chmod -R a+rwX "$WORK"
-docker run --rm --network "container:$DAEMON" -e DEMO_WORKSPACE_ID="$WORKSPACE_ID" -v "$WORK:/rec" -w /rec "$TOOLS_IMAGE" sh -c '
-  npm install --silent --no-audit --no-fund >/dev/null 2>&1 &&
+cp "$DEMO"/capture.mjs "$DEMO"/overlay.mjs "$DEMO"/screencast.mjs "$DEMO"/encode.mjs \
+  "$DEMO"/package.json "$DEMO"/package-lock.json "$WORK"/
+docker run --rm "${RUN_AS[@]}" --network "container:$DAEMON" \
+  -e DEMO_WORKSPACE_ID="$WORKSPACE_ID" -e HOME=/rec/.home -e npm_config_cache=/rec/.npm \
+  -v "$WORK:/rec" -w /rec "$TOOLS_IMAGE" sh -c '
+  npm ci --silent --no-audit --no-fund >/dev/null 2>&1 &&
   node capture.mjs &&
   node encode.mjs &&
   exiftool -s -s -s -All out/browser-prompt-tour.mp4 out/browser-prompt-tour.gif | grep -viE "^(\\[|$)" > out/metadata.txt || true'

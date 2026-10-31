@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.6 (unreleased)
+
+- The README tour GIF is the listing's interface image: `media` in `paseo-plugin.json` and in the
+  npm package `files` (the MP4 stays out of the package).
+- `scripts/demo/record.sh`: copies only committed files into the demo daemon, uses a private work
+  directory (mode 700) and runs the recorder as your user instead of opening the directory to
+  everyone, pins the Paseo image to the recorded release (`PASEO_VERSION`, default 0.14.0), and
+  installs the recorder's dependencies from a lockfile with `npm ci`.
+
 ## 0.6.5 (unreleased)
 
 - README tour: `docs/assets/browser-prompt-tour.gif` (linking to the `.mp4`) with captions, recorded
