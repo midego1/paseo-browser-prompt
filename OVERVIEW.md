@@ -6,7 +6,7 @@ When an assistant message contains a fenced code block whose info string is `bro
 
 - **Start in ChatGPT** copies the steps to the clipboard with a short header asking ChatGPT to carry them out with computer use, and to stop and ask before entering secrets or confirming destructive actions. It then opens ChatGPT as set in the settings.
 - **Copy** copies the same text without opening anything.
-- **Done** marks the card as finished. Done marks are stored on the Paseo host, so every connected app sees them.
+- **Mark done** marks the card as finished (**Undo done** reverts it). Done marks are stored on the Paseo host, so every connected app sees them.
 - **Run with Paseo agent** starts a new Paseo agent that carries out the steps in the browser tabs of your Paseo desktop app.
 
 A card appears only after the block's closing fence has streamed in. Blocks nested inside another code block are ignored. The README describes the block convention for agents.

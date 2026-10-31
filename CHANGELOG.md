@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1 (unreleased)
+
+- The card's done button reads **Mark done** instead of "Done ✓", so it no longer shows two
+  checkmarks next to its Check icon. **Undo done** is unchanged.
+
 ## 0.5.0 (unreleased)
 
 - Step progress on the card (setting **Show step progress**, on by default): the agent writes
