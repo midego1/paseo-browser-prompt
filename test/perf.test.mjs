@@ -26,6 +26,10 @@ const ADVERSARIAL = {
   "step markers": fill("[browser-prompt step 1/"),
   "question marker": fill(`${QUESTION_MARKER} `),
   "mixed": fill("![<img [x]( file://paseo-attachments-"),
+  "![[": fill("![["),
+  "![a [": fill("![a ["),
+  "![[a]": fill("![[a]"),
+  "![a [b] c](": fill("![a [b] c]("),
 };
 
 const PATHS = {

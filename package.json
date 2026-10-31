@@ -1,7 +1,7 @@
 {
   "name": "browser-prompt",
   "private": true,
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Paseo plugin: turns browser-prompt code blocks in agent replies into cards that start the steps in ChatGPT or a Paseo browser agent, copy them, or mark them done.",
   "license": "MIT",
   "files": [

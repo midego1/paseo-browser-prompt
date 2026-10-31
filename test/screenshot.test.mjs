@@ -4,11 +4,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createReportBack } from "../server/report-back.ts";
 import { buildAgentPrompt, DEFAULT_AGENT_SETTINGS, QUESTION_MARKER, resolveAgentConfig, SCREENSHOT_RULE } from "../shared/agent-prompt.ts";
-import { buildReportMessage, escapeUntrusted, finalAssistantText, runLabels } from "../shared/report-back.ts";
+import { buildReportMessage, buildStatusNotice, escapeUntrusted, finalAssistantText, runLabels } from "../shared/report-back.ts";
 import { buildQuestionMessage } from "../shared/talk.ts";
 import { createRunTracker } from "../shared/run-tracker.ts";
 import {
   createScreenshotTracker,
+  defuseImages,
   isImageOnly,
   isScreenshotTool,
   latestScreenshot,
@@ -244,4 +245,36 @@ test("B2: the shared chat escape strips images, also from look-alike and error t
   assert.doesNotMatch(report, /paseo-attachments|file:|!\[|&lt;img/);
   const question = buildQuestionMessage({ title: "T", runId: "run", question: `Which? ![x](${PNG_A}) ${PNG_B}`, index: 1, max: 3 });
   assert.doesNotMatch(question, /paseo-attachments|file:|!\[/);
+});
+
+// ---- 0.6.3: one level of nested alt text, and defusing whatever is left ----
+
+const REMOTE = "https://t.example/p?d=1";
+const noLiveImage = (text) => !text.includes("![");
+
+test("one level of [...] in alt text is stripped as a whole image", () => {
+  assert.equal(stripImagesForChat(`A ![a [b] c](${REMOTE}) B`), "A  B", "the reviewer's example");
+  assert.equal(stripImagesForChat(`A ![a [b] c][ref] B`), "A  B", "reference style");
+  assert.equal(stripImagesForChat(`A ![[b]](${REMOTE} "t") B`), "A  B");
+});
+
+test("anything still shaped like an image is defused in chat text", () => {
+  assert.equal(defuseImages(`x ![a](${REMOTE})`), `x !\\[a](${REMOTE})`);
+  assert.equal(defuseImages(defuseImages("![a](b)")), "!\\[a](b)", "already defused text is left alone");
+  assert.equal(defuseImages("a!b [c] !\\[d]"), "a!b [c] !\\[d]");
+  const deep = `See ![a [b [c]] d](${REMOTE}) now`;
+  assert.ok(noLiveImage(escapeUntrusted(deep)), escapeUntrusted(deep));
+  assert.ok(escapeUntrusted(deep).includes("!\\["), "kept as literal text");
+  assert.ok(noLiveImage(escapeUntrusted(`![a [b] c](${REMOTE})`)));
+  assert.ok(noLiveImage(escapeUntrusted("！［a［b［c］］］（https://t.example/x.png）")), "fullwidth look-alikes");
+});
+
+test("report, question and status texts never contain a live image, including in titles", () => {
+  const deep = `![a [b [c]] d](${REMOTE})`;
+  const report = buildReportMessage({ title: `Browser: ${deep}`, browserAgentId: "run", outcome: { kind: "failed", message: deep }, report: `Done ${deep}` });
+  assert.ok(noLiveImage(report), report);
+  const question = buildQuestionMessage({ title: deep, runId: "run", question: `Which? ${deep}`, index: 1, max: 2 });
+  assert.ok(noLiveImage(question), question);
+  const notice = buildStatusNotice({ title: deep, browserAgentId: "run", outcome: { kind: "completed" } });
+  assert.ok(noLiveImage(notice), notice);
 });

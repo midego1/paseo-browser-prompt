@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.3 (unreleased)
+
+- Chat-bound text (reports, questions, error text and titles) defuses every `![` left after image
+  stripping into `!\[`, so nothing can render as an image there, even with deeply nested alt text
+  and a remote URL. Image stripping now also removes images whose alt text holds one level of
+  `[...]`. Both stay linear (tested with 100k-character adversarial input).
+
 ## 0.6.2 (unreleased)
 
 - Image stripping for chat text and the screenshot checks are linear in their input: alt text no
