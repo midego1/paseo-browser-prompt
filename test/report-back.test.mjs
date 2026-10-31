@@ -318,6 +318,7 @@ test("a finished run reports the full report to an ask-first source, once", asyn
 test("auto sends a status-only notice to a source that acts without approval", async () => {
   for (const source of [
     { labels: {}, currentModeId: "bypassPermissions" },
+    { labels: {}, currentModeId: "auto" }, // Claude Auto mode: classifier-reviewed, not ask-first
     { labels: {}, provider: "codex", currentModeId: "auto" },
     { labels: {}, currentModeId: null },
   ]) {

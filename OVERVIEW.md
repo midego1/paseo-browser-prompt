@@ -17,7 +17,7 @@ No account or token is needed. Paseo 0.11.4 or later.
 
 - **ChatGPT web mode** and **Copy only** work everywhere.
 - **ChatGPT app mode** (the desktop default) opens the ChatGPT desktop app with the prompt in a new chat (you still press send). It needs the ChatGPT desktop app on macOS or Windows and a small launcher page served by the plugin on the Paseo daemon's host. The launcher binds only to that host's own Tailscale address (100.64.0.0/10, detected with `tailscale ip -4` or from Tailscale's network interface) or, if you set it, to 127.0.0.1 when the Paseo app runs on the same machine. It never binds to 0.0.0.0, a LAN or a public address. Tailscale is optional: without it the launcher stays off and Start in ChatGPT copies the prompt instead. The first time, the browser asks whether to open ChatGPT.
-- **Run with Paseo agent** needs the Paseo desktop app open with its browser available, and an enabled Claude provider (or another provider with a known ask-first mode).
+- **Run with Paseo agent** needs the Paseo desktop app open with its browser available, and an enabled Claude provider (or another provider with a known ask-first mode). Claude Auto mode needs Claude Code on the Anthropic API; Paseo refuses it on Bedrock and Vertex.
 
 ## What is read and where data goes
 
@@ -32,7 +32,9 @@ No account or token is needed. Paseo 0.11.4 or later.
 
 ## Run with Paseo agent
 
-The agent starts in Claude's Always Ask mode by default, so you approve each new tool use. Only ask-first modes are accepted (Claude: Always Ask or Plan; Oh My Pi: Ask). Bypass, auto-approve and accept-edits modes are refused, and providers without a known ask-first mode are not started. By default the card asks "Start a Paseo agent to do these steps in your browser?" first.
+The agent starts in Claude's Always Ask mode by default, so you approve each new tool use. Ask-first modes are accepted (Claude: Always Ask or Plan; Oh My Pi: Ask). As an explicit opt-in you can choose Claude **Auto mode** (`auto`), where a model classifier, not you, approves the agent's tool calls; settings then show a warning, the confirmation says so, and the agent is additionally told that an approved tool call is not your approval and that it must ask you, as a question, before secrets, anything destructive or irreversible, merges, payments and security changes. Bypass, accept-edits and other auto-approve modes are refused, and providers without a known ask-first mode are not started. By default the card asks "Start a Paseo agent to do these steps in your browser?" first.
+
+The plugin checks the mode the agent actually runs in, right after starting it and again whenever it starts a turn or asks for a permission. If it is in any other mode than the allowed ones (for example Auto mode when you did not choose it), it is stopped (archived) and the card shows why. Switching a run to another mode yourself stops it too.
 
 The safety preamble is always included. It tells the agent to use only the Paseo browser tools (no shell commands, no file edits, no browser on the server), to stop and ask before typing any secret, before anything destructive or irreversible and whenever the page differs from the steps, never to repeat secret values shown on a page, and to finish with a summary of what it did and what is left for you.
 

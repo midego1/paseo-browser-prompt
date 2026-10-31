@@ -32,8 +32,18 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
 - The launcher listens only on the daemon host's own Tailscale address (100.64.0.0/10) or on
   127.0.0.1, never on 0.0.0.0, a LAN or a public address. Anyone who can reach that address and
   guess a live 18-byte random id within 10 minutes could open that one prompt; ids are single-use.
-- Run with Paseo agent starts agents only in ask-first permission modes. The agent acts in your
-  Paseo desktop app's browser, where you may be signed in; review each tool approval.
+- Run with Paseo agent starts agents in an ask-first permission mode by default. The agent acts in
+  your Paseo desktop app's browser, where you may be signed in; review each tool approval.
+- Claude Auto mode is an opt-in. In it a model classifier, not you, approves the browser agent's
+  tool calls, including clicks and form submissions on sites where you are signed in. The safety
+  preamble tells the agent to ask you as a question before secrets, destructive or irreversible
+  actions, merges, payments and security changes, but that is an instruction to a model, not an
+  enforced control: a misbehaving model, or a web page that manipulates it, could act without
+  asking, and the classifier may approve it. Use Auto mode only for steps where that risk is
+  acceptable.
+- The plugin checks the mode a run actually uses and stops (archives) runs that end up in a mode
+  that was not allowed. Stopping takes a moment after the agent starts or changes mode, so a few
+  tool calls can happen before it.
 - Report back to chat can forward the browser agent's report, which can echo text from web pages,
   to the agent that showed the card. The report is escaped, fenced and labelled as untrusted
   output, but a model may still be influenced by it. Auto (the default) therefore forwards it only

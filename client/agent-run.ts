@@ -1,5 +1,6 @@
 import type { PluginOpenScreenInput, usePaseo } from "@getpaseo/plugin/client";
-import { agentTitle, buildAgentPrompt, resolveAgentConfig, type AgentSettingsInput } from "../shared/agent-prompt";
+import { agentTitle, buildAgentPrompt, providerOf, resolveAgentConfig, type AgentSettingsInput } from "../shared/agent-prompt";
+import { enforceRunMode, type ModeCheck, type ModeGuardAgent } from "../shared/mode-guard";
 import { runLabels } from "../shared/report-back";
 
 type PaseoApi = ReturnType<typeof usePaseo>;
@@ -37,6 +38,8 @@ export interface StartedAgent {
   agentId: string;
   workspaceId: string;
   workspaceSource: WorkspaceSource;
+  /** Whether the agent actually runs in an allowed mode; when not, it was stopped if possible. */
+  modeCheck: ModeCheck;
 }
 
 /**
@@ -86,8 +89,10 @@ export async function startBrowserAgent(
   const agent = await paseo.workspaces.ref(workspaceId).agents.create({
     config,
     title: agentTitle(input.cardTitle, input.displayTitle),
-    prompt: buildAgentPrompt(input.cardTitle, input.steps),
-    labels: runLabels(input.sourceAgentId, input.cardId),
+    prompt: buildAgentPrompt(input.cardTitle, input.steps, config),
+    labels: runLabels(input.sourceAgentId, input.cardId, config.modeId),
   });
-  return { agentId: agent.id, workspaceId, workspaceSource: source };
+  // Paseo or the provider can end up in another mode than requested; never leave such a run going.
+  const modeCheck = await enforceRunMode(agent as unknown as ModeGuardAgent, providerOf(config.provider), config.modeId);
+  return { agentId: agent.id, workspaceId, workspaceSource: source, modeCheck };
 }

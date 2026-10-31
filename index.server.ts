@@ -1,5 +1,6 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { createLauncher } from "./server/launcher";
+import { registerModeGuard } from "./server/mode-guard-hook";
 import { registerReportBack } from "./server/report-back-hook";
 import { fileReportedStore } from "./server/reported-store";
 import { createServerUpdater, currentUpdateStatus } from "./server/updater";
@@ -38,8 +39,11 @@ export default function contribute(server: PluginServerContext) {
 
   // Report back to chat: a finished browser run reports to the agent whose card started it.
   const reportBack = registerReportBack(server, settings, { store: fileReportedStore() });
+  // Mode guard: a browser run that leaves its allowed permission mode is set back or stopped.
+  const modeGuard = registerModeGuard(server);
 
   return async () => {
+    modeGuard.dispose();
     await reportBack.dispose();
     unsubscribe();
     await launcher.close();
