@@ -1,10 +1,11 @@
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { useAgent, usePaseo, useRpc, useSettings } from "@getpaseo/plugin/client";
 import { Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
 import { z } from "zod";
 import { agentTitle, DEFAULT_AGENT_SETTINGS } from "../shared/agent-prompt";
+import { MOST_RECENT_FALLBACK } from "../shared/report-back";
 import { MAX_DONE, MAX_RUNS, preferences } from "../shared/settings";
 import { stashPrompt } from "../shared/trampoline";
 import {
@@ -51,6 +52,8 @@ export function BrowserPromptCard({
   const { cardId, title, text, index } = item.data;
   const doneKey = `${agentId}:${cardId}`;
   const settings = useSettings(preferences);
+  const latestSettings = useRef(settings);
+  latestSettings.current = settings;
   const toast = useToast();
   const [localDone, setLocalDone] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
@@ -170,12 +173,26 @@ export function BrowserPromptCard({
 
   const displayTitle = title || `Browser prompt ${index + 1}`;
 
-  async function rememberRun(startedAgentId: string) {
+  /**
+   * Records the run in host settings. The server reports a run back only when it finds this entry,
+   * so a save that loses a revision race is retried against the newest settings.
+   */
+  async function rememberRun(startedAgentId: string, fallback: boolean) {
     setLocalRun(startedAgentId);
-    if (settings.status !== "ready") return;
-    const without = settings.values.runs.filter(([key]) => key !== doneKey);
-    const runs = [...without, [doneKey, startedAgentId] as [string, string]].slice(-MAX_RUNS);
-    await settings.save({ ...settings.values, runs }, settings.revision);
+    const entry: [string, string, ...string[]] = fallback
+      ? [doneKey, startedAgentId, MOST_RECENT_FALLBACK]
+      : [doneKey, startedAgentId];
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const current = latestSettings.current;
+      if (current.status === "ready") {
+        const without = current.values.runs.filter(([key]) => key !== doneKey);
+        const runs = [...without, entry].slice(-MAX_RUNS);
+        if (await current.save({ ...current.values, runs }, current.revision)) return;
+      }
+      await current.reload();
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+    }
+    toast.error("Could not record the agent on this card; it will not report back to this chat.");
   }
 
   async function launchAgent() {
@@ -193,7 +210,7 @@ export function BrowserPromptCard({
         steps: text,
         settings: values,
       });
-      await rememberRun(started.agentId);
+      await rememberRun(started.agentId, started.workspaceSource === "most-recent");
       const where = started.workspaceSource === "most-recent" ? " in your most recent workspace" : "";
       toast.show(
         layout.compact ? `Paseo agent started${where}. ${DESKTOP_HINT}` : `Paseo agent started${where}.`,

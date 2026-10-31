@@ -4,6 +4,7 @@ import { access, mkdir, open, readFile, rename, rm, stat, writeFile } from "node
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import type { PluginSettings } from "@getpaseo/plugin/server";
+import { stateDir } from "./state-dir";
 import type { updateSettings } from "../shared/update";
 import {
   createUpdater,
@@ -15,11 +16,7 @@ import {
   type UpdateState,
 } from "../shared/updater";
 
-/** Updater log and lock live outside the install directory, which an update replaces. */
-export function stateDir(): string {
-  const base = process.env.XDG_STATE_HOME || join(homedir(), ".local", "state");
-  return join(base, "paseo-plugin-browser-prompt");
-}
+export { stateDir };
 
 const GIT_ENV = { GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "true", GIT_NO_LAZY_FETCH: "1" };
 

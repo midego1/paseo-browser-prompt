@@ -1,23 +1,38 @@
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import {
   buildReportMessage,
+  buildStatusNotice,
   finalAssistantText,
   isBrowserRun,
   reportTarget,
+  sourceAllowsFullReport,
+  type ReportMode,
   type ReportOutcome,
 } from "../shared/report-back.ts";
 
 /** Timeline items read from the end of the browser agent's chat to find its report. */
 export const REPORT_TAIL_ITEMS = 60;
-/** How long a busy source agent gets to finish its turn before the report steers into it. */
-export const SOURCE_BUSY_WAIT_MS = 30 * 60 * 1000;
-/** Bounds on remembered agent ids. */
-const MAX_REMEMBERED = 1000;
+/** How long a busy source agent gets to become idle before the report is dropped. */
+export const SOURCE_BUSY_WAIT_MS = 2 * 60 * 60 * 1000;
+/** Longest single `waitForFinish` call; the loop re-checks the source after each. */
+const WAIT_SLICE_MS = 5 * 60 * 1000;
+/** Pause between checks while the source waits for a permission or question. */
+export const PERMISSION_POLL_MS = 15 * 1000;
+/** How long to wait for the card to record a new run in host settings. */
+export const RECORD_WAIT_MS = 10 * 1000;
+const RECORD_POLL_MS = 500;
+/** Run ids remembered (and persisted) as already reported. */
+export const MAX_REPORTED = 200;
 
 type AgentSnapshotLike = {
+  provider?: string | null;
+  currentModeId?: string | null;
+  workspaceId?: string | null;
   labels?: Record<string, string> | null;
   status?: string | null;
   archivedAt?: string | null;
+  activeTurn?: unknown;
+  pendingPermissions?: readonly unknown[] | null;
 };
 
 /** The slice of the Paseo SDK this module uses, so tests can pass a fake. */
@@ -36,124 +51,320 @@ export interface ReportBackPaseo {
   };
 }
 
-export type TurnEndedEvent = Pick<PluginLifecycleEvents["agent.turn_ended"], "agent" | "outcome">;
+export type TurnEndedEvent = Pick<PluginLifecycleEvents["agent.turn_ended"], "agent" | "outcome"> & {
+  timeline?: PluginLifecycleEvents["agent.turn_ended"]["timeline"];
+};
+
+/** A card's record of a run it started, from the host `runs` setting. */
+export interface RecordedRun {
+  /** The run was started in the most recent workspace, not the card agent's. */
+  fallback: boolean;
+}
+
+export interface ReportedStore {
+  load(): Promise<string[]>;
+  save(ids: string[]): Promise<void>;
+}
 
 export interface ReportBackOptions {
-  /** Current "Report back to chat" setting; read on every event. */
-  enabled(): Promise<boolean>;
+  /** Current "Report back to chat" mode; read on every event. Must fail closed to `auto`. */
+  mode(): Promise<ReportMode>;
+  /** The card's record of this run, or null when the host settings do not list it. */
+  recordedRun(query: { sourceId: string; cardId: string; runId: string }): Promise<RecordedRun | null>;
+  store?: ReportedStore;
   log?(message: string): void;
   busyWaitMs?: number;
+  permissionPollMs?: number;
+  recordWaitMs?: number;
+  recordPollMs?: number;
 }
 
 export type ReportResult =
   | "sent"
+  | "sent-status"
   | "canceled"
+  | "aborted"
   | "duplicate"
   | "not-a-run"
   | "disabled"
   | "no-source"
+  | "unrecorded"
+  | "workspace-mismatch"
   | "source-missing"
   | "source-is-run"
+  | "busy-timeout"
   | "failed";
 
-/** Insertion-ordered set that drops its oldest ids beyond `max`. */
-function boundedSet(max: number) {
-  const items = new Set<string>();
-  return {
-    has: (id: string) => items.has(id),
-    add(id: string) {
-      items.delete(id);
-      items.add(id);
-      while (items.size > max) items.delete(items.values().next().value!);
-    },
-  };
+const ABORTED = Symbol("aborted");
+
+class AbortedError extends Error {
+  constructor() {
+    super("aborted");
+    this.name = "AbortedError";
+  }
+}
+
+/** Resolves with the promise's value, or ABORTED as soon as the signal aborts. */
+function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | typeof ABORTED> {
+  if (signal.aborted) return Promise.resolve(ABORTED);
+  return new Promise((resolve, reject) => {
+    const onAbort = () => resolve(ABORTED);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+function sleep(ms: number, signal: AbortSignal): Promise<void | typeof ABORTED> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return abortable(new Promise<void>((resolve) => (timer = setTimeout(resolve, ms))), signal).finally(() =>
+    clearTimeout(timer),
+  );
+}
+
+/** Idle and not waiting on the owner: a send now starts a fresh turn and clears nothing. */
+function isSettled(agent: AgentSnapshotLike): boolean {
+  const status = agent.status ?? "";
+  const pending = agent.pendingPermissions?.length ?? 0;
+  return (status === "idle" || status === "error" || status === "closed") && !agent.activeTurn && pending === 0;
+}
+
+function describe(error: unknown): string {
+  const text = error instanceof Error ? `${error.name}: ${error.message}` : "unknown error";
+  return text.replace(/\s+/g, " ").slice(0, 200);
 }
 
 /**
  * Sends a browser agent's final report to the agent whose card started it, once per run.
- * Only agents labelled `browser-prompt: run` are considered, and a report never goes to an agent
- * that is itself a browser run, so reports cannot loop. Logs carry agent ids only, never content.
+ *
+ * Only agents labelled `browser-prompt: run` whose run the card recorded in host settings are
+ * considered, and a report never goes to an agent that is itself a browser run, so reports cannot
+ * loop. A busy source is not interrupted on purpose: sends to one source are serialized, and each
+ * waits until the source is idle with no pending permission. Whether the full report or only a
+ * status notice is sent is decided from the source's mode right before sending. Logs carry agent
+ * ids only, never content.
  */
 export function createReportBack(options: ReportBackOptions) {
   const log = options.log ?? ((message: string) => console.log(`[browser-prompt] ${message}`));
   const busyWaitMs = options.busyWaitMs ?? SOURCE_BUSY_WAIT_MS;
-  const reported = boundedSet(MAX_REMEMBERED);
-  const inFlight = new Set<string>();
-  /** Agents seen without the run label. Labels are fixed at creation, so this never goes stale. */
-  const notRuns = boundedSet(MAX_REMEMBERED);
+  const permissionPollMs = options.permissionPollMs ?? PERMISSION_POLL_MS;
+  const recordWaitMs = options.recordWaitMs ?? RECORD_WAIT_MS;
+  const recordPollMs = options.recordPollMs ?? RECORD_POLL_MS;
+  const lifetime = new AbortController();
 
-  async function onTurnEnded(event: TurnEndedEvent, paseo: ReportBackPaseo): Promise<ReportResult> {
-    const agentId = event.agent.id;
+  const reported: string[] = [];
+  /** Runs whose delivery failed once; a second failure keeps them claimed. */
+  const retried = new Set<string>();
+  const inFlight = new Set<string>();
+  /** Per source agent: the tail of its delivery queue. */
+  const queues = new Map<string, Promise<unknown>>();
+  const active = new Set<Promise<ReportResult>>();
+  let writes: Promise<void> = Promise.resolve();
+  const loaded = (options.store?.load() ?? Promise.resolve([])).then(
+    (ids) => void reported.push(...ids.slice(-MAX_REPORTED)),
+    () => log("could not read reported runs; starting empty"),
+  );
+
+  function persist() {
+    const store = options.store;
+    if (!store) return;
+    const snapshot = reported.slice();
+    writes = writes.then(() => store.save(snapshot)).catch((error) => log(`could not save reported runs (${describe(error)})`));
+  }
+  function claim(runId: string) {
+    if (!reported.includes(runId)) reported.push(runId);
+    if (reported.length > MAX_REPORTED) reported.splice(0, reported.length - MAX_REPORTED);
+    persist();
+  }
+  /** Lets a run report again after a delivery that sent nothing, once. */
+  function release(runId: string) {
+    if (retried.has(runId)) return;
+    retried.add(runId);
+    const index = reported.indexOf(runId);
+    if (index >= 0) reported.splice(index, 1);
+    persist();
+  }
+
+  async function waitForRecord(query: { sourceId: string; cardId: string; runId: string }, signal: AbortSignal) {
+    const deadline = Date.now() + recordWaitMs;
+    for (;;) {
+      const record = await options.recordedRun(query);
+      if (record || Date.now() >= deadline) return record;
+      if ((await sleep(recordPollMs, signal)) === ABORTED) throw new AbortedError();
+    }
+  }
+
+  /** Waits until the source is settled; re-reads it right before returning. */
+  async function waitUntilSettled(source: ReturnType<ReportBackPaseo["agents"]["ref"]>, signal: AbortSignal) {
+    const deadline = Date.now() + busyWaitMs;
+    for (;;) {
+      if (signal.aborted) throw new AbortedError();
+      const snapshot = (await source.refresh())?.agent ?? null;
+      if (!snapshot || snapshot.archivedAt) return "missing" as const;
+      if (isSettled(snapshot)) return snapshot;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return "timeout" as const;
+      const waited = await abortable(source.waitForFinish(Math.min(remaining, WAIT_SLICE_MS)), signal);
+      if (waited === ABORTED) throw new AbortedError();
+      // A pending permission or question keeps the turn open: wait for the owner, never steer into it.
+      if (waited.status === "permission") {
+        if ((await sleep(Math.min(permissionPollMs, Math.max(remaining, 0)), signal)) === ABORTED) throw new AbortedError();
+      }
+    }
+  }
+
+  /** Runs `task` after every earlier delivery to the same source. */
+  function enqueue<T>(sourceId: string, task: () => Promise<T>): Promise<T> {
+    const previous = queues.get(sourceId) ?? Promise.resolve();
+    const next = previous.then(task, task);
+    const tail = next.catch(() => undefined);
+    queues.set(sourceId, tail);
+    void tail.then(() => {
+      if (queues.get(sourceId) === tail) queues.delete(sourceId);
+    });
+    return next;
+  }
+
+  /**
+   * Handles one ended turn. Can wait for hours on a busy source, so callers must not await it inside
+   * a hook handler: Paseo cancels hook requests after 30 seconds. `dispose()` aborts every wait.
+   */
+  function onTurnEnded(event: TurnEndedEvent, paseo: ReportBackPaseo): Promise<ReportResult> {
+    const task = handle(event, paseo);
+    active.add(task);
+    void task.finally(() => active.delete(task));
+    return task;
+  }
+
+  async function handle(event: TurnEndedEvent, paseo: ReportBackPaseo): Promise<ReportResult> {
+    const runId = event.agent.id;
+    const signal = lifetime.signal;
     // A stopped run is not a report; a later turn of the same agent may still report.
     if (event.outcome.kind === "canceled") return "canceled";
-    if (notRuns.has(agentId)) return "not-a-run";
-    if (reported.has(agentId) || inFlight.has(agentId)) return "duplicate";
-    inFlight.add(agentId);
+    if (signal.aborted) return "aborted";
+    await loaded;
+    if (reported.includes(runId) || inFlight.has(runId)) return "duplicate";
+    inFlight.add(runId);
+    let claimed = false;
     try {
-      const run = paseo.agents.ref(agentId);
-      // Labels first: other agents' turns cost one snapshot read, then are remembered as not runs.
-      const labels = (await run.refresh())?.agent.labels ?? null;
-      if (!isBrowserRun(labels)) {
-        notRuns.add(agentId);
-        return "not-a-run";
-      }
-      if (!(await options.enabled())) return "disabled";
-      const sourceId = reportTarget(agentId, labels);
-      if (!sourceId) {
-        log(`run ${agentId} has no source agent label; not reporting`);
-        reported.add(agentId);
+      const run = paseo.agents.ref(runId);
+      // Labels can change after creation, so they are read on every event.
+      const runSnapshot = (await run.refresh())?.agent ?? null;
+      const labels = runSnapshot?.labels ?? null;
+      if (!isBrowserRun(labels)) return "not-a-run";
+      const mode = await options.mode();
+      if (mode === "off") return "disabled";
+      const target = reportTarget(runId, labels);
+      if (!target) {
+        log(`run ${runId} lacks source or card labels; not reporting`);
         return "no-source";
+      }
+      const { sourceId, cardId } = target;
+
+      // The card records every run it starts; an agent that only copies the labels is not reported.
+      const record = await waitForRecord({ sourceId, cardId, runId }, signal);
+      if (!record) {
+        log(`run ${runId} is not recorded by a card of agent ${sourceId}; not reporting`);
+        return "unrecorded";
       }
 
       const source = paseo.agents.ref(sourceId);
-      let snapshot: AgentSnapshotLike | null = null;
+      let sourceSnapshot: AgentSnapshotLike | null = null;
       try {
-        snapshot = (await source.refresh())?.agent ?? null;
+        sourceSnapshot = (await source.refresh())?.agent ?? null;
       } catch {
-        snapshot = null;
+        sourceSnapshot = null;
       }
-      if (!snapshot || snapshot.archivedAt) {
-        log(`source agent ${sourceId} of run ${agentId} is gone; not reporting`);
-        reported.add(agentId);
+      if (!sourceSnapshot || sourceSnapshot.archivedAt) {
+        log(`source agent ${sourceId} of run ${runId} is gone; not reporting`);
+        claim(runId);
+        claimed = true;
         return "source-missing";
       }
-      if (isBrowserRun(snapshot.labels)) {
-        log(`source agent ${sourceId} of run ${agentId} is itself a browser run; not reporting`);
-        reported.add(agentId);
+      if (isBrowserRun(sourceSnapshot.labels)) {
+        log(`source agent ${sourceId} of run ${runId} is itself a browser run; not reporting`);
+        claim(runId);
+        claimed = true;
         return "source-is-run";
+      }
+      const runWorkspace = event.agent.workspaceId ?? runSnapshot?.workspaceId ?? null;
+      if (!record.fallback && (!runWorkspace || runWorkspace !== (sourceSnapshot.workspaceId ?? null))) {
+        log(`run ${runId} and source agent ${sourceId} are in different workspaces; not reporting`);
+        claim(runId);
+        claimed = true;
+        return "workspace-mismatch";
       }
 
       const outcome: ReportOutcome =
         event.outcome.kind === "failed"
           ? { kind: "failed", message: event.outcome.error.message }
           : { kind: "completed" };
-      const page = await run.timeline.refetch({ direction: "tail", limit: REPORT_TAIL_ITEMS });
-      const message = buildReportMessage({
-        title: event.agent.title,
-        browserAgentId: agentId,
-        outcome,
-        report: finalAssistantText(page.entries.map((entry) => entry.item)),
-      });
-      // Claim the run before waiting so a later turn of the same agent cannot report twice.
-      reported.add(agentId);
-
-      // Never interrupt the source agent: wait for its turn to end, then steer only as a last resort.
-      let steer = false;
-      if (snapshot.status === "running") {
-        const waited = await source.waitForFinish(busyWaitMs).catch(() => ({ status: "timeout" }));
-        steer = waited.status !== "idle" && waited.status !== "error";
+      // Read now: the run's next turn would make a later read return the wrong message.
+      let report: string | null = null;
+      if (mode === "full" || sourceAllowsFullReport(mode, sourceSnapshot.provider, sourceSnapshot.currentModeId)) {
+        const fromEvent = event.timeline ?? [];
+        const items = fromEvent.some((item) => item.type === "assistant_message")
+          ? fromEvent
+          : (await run.timeline.refetch({ direction: "tail", limit: REPORT_TAIL_ITEMS })).entries.map((entry) => entry.item);
+        report = finalAssistantText(items);
       }
-      await source.send(message, steer ? { activeTurnBehavior: "steer" } : undefined);
-      log(`reported run ${agentId} to agent ${sourceId}`);
-      return "sent";
+
+      // Claim before waiting so a later turn of the same run cannot report twice.
+      claim(runId);
+      claimed = true;
+      const delivered = await enqueue(sourceId, async () => {
+        const settled = await waitUntilSettled(source, signal);
+        if (typeof settled === "string") return settled;
+        if (signal.aborted) throw new AbortedError();
+        // The source's mode may have changed while waiting; decide on the snapshot just read.
+        const full = report !== null && sourceAllowsFullReport(mode, settled.provider, settled.currentModeId);
+        const message = full
+          ? buildReportMessage({ title: event.agent.title, browserAgentId: runId, outcome, report: report! })
+          : buildStatusNotice({ title: event.agent.title, browserAgentId: runId, outcome });
+        // Steer: on an idle agent this starts a normal turn; if the owner started a turn in the
+        // meantime, providers that support steering add the report to it instead of replacing it.
+        await source.send(message, { activeTurnBehavior: "steer" });
+        return full ? ("sent" as const) : ("sent-status" as const);
+      });
+      if (delivered === "missing") {
+        log(`source agent ${sourceId} of run ${runId} went away; not reporting`);
+        return "source-missing";
+      }
+      if (delivered === "timeout") {
+        log(`source agent ${sourceId} stayed busy; report of run ${runId} not sent`);
+        release(runId);
+        return "busy-timeout";
+      }
+      log(`reported run ${runId} to agent ${sourceId}${delivered === "sent" ? "" : " (status only)"}`);
+      return delivered;
     } catch (error) {
-      const reason = error instanceof Error ? `${error.name}: ${error.message}` : "unknown error";
-      log(`report for run ${agentId} failed (${reason.replace(/\s+/g, " ").slice(0, 200)})`);
+      if (error instanceof AbortedError || signal.aborted) {
+        if (claimed) release(runId);
+        return "aborted";
+      }
+      log(`report for run ${runId} failed (${describe(error)})`);
+      if (claimed) release(runId);
       return "failed";
     } finally {
-      inFlight.delete(agentId);
+      inFlight.delete(runId);
     }
   }
 
-  return { onTurnEnded };
+  return {
+    onTurnEnded,
+    /** Aborts every pending wait, then lets running handlers and queued saves finish. */
+    async dispose() {
+      lifetime.abort();
+      await Promise.allSettled([...active]);
+      await writes;
+    },
+  };
 }
