@@ -2,7 +2,7 @@
 // started it, picking the browser agent's final report, and framing it as a prompt.
 // Imports only other dependency-free shared modules so `node --experimental-strip-types` can load it.
 import { isAskFirstMode } from "./agent-prompt.ts";
-import { isImageOnly, stripImagesForChat } from "./screenshot.ts";
+import { defuseImages, isImageOnly, stripImagesForChat } from "./screenshot.ts";
 
 /** Marks agents the plugin started; only these are ever reported back. */
 export const RUN_LABEL = "browser-prompt";
@@ -130,8 +130,8 @@ const CONTROLS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
 /**
  * Makes untrusted text inert and image-free before it goes to a chat (reports, questions, error
  * text): NFKC-normalizes (so look-alike brackets become ASCII), drops invisible and control
- * characters, removes images and image locations (`stripImagesForChat`), then escapes every `<`
- * and `>`.
+ * characters, removes images and image locations (`stripImagesForChat`), defuses any `![` left
+ * (`defuseImages`), then escapes every `<` and `>`.
  */
 export function escapeUntrusted(text: string): string {
   const normalized = text
@@ -139,7 +139,7 @@ export function escapeUntrusted(text: string): string {
     .replace(/\r\n?/g, "\n")
     .replace(INVISIBLE, "")
     .replace(CONTROLS, "");
-  return escapeBrackets(stripImagesForChat(normalized));
+  return escapeBrackets(defuseImages(stripImagesForChat(normalized)));
 }
 
 function escapeBrackets(text: string): string {
@@ -179,7 +179,7 @@ export type ReportOutcome = { kind: "completed" } | { kind: "failed"; message: s
 
 function header(title: string | null, runId: string, outcome: ReportOutcome): string {
   // The title is single-line, capped and escaped like the report: agents can be renamed.
-  const name = escapeBrackets(oneLine(title ?? "", MAX_REPORT_TITLE)) || "browser steps";
+  const name = defuseImages(escapeBrackets(oneLine(title ?? "", MAX_REPORT_TITLE))) || "browser steps";
   const status = outcome.kind === "completed" ? "finished" : "failed";
   return `[browser-prompt] Browser agent "${name}" ${status}. Run agent id: ${oneLine(runId, 100)}.`;
 }

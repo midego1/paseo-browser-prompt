@@ -3,6 +3,7 @@
 // other pure shared modules so `node --experimental-strip-types` can load it.
 import { ANSWER_MARKER, QUESTION_MARKER } from "./agent-prompt.ts";
 import { escapeUntrusted, MAX_REPORT_TITLE, oneLine } from "./report-back.ts";
+import { defuseImages } from "./screenshot.ts";
 import { stripLeadingStepMarkers } from "./steps.ts";
 
 /** Questions longer than this are cut; they are meant to be one short question. */
@@ -38,7 +39,7 @@ export function buildQuestionMessage(input: {
   index: number;
   max: number;
 }): string {
-  const name = escapeBrackets(oneLine(input.title ?? "", MAX_REPORT_TITLE)) || "browser steps";
+  const name = defuseImages(escapeBrackets(oneLine(input.title ?? "", MAX_REPORT_TITLE))) || "browser steps";
   const runId = oneLine(input.runId, 100);
   let question = escapeUntrusted(input.question).trim() || "(empty question)";
   if (question.length > MAX_QUESTION_CHARS) question = `${question.slice(0, MAX_QUESTION_CHARS).trimEnd()}… [cut]`;

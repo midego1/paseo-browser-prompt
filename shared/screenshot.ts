@@ -8,9 +8,9 @@
  * pointing at a private copy on the daemon host.
  */
 const INLINE_IMAGE =
-  /!\[(?:\\.|[^[\]\\\n])*\]\(\s*(<[^>\n]*>|(?:\\.|[^\s()\\]|\((?:\\.|[^\s()\\])*\))+)(?:\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\((?:\\.|[^()\\])*\)))?\s*\)/g;
-/** `![alt][ref]`, `![alt][]` and the shortcut `![ref]`. */
-const REFERENCE_IMAGE = /!\[(?:\\.|[^[\]\\\n])*\](?:\[(?:\\.|[^[\]\\\n])*\])?/g;
+  /!\[(?:\\.|[^[\]\\\n]|\[(?:\\.|[^[\]\\\n])*\])*\]\(\s*(<[^>\n]*>|(?:\\.|[^\s()\\]|\((?:\\.|[^\s()\\])*\))+)(?:\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\((?:\\.|[^()\\])*\)))?\s*\)/g;
+/** `![alt][ref]`, `![alt][]` and the shortcut `![ref]` (alt text may hold one level of [...]). */
+const REFERENCE_IMAGE = /!\[(?:\\.|[^[\]\\\n]|\[(?:\\.|[^[\]\\\n])*\])*\](?:\[(?:\\.|[^[\]\\\n])*\])?/g;
 /**
  * Reference definitions `[ref]: destination "title"` on their own line whose destination is an image
  * or a local file (file:, data:, an absolute path, or an image extension). Other `[x]: text` lines,
@@ -37,9 +37,10 @@ export const MAX_IMAGE_MESSAGE = 4096;
  * Removes images and image locations from text bound for a chat: inline and reference-style
  * Markdown images (and reference definitions), <img> tags, file:// URIs and paths into Paseo's
  * attachment directory. Screenshots and their file paths never reach a chat. Linear in the input:
- * alt text never contains `[`, an `<img` tag never contains `<`, attachment paths only match at the
- * start of a token, and input is cut at MAX_STRIP_INPUT. (An image whose alt text holds nested
- * brackets is not removed as a whole; its file URI or attachment path still is.)
+ * alt text holds at most one level of balanced `[...]` (an inner part never contains `[`), an
+ * `<img` tag never contains `<`, attachment paths only match at the start of a token, and input is
+ * cut at MAX_STRIP_INPUT. Images with deeper nesting are not removed as a whole; their file URI or
+ * attachment path still is, and `defuseImages` keeps them from rendering.
  */
 export function stripImagesForChat(text: string): string {
   const input = text.length > MAX_STRIP_INPUT ? text.slice(0, MAX_STRIP_INPUT) : text;
@@ -52,6 +53,14 @@ export function stripImagesForChat(text: string): string {
     .replace(ATTACHMENT_PATH, "[file omitted]")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n");
+}
+
+/**
+ * Turns every remaining `![` into `!\\[`, so nothing left after stripping can render as an image
+ * (for example one with deeply nested alt text and a remote URL). Linear.
+ */
+export function defuseImages(text: string): string {
+  return text.replace(/!\[/g, "!\\[");
 }
 
 /** The destination of a message that is exactly one inline Markdown image, else null. */

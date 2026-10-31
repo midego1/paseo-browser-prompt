@@ -290,6 +290,8 @@ token, API key, 2FA or recovery code or other secret (skip it and say "screensho
   and parentheses, `<…>` destinations), reference-style images and image or file reference
   definitions, `<img>` tags, `file://` URIs and paths into `paseo-attachments` are removed or
   replaced by `[file omitted]`. The preamble no longer asks for a screenshot path in the report.
+  Any `![` left after that is defused to `!\[` (also in report and question titles), so nothing in
+  chat-bound text can render as an image. Alt text may hold one level of `[...]`.
   These patterns are linear and their input is capped (20,000 characters for stripping, 4,096 for
   image-message checks); `test/perf.test.mjs` runs 100k-character adversarial input through every
   chat-text and card path.
