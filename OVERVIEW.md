@@ -41,7 +41,7 @@ The safety preamble is always included. It tells the agent to use only the Paseo
 
 With **Show step progress** (on by default) the agent writes a short line as it starts each numbered step, and the card shows "Step N of M" with what it is doing and a progress bar; done fills the bar, and failed, needs you or waiting for the chat keep the last step. The card reads these lines from the agent's own chat; nothing extra is sent anywhere.
 
-With **Show live screenshot** (on by default) the agent takes a screenshot of the visible page after each step, never of a page that shows a password, token or code, and the card shows the latest one as a small thumbnail; pressing it opens the agent. Screenshots stay in your Paseo app and are never sent to a chat. Each screenshot is also read by the agent's model, which adds to its token use; turn the setting off to save tokens. The thumbnail needs a Paseo 0.13 or later app. Paseo can only capture a browser tab your app is showing, so a run in the background usually gets no screenshot: it tries once, stops taking them for that run, and the card says that the run's browser tab must be visible (for example in a split next to the chat).
+With **Show live screenshot** (on by default) the agent takes a screenshot of the visible page after each step, never of a page that shows a password, token or code, and the card shows one thumbnail per step with "Step N" above it, the latest highlighted: side by side when the card is wide enough, as a horizontal strip otherwise, and only the latest on very narrow screens (or always, with **Thumbnails** set to Latest only). Pressing a thumbnail opens the agent. Screenshots stay in your Paseo app and are never sent to a chat. Each screenshot is also read by the agent's model, which adds to its token use; turn the setting off to save tokens. The thumbnail needs a Paseo 0.13 or later app. Paseo can only capture a browser tab your app is showing, so a run in the background usually gets no screenshot: it tries once, stops taking them for that run, and the card says that the run's browser tab must be visible (for example in a split next to the chat).
 
 By default the agent starts in the background: the card shows its state (running, needs you for a question or permission, done, failed) with a link to open it. Turn on **Open the agent when started** to open its view right away.
 
@@ -63,7 +63,7 @@ For Git installs, the plugin checks the branch it was installed from when a card
 
 - Start in ChatGPT on desktop (ChatGPT app, ChatGPT web, or copy only) and on iOS and Android (copy only or ChatGPT web).
 - ChatGPT app deep link template (default `codex://new?prompt={prompt}`), and clearing done marks.
-- Run with Paseo agent: confirm before starting, open the agent when started, show step progress, show live screenshot, report back to chat (Auto, Always, Off), talk to the chat, max questions to the chat per run, provider, model, permission mode, thinking level, and clearing card-to-agent links.
+- Run with Paseo agent: confirm before starting, open the agent when started, show step progress, show live screenshot, thumbnails (all steps or latest only), report back to chat (Auto, Always, Off), talk to the chat, max questions to the chat per run, provider, model, permission mode, thinking level, and clearing card-to-agent links.
 - ChatGPT launcher: status, bind address (empty means the detected Tailscale address) and port (default 5299).
 - Updates: auto-update on use, installed and latest commit, last check, Check now, and an optional branch to follow.
 

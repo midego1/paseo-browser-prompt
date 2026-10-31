@@ -21,8 +21,10 @@ export const DEFAULT_AGENT_SETTINGS = {
   maxChatQuestions: 10,
   /** Ask the run to mark each step, and show "Step N of M" with a progress bar on the card. */
   showStepProgress: true,
-  /** Ask the run for a viewport screenshot after each step, and show the latest as a card thumbnail. */
+  /** Ask the run for a viewport screenshot after each step, and show them as card thumbnails. */
   showLiveScreenshot: true,
+  /** Thumbnails on the card: one per step ("all") or only the newest ("latest"). */
+  thumbnailMode: "all",
 } as const;
 
 /** Rule asking the run for one viewport screenshot after each step, never of a page with secrets. */

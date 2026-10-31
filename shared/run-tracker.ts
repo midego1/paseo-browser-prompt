@@ -1,7 +1,7 @@
 // Pure state behind the card's step progress and "waiting for the chat" label, fed by timeline
 // reads and the live stream. Kept free of React so it is tested directly.
 import { finalAssistantText } from "./report-back.ts";
-import { createScreenshotTracker } from "./screenshot.ts";
+import { createScreenshotTracker, type StepScreenshot } from "./screenshot.ts";
 import { latestStep, type StepProgress } from "./steps.ts";
 import { MAX_REDIRECTS, parseQuestion, REDIRECT_PREFIX } from "./talk.ts";
 
@@ -19,6 +19,10 @@ export interface RunView {
   asking: boolean;
   /** Path or URL of the run's latest browser screenshot (one reference, never image data). */
   screenshot: string | null;
+  /** One screenshot per step, in step order (path strings only). */
+  screenshots: StepScreenshot[];
+  /** The step of the latest screenshot, or null. */
+  screenshotStep: number | null;
   /** A screenshot failed because the run's browser tab was not visible in the Paseo app. */
   screenshotsBlocked: boolean;
 }
@@ -42,7 +46,7 @@ export function createRunTracker(total: number, showSteps: boolean, showScreensh
   let lastMessageId: string | null = null;
   let turnItems: Item[] = [];
   let redirects = 0;
-  let screenshots = createScreenshotTracker();
+  let screenshots = createScreenshotTracker(total);
   /** Kept when a later tail read no longer contains the failed call. */
   let blockedSeen = false;
 
@@ -59,6 +63,8 @@ export function createRunTracker(total: number, showSteps: boolean, showScreensh
         progress: showSteps ? progress : null,
         asking,
         screenshot: showScreenshots ? screenshots.latest() : null,
+        screenshots: showScreenshots ? screenshots.steps() : [],
+        screenshotStep: showScreenshots ? screenshots.latestStep() : null,
         screenshotsBlocked: showScreenshots && (screenshots.blocked() || blockedSeen),
       };
     },
@@ -67,11 +73,15 @@ export function createRunTracker(total: number, showSteps: boolean, showScreensh
     history(items: readonly Item[]): void {
       redirects = items.filter(isRedirect).length;
       if (showScreenshots) {
-        const fromHistory = createScreenshotTracker();
+        const fromHistory = createScreenshotTracker(total);
         for (const item of items) fromHistory.push(item);
         if (fromHistory.blocked() || screenshots.blocked()) blockedSeen = true;
-        // A tail read without a screenshot keeps the one already shown (it may be older than the tail).
-        if (fromHistory.latest()) screenshots = fromHistory;
+        // A tail read without a screenshot keeps what is shown; one with screenshots is newer for its
+        // range but may not reach back to earlier steps, so those are kept.
+        if (fromHistory.latest()) {
+          fromHistory.adoptOlder(screenshots);
+          screenshots = fromHistory;
+        }
       }
       asking = waitsForChat(finalAssistantText(items), redirects);
       if (!showSteps) return;
@@ -100,7 +110,11 @@ export function createRunTracker(total: number, showSteps: boolean, showScreensh
       turnItems.push(item);
       if (turnItems.length > TURN_ITEMS) turnItems = turnItems.slice(-TURN_ITEMS);
       if (isRedirect(item)) redirects++;
-      if (showScreenshots) screenshots.push(item);
+      if (showScreenshots) {
+        // The step read from the stream buffer, which also sees markers split across chunks.
+        screenshots.setStep(progress?.step);
+        screenshots.push(item);
+      }
       if (item.type !== "assistant_message" || typeof item.text !== "string") return;
       const messageId = typeof item.messageId === "string" && item.messageId ? item.messageId : null;
       const newMessage = messageId !== null && lastMessageId !== null && messageId !== lastMessageId;
