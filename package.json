@@ -15,7 +15,6 @@
     "server/",
     "shared/",
     "README.md",
-    "docs/screenshots/",
     "LICENSE"
   ],
   "scripts": {

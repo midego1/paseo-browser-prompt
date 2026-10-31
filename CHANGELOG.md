@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Removed the mock screenshots (`docs/screenshots/`) and their references in `paseo-plugin.json`
+  (`media`), the README and the npm package files. They were not captures of the real app; real
+  screenshots will be added once they can be taken from a running Paseo app.
+
 ## 0.3.2 (unreleased)
 
 - Mode guard: only agents a card recorded in the host `runs` setting are checked and stopped, the
