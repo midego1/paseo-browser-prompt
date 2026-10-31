@@ -116,6 +116,7 @@ Settings (**Settings → Plugins → Browser prompts → Run with Paseo agent**)
 | --- | --- | --- |
 | Confirm before starting | on | Asks before starting the agent; says when it will run in Auto mode. |
 | Open the agent when started | off | Off: the agent works in the background; the card shows its status (running…, needs you, done ✓, failed) and an Open link. On: its view opens right away. |
+| Show step progress | on | The agent marks each numbered step as it starts it (`[browser-prompt step N/M] …`); the card shows "Step N of M · …" with a progress bar. |
 | Report back to chat | Auto | Auto, Always send the full report, or Off (see below). |
 | Talk to the chat | on | The agent may ask the chat that showed the card about the task; the plugin forwards each question framed as untrusted text (see below). |
 | Max questions to the chat per run | `10` | Whole number from 0 to 50; 0 works like Talk to the chat off. After the limit the agent asks the owner. |
@@ -228,6 +229,29 @@ Delivery:
   permission that turn had just raised would be denied.
 - A permission request or an AskUserQuestion of the browser agent does not message the source; the
   card shows "Paseo agent needs you" instead.
+
+### Step progress
+
+With **Show step progress** on (default), the card counts its steps (`countSteps`: numbered lines
+`1.`/`2)`, indented sub-items excluded; else non-empty lines) and the run's prompt gets rule 9: before
+each numbered step, write one plain line `[browser-prompt step N/M] <at most 60 characters>`. It is
+ordinary assistant text, not a message to the chat, and does not end the turn.
+
+- The card reads the markers without polling: one tail read of the run's timeline per run
+  (`timeline.refetch`, last 40 items), then the run's live timeline stream (`timeline.subscribe`)
+  only while it is starting, running or needs you. `useAgent` (what the card uses for status) has no
+  message text, so this is the cheapest source.
+- `latestStep` takes the last well-formed marker at a line start; N is clamped to 1..M, the card's own
+  count is M (the run's M is ignored), malformed markers are skipped. The text is NFKC-normalized,
+  stripped of control and invisible characters, kept on one line and cut at 60 characters. It is
+  rendered as plain React Native text.
+- View (`stepProgressView`): running shows "Step N of M · text" and the bar at N/M; done shows a full
+  bar and done ✓; failed, needs you and asking the chat keep the last step with that status.
+- An idle run whose latest turn ended with a question for the chat is shown as "Waiting for the
+  chat's answer" instead of done (the hook tracks the current turn's text from the same stream).
+- Step markers never affect report back: question detection ignores leading marker lines (a
+  question after them is still a question), and a final message that starts with a marker followed
+  by anything else is the run's report.
 
 ### Talk to the chat
 

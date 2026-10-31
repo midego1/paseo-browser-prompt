@@ -3,6 +3,7 @@
 // other pure shared modules so `node --experimental-strip-types` can load it.
 import { ANSWER_MARKER, QUESTION_MARKER } from "./agent-prompt.ts";
 import { escapeUntrusted, MAX_REPORT_TITLE, oneLine } from "./report-back.ts";
+import { stripLeadingStepMarkers } from "./steps.ts";
 
 /** Questions longer than this are cut; they are meant to be one short question. */
 export const MAX_QUESTION_CHARS = 1500;
@@ -12,10 +13,11 @@ export const QUESTION_CLOSE = "</browser-agent-question>";
 
 /**
  * The question in a run's final message, or null when the message is not a question (a final
- * report). Only a message that starts with the marker counts.
+ * report). Only a message that starts with the marker counts; step progress lines before it are
+ * ignored, and a message of step lines followed by anything else is a report.
  */
 export function parseQuestion(finalText: string): string | null {
-  const text = finalText.trim();
+  const text = stripLeadingStepMarkers(finalText).trim();
   if (!text.startsWith(QUESTION_MARKER)) return null;
   return text.slice(QUESTION_MARKER.length).trim();
 }

@@ -83,6 +83,7 @@ test("settings defaults: Anthropic Claude Sonnet 5.5, thinking high, Auto mode, 
     openAgentOnStart: false,
     talkToChat: true,
     maxChatQuestions: 10,
+    showStepProgress: true,
   });
   assert.deepEqual(resolveAgentConfig(DEFAULT_AGENT_SETTINGS), {
     provider: "claude/claude-sonnet-5-5",

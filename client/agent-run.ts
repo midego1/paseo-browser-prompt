@@ -9,6 +9,7 @@ import {
 } from "../shared/agent-prompt";
 import { enforceRunMode, type ModeCheck, type ModeGuardAgent } from "../shared/mode-guard";
 import { runLabels } from "../shared/report-back";
+import { countSteps } from "../shared/steps";
 
 type PaseoApi = ReturnType<typeof usePaseo>;
 
@@ -99,7 +100,7 @@ export async function startBrowserAgent(
     prompt: buildAgentPrompt(input.cardTitle, input.steps, config, {
       sourceAgentId: input.sourceAgentId,
       maxQuestions: chatQuestionBudget(input.settings),
-    }),
+    }, input.settings.showStepProgress === false ? undefined : { totalSteps: countSteps(input.steps) }),
     labels: runLabels(input.sourceAgentId, input.cardId),
   });
   // Paseo or the provider can end up in another mode than requested; never leave a run going in a

@@ -70,6 +70,9 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
   from the owner's AskUserQuestion answer. That is an instruction to a model, not an enforced
   control. The answer tool can also set the browser agent's permission mode; the plugin tells the
   chat not to, and the mode guard stops a run that ends up in a refused mode.
+- Step progress text is written by the browser agent and can echo a page. The agent is told not to
+  put secrets or page text in it; the card cleans it (no control or invisible characters, one line,
+  at most 60 characters) and shows it only in your Paseo app. It is never sent to a chat.
 - Self-update installs only fast-forward commits from the `https://` remote the plugin was installed
   from. Installing a plugin means trusting its repository: the server part runs unsandboxed with the
   daemon user's access.

@@ -165,6 +165,12 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
             onValueChange={(openAgentOnStart) => void settings.save({ ...values, openAgentOnStart }, revision)}
           />
           <SettingsSwitch
+            label="Show step progress"
+            hint="The agent marks each step as it starts it, and the card shows “Step N of M” with a progress bar."
+            value={values.showStepProgress}
+            onValueChange={(showStepProgress) => void settings.save({ ...values, showStepProgress }, revision)}
+          />
+          <SettingsSwitch
             label="Talk to the chat"
             hint="The agent may ask the chat that showed the card about the task (which button, which value, how to go on when the page differs). The plugin forwards each question marked as untrusted text. Not configurable: passwords, tokens, 2FA codes and approvals of destructive, security, billing, merge or publish actions are always asked of you, never of the chat."
             value={values.talkToChat}

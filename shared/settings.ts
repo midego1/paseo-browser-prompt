@@ -15,7 +15,7 @@ export const MAX_RUNS = 200;
 export const preferences = defineSettings({
   id: "preferences",
   scope: "host",
-  version: 8,
+  version: 9,
   schema: z.object({
     /**
      * Desktop and web clients.
@@ -44,6 +44,8 @@ export const preferences = defineSettings({
      * destructive, security, billing, merge or publish actions: those always go to the owner.
      */
     talkToChat: z.boolean().default(DEFAULT_AGENT_SETTINGS.talkToChat),
+    /** Ask the run to mark its steps and show "Step N of M" with a progress bar on the card. */
+    showStepProgress: z.boolean().default(DEFAULT_AGENT_SETTINGS.showStepProgress),
     /** Questions a run may send to the chat (0 to 50; 0 behaves like Talk to the chat off). */
     maxChatQuestions: z
       .number()

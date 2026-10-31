@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0 (unreleased)
+
+- Step progress on the card (setting **Show step progress**, on by default): the agent writes
+  `[browser-prompt step N/M] …` before each numbered step, and the card shows "Step N of M · …" with
+  a progress bar (done = full bar ✓; failed, needs you and waiting for the chat keep the last step).
+  Markers are read from the run's timeline (one read, then the live stream while it runs; no polling).
+- The card shows "Waiting for the chat's answer" for an idle run whose latest turn is a question,
+  instead of done.
+- Question detection ignores leading step marker lines; a final message starting with a marker is
+  still the report.
+- Settings schema v9.
+
 ## 0.4.0 (unreleased)
 
 - Background start: new setting **Open the agent when started** (off by default). The agent works
