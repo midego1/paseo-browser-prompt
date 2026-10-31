@@ -21,7 +21,15 @@ export const DEFAULT_AGENT_SETTINGS = {
   maxChatQuestions: 10,
   /** Ask the run to mark each step, and show "Step N of M" with a progress bar on the card. */
   showStepProgress: true,
+  /** Ask the run for a viewport screenshot after each step, and show the latest as a card thumbnail. */
+  showLiveScreenshot: true,
 } as const;
+
+/** Rule asking the run for one viewport screenshot after each step, never of a page with secrets. */
+export const SCREENSHOT_RULE =
+  "10. Screenshots: after you complete each numbered step, call browser_screenshot once for the current tab with fullPage false (only the visible part). " +
+  "Never take a screenshot while the page shows a password, token, API key, 2FA or recovery code or any other secret: skip it and say \"screenshot skipped\" in your next step line or your report. " +
+  "The screenshots are only for the owner's card: do not describe them in questions for the chat.";
 
 /** Start of a step marker line: `[browser-prompt step N/M] what the run is doing`. */
 export const STEP_MARKER_PREFIX = "[browser-prompt step";
@@ -224,11 +232,13 @@ export function buildAgentPrompt(
   config?: { provider: string; modeId: string },
   chat?: { sourceAgentId: string; maxQuestions: number },
   progress?: { totalSteps: number },
+  screenshots?: boolean,
 ): string {
   const task = cardTitle.trim() ? `Task: ${cardTitle.trim()}\n\n` : "";
   let rules = usesClassifierMode(config) ? `${AGENT_SAFETY_PREAMBLE}\n${CLASSIFIER_MODE_RULE}` : AGENT_SAFETY_PREAMBLE;
   if (chat && chat.sourceAgentId && chat.maxQuestions > 0) rules += `\n${chatQuestionRule(chat.sourceAgentId, chat.maxQuestions)}`;
   if (progress && progress.totalSteps > 0) rules += `\n${stepProgressRule(progress.totalSteps)}`;
+  if (screenshots) rules += `\n${SCREENSHOT_RULE}`;
   return (
     `${rules}\n\n` +
     `${task}Steps (from the owner's browser-prompt card, verbatim):\n` +
@@ -243,6 +253,7 @@ export interface AgentSettingsInput {
   maxChatQuestions?: number;
   openAgentOnStart?: boolean;
   showStepProgress?: boolean;
+  showLiveScreenshot?: boolean;
   agentThinking?: string;
   agentMode?: string;
 }

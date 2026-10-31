@@ -2,6 +2,7 @@
 // started it, picking the browser agent's final report, and framing it as a prompt.
 // Imports only other dependency-free shared modules so `node --experimental-strip-types` can load it.
 import { isAskFirstMode } from "./agent-prompt.ts";
+import { isImageOnly, stripMarkdownImages } from "./screenshot.ts";
 
 /** Marks agents the plugin started; only these are ever reported back. */
 export const RUN_LABEL = "browser-prompt";
@@ -80,7 +81,9 @@ type TimelineItemLike = { type: string; text?: unknown; messageId?: unknown };
  * The final assistant message of the latest turn. Takes the trailing assistant text after the last
  * tool call (skipping reasoning); when the items carry message ids, keeps only the last message's
  * chunks. Chunks of one message are concatenated; separate messages are joined by a blank line.
- * Falls back to the turn's last assistant text when the turn ended on a tool call.
+ * Falls back to the turn's last assistant text when the turn ended on a tool call. Image outputs
+ * (such as browser screenshots) are not text: image-only messages are skipped and Markdown images
+ * are removed, so a report or question never carries a screenshot or its file path.
  */
 export function finalAssistantText(items: readonly TimelineItemLike[]): string {
   let start = 0;
@@ -90,7 +93,9 @@ export function finalAssistantText(items: readonly TimelineItemLike[]): string {
       break;
     }
   }
-  const turn = items.slice(start);
+  const turn = items
+    .slice(start)
+    .filter((item) => !(item.type === "assistant_message" && typeof item.text === "string" && isImageOnly(item.text)));
   const tail: TimelineItemLike[] = [];
   for (let i = turn.length - 1; i >= 0; i--) {
     const item = turn[i]!;
@@ -101,7 +106,7 @@ export function finalAssistantText(items: readonly TimelineItemLike[]): string {
   if (tail.length === 0) {
     for (let i = turn.length - 1; i >= 0; i--) {
       const item = turn[i]!;
-      if (item.type === "assistant_message" && typeof item.text === "string" && item.text.trim()) return item.text.trim();
+      if (item.type === "assistant_message" && typeof item.text === "string" && item.text.trim()) return stripMarkdownImages(item.text).trim();
     }
     return "";
   }
@@ -114,7 +119,7 @@ export function finalAssistantText(items: readonly TimelineItemLike[]): string {
     text += (separate ? "\n\n" : "") + (item.text as string);
     previousId = item.messageId;
   }
-  return text.trim();
+  return stripMarkdownImages(text).trim();
 }
 
 /** Zero-width, bidi and other invisible format characters that can hide or disguise text. */

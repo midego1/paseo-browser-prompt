@@ -20,6 +20,7 @@ import {
 import { openRunScreen, startBrowserAgent } from "./agent-run";
 import { MessageMarkdown } from "./markdown";
 import { RUN_LABELS, runVisual, useRunState } from "./run-status";
+import { ScreenshotThumb } from "./screenshot-thumb";
 import { StepProgressRow, useStepProgress } from "./step-progress";
 import { countSteps } from "../shared/steps";
 import { useUpdateOnUse } from "./update";
@@ -81,7 +82,16 @@ export function BrowserPromptCard({
   const totalSteps = useMemo(() => countSteps(text), [text]);
   const showSteps =
     settings.status === "ready" ? settings.values.showStepProgress : DEFAULT_AGENT_SETTINGS.showStepProgress;
-  const { progress: stepProgress, asking } = useStepProgress(runAgentId, totalSteps, runState, runStatus, showSteps);
+  const showScreenshot =
+    settings.status === "ready" ? settings.values.showLiveScreenshot : DEFAULT_AGENT_SETTINGS.showLiveScreenshot;
+  const { progress: stepProgress, asking, screenshot } = useStepProgress(
+    runAgentId,
+    totalSteps,
+    runState,
+    runStatus,
+    showSteps,
+    showScreenshot,
+  );
   // An idle run whose latest turn is a question waits for the chat; it is not done yet.
   const shownState = asking && runState === "done" ? "asking" : runState;
   const confirmLaunch =
@@ -336,6 +346,16 @@ export function BrowserPromptCard({
       ) : null}
       {runAgentId && showSteps ? (
         <StepProgressRow progress={stepProgress} total={totalSteps} state={shownState} theme={theme} compact={layout.compact} />
+      ) : null}
+      {runAgentId && showScreenshot ? (
+        <ScreenshotThumb
+          source={screenshot}
+          step={stepProgress?.step ?? null}
+          theme={theme}
+          onOpen={() => {
+            if (!openRunScreen(runAgentId, agentTitle(title, displayTitle), true)) toast.error("Cannot open the agent from here.");
+          }}
+        />
       ) : null}
       {runError ? (
         <View style={styles.runRow}>

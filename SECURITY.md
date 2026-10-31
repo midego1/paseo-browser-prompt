@@ -20,6 +20,7 @@ Do not include real secrets, tokens or private prompts in a report; describe the
 | Card steps plus a fixed safety preamble | A new agent on your own Paseo daemon, and that agent's model provider (Anthropic by default) | Run with Paseo agent |
 | The browser agent's final report (up to 4,000 characters), escaped and framed as untrusted output | The agent whose chat showed the card, and that agent's model provider | Report back to chat: Auto (default) only when that chat runs in an ask-first mode, or Always |
 | Title, outcome and run agent id only | The agent whose chat showed the card | Report back to chat: Auto, when that chat runs in any other mode |
+| Browser screenshots (viewport PNG after each step) | The browser agent's model provider, as tool output; a private copy kept by Paseo on the daemon host; shown as a thumbnail on the card in your Paseo app | Show live screenshot (on by default) |
 | A browser agent's question for the chat (up to 1,500 characters), escaped and framed as untrusted text by the plugin | The agent whose chat showed the card, and that agent's model provider, in any permission mode | Talk to the chat (on by default, at most 10 per run by default) |
 | Ids of runs that already reported | `reported-runs.json` in the state directory below | Report back to chat |
 | Settings, done marks, card-to-agent links | Paseo host settings on your daemon | Always |
@@ -73,6 +74,11 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
 - Step progress text is written by the browser agent and can echo a page. The agent is told not to
   put secrets or page text in it; the card cleans it (no control or invisible characters, one line,
   at most 60 characters) and shows it only in your Paseo app. It is never sent to a chat.
+- Screenshots can show anything on the page, including signed-in account details. The agent is
+  told never to screenshot a page that shows a secret, but that is an instruction to a model. The
+  plugin never sends screenshots or their file paths to a chat: reports and questions are text only.
+  The thumbnail is read from the agent's own timeline and stays in your Paseo app. Turn off Show
+  live screenshot to stop the screenshots (this also saves the tokens each image costs).
 - Self-update installs only fast-forward commits from the `https://` remote the plugin was installed
   from. Installing a plugin means trusting its repository: the server part runs unsandboxed with the
   daemon user's access.

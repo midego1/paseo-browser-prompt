@@ -117,6 +117,7 @@ Settings (**Settings → Plugins → Browser prompts → Run with Paseo agent**)
 | Confirm before starting | on | Asks before starting the agent; says when it will run in Auto mode. |
 | Open the agent when started | off | Off: the agent works in the background; the card shows its status (running…, needs you, done ✓, failed) and an Open link. On: its view opens right away. |
 | Show step progress | on | The agent marks each numbered step as it starts it (`[browser-prompt step N/M] …`); the card shows "Step N of M · …" with a progress bar. |
+| Show live screenshot | on | The agent takes a viewport screenshot after each numbered step (never of pages showing secrets); the card shows the latest one as a thumbnail under the progress bar. Needs a Paseo 0.13+ app to show it. |
 | Report back to chat | Auto | Auto, Always send the full report, or Off (see below). |
 | Talk to the chat | on | The agent may ask the chat that showed the card about the task; the plugin forwards each question framed as untrusted text (see below). |
 | Max questions to the chat per run | `10` | Whole number from 0 to 50; 0 works like Talk to the chat off. After the limit the agent asks the owner. |
@@ -260,6 +261,27 @@ ordinary assistant text, not a message to the chat, and does not end the turn.
 - Step markers never affect report back: question detection ignores leading marker lines (a
   question after them is still a question), and a final message that starts with a marker followed
   by anything else is the run's report.
+
+### Live screenshot
+
+With **Show live screenshot** on (default), the run's prompt gets rule 10: after each numbered step,
+call `browser_screenshot` once with `fullPage: false`; never screenshot a page that shows a password,
+token, API key, 2FA or recovery code or other secret (skip it and say "screenshot skipped").
+
+- Where the image comes from: Paseo's browser_screenshot returns a PNG as an MCP image block; the
+  Claude provider stores a private copy on the daemon host and emits an assistant message
+  `![Image](<path>)` right after the tool call. The timeline has no separate image item.
+- `createScreenshotTracker` (`shared/screenshot.ts`) takes the image message that directly follows a
+  `browser_screenshot` call and keeps only its path (absolute path or http(s) URL; data URIs,
+  relative paths and odd characters are refused). One reference per card, never image data. It is
+  fed by the same timeline read and live stream as step progress, so it updates while the run works
+  and the last one stays after it is done.
+- The card shows it with the host `Markdown` component (`@getpaseo/plugin/client/ui`, Paseo 0.13+),
+  the renderer Paseo uses for these image messages in an agent's own chat, inside a pressable frame
+  (max 240 px wide, rounded, theme border) that opens the run. The plugin API has no other way to
+  show a daemon-side image, so on older apps the thumbnail is not shown.
+- Screenshots never reach a chat: `finalAssistantText` skips image-only messages and removes
+  Markdown images, so reports and questions are text only and carry no image paths.
 
 ### Talk to the chat
 

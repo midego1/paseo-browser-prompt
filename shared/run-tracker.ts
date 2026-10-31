@@ -1,10 +1,11 @@
 // Pure state behind the card's step progress and "waiting for the chat" label, fed by timeline
 // reads and the live stream. Kept free of React so it is tested directly.
 import { finalAssistantText } from "./report-back.ts";
+import { createScreenshotTracker } from "./screenshot.ts";
 import { latestStep, type StepProgress } from "./steps.ts";
 import { MAX_REDIRECTS, parseQuestion, REDIRECT_PREFIX } from "./talk.ts";
 
-type Item = { type: string; text?: unknown; messageId?: unknown };
+type Item = { type: string; text?: unknown; messageId?: unknown; name?: unknown };
 type StreamEvent = { type: string; item?: Item };
 
 /** Assistant text kept from the live stream to find the latest marker. */
@@ -16,6 +17,8 @@ export interface RunView {
   progress: StepProgress | null;
   /** The latest turn ended with a question for the chat that is still waiting for its answer. */
   asking: boolean;
+  /** Path or URL of the run's latest browser screenshot (one reference, never image data). */
+  screenshot: string | null;
 }
 
 function isRedirect(item: Item): boolean {
@@ -30,13 +33,14 @@ function waitsForChat(finalText: string, redirects: number): boolean {
   return parseQuestion(finalText) !== null && redirects < MAX_REDIRECTS;
 }
 
-export function createRunTracker(total: number, showSteps: boolean) {
+export function createRunTracker(total: number, showSteps: boolean, showScreenshots = false) {
   let progress: StepProgress | null = null;
   let asking = false;
   let buffer = "";
   let lastMessageId: string | null = null;
   let turnItems: Item[] = [];
   let redirects = 0;
+  let screenshots = createScreenshotTracker();
 
   /** Appends a chunk; a new message (new message id, or a marker at its start) starts a new line. */
   function append(text: string, chunk: string, newMessage: boolean): string {
@@ -47,12 +51,18 @@ export function createRunTracker(total: number, showSteps: boolean) {
 
   return {
     view(): RunView {
-      return { progress: showSteps ? progress : null, asking };
+      return { progress: showSteps ? progress : null, asking, screenshot: showScreenshots ? screenshots.latest() : null };
     },
 
     /** A tail read of the run's timeline: recomputes the waiting state and the latest step. */
     history(items: readonly Item[]): void {
       redirects = items.filter(isRedirect).length;
+      if (showScreenshots) {
+        const fromHistory = createScreenshotTracker();
+        for (const item of items) fromHistory.push(item);
+        // A tail read without a screenshot keeps the one already shown (it may be older than the tail).
+        if (fromHistory.latest()) screenshots = fromHistory;
+      }
       asking = waitsForChat(finalAssistantText(items), redirects);
       if (!showSteps) return;
       const text = items
@@ -80,6 +90,7 @@ export function createRunTracker(total: number, showSteps: boolean) {
       turnItems.push(item);
       if (turnItems.length > TURN_ITEMS) turnItems = turnItems.slice(-TURN_ITEMS);
       if (isRedirect(item)) redirects++;
+      if (showScreenshots) screenshots.push(item);
       if (item.type !== "assistant_message" || typeof item.text !== "string") return;
       const messageId = typeof item.messageId === "string" && item.messageId ? item.messageId : null;
       const newMessage = messageId !== null && lastMessageId !== null && messageId !== lastMessageId;

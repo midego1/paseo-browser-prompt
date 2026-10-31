@@ -15,7 +15,7 @@ export const MAX_RUNS = 200;
 export const preferences = defineSettings({
   id: "preferences",
   scope: "host",
-  version: 9,
+  version: 10,
   schema: z.object({
     /**
      * Desktop and web clients.
@@ -46,6 +46,8 @@ export const preferences = defineSettings({
     talkToChat: z.boolean().default(DEFAULT_AGENT_SETTINGS.talkToChat),
     /** Ask the run to mark its steps and show "Step N of M" with a progress bar on the card. */
     showStepProgress: z.boolean().default(DEFAULT_AGENT_SETTINGS.showStepProgress),
+    /** Ask the run for a viewport screenshot after each step and show the latest on the card. */
+    showLiveScreenshot: z.boolean().default(DEFAULT_AGENT_SETTINGS.showLiveScreenshot),
     /** Questions a run may send to the chat (0 to 50; 0 behaves like Talk to the chat off). */
     maxChatQuestions: z
       .number()
