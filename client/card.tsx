@@ -19,6 +19,7 @@ import {
 } from "./launch";
 import { openRunScreen, startBrowserAgent } from "./agent-run";
 import { MessageMarkdown } from "./markdown";
+import { OwnerPromptBox, useOwnerPrompts } from "./owner-prompt";
 import { RUN_LABELS, runVisual, useRunState } from "./run-status";
 import { SCREENSHOT_BLOCKED_HINT } from "../shared/screenshot";
 import { ScreenshotStrip } from "./screenshot-thumb";
@@ -80,7 +81,14 @@ export function BrowserPromptCard({
     settings.status === "ready" ? (settings.values.runs.find(([key]) => key === doneKey)?.[1] ?? null) : null;
   const runAgentId = localRun ?? storedRun;
   // Started in this card session: an idle snapshot before its first turn means "starting".
-  const { state: runState, status: runStatus } = useRunState(runAgentId, localRun !== null && localRun === runAgentId);
+  const {
+    state: runState,
+    status: runStatus,
+    updatedAt: runUpdatedAt,
+  } = useRunState(runAgentId, localRun !== null && localRun === runAgentId);
+  // The run's pending question or permission, answered here only by the owner's click.
+  const ownerCard = useMemo(() => ({ sourceAgentId: agentId, cardId }), [agentId, cardId]);
+  const owner = useOwnerPrompts(runAgentId, runState === "needs-input", runUpdatedAt, ownerCard);
   const totalSteps = useMemo(() => countSteps(text), [text]);
   const showSteps =
     settings.status === "ready" ? settings.values.showStepProgress : DEFAULT_AGENT_SETTINGS.showStepProgress;
@@ -333,7 +341,13 @@ export function BrowserPromptCard({
       {runAgentId ? (
         <View style={styles.runRow}>
           <Icon name={runVisuals.icon} size={14} color={runVisuals.color} />
-          <Text style={[styles.runText, runState === "done" || runState === "failed" ? { color: runVisuals.color } : null]}>
+          <Text
+            style={[
+              styles.runText,
+              runState === "done" || runState === "failed" ? { color: runVisuals.color } : null,
+              runState === "needs-input" ? { color: theme.colors.statusWarning, fontWeight: "700" as const } : null,
+            ]}
+          >
             {shownState === "asking" ? "Waiting for the chat's answer" : RUN_LABELS[runState]}
           </Text>
           <Text style={styles.hint}>·</Text>
@@ -350,6 +364,23 @@ export function BrowserPromptCard({
       ) : null}
       {runAgentId && showSteps ? (
         <StepProgressRow progress={stepProgress} total={totalSteps} state={shownState} theme={theme} compact={layout.compact} />
+      ) : null}
+      {runAgentId && runState === "needs-input" ? (
+        <OwnerPromptBox
+          prompts={owner.prompts}
+          verified={owner.verified}
+          theme={theme}
+          onAnswer={async (requestId, response) => {
+            try {
+              await owner.answer(requestId, response);
+            } catch (error) {
+              toast.error(`Could not send your answer: ${error instanceof Error ? error.message : String(error)}`);
+            }
+          }}
+          onOpen={() => {
+            if (!openRunScreen(runAgentId, agentTitle(title, displayTitle), true)) toast.error("Cannot open the agent from here.");
+          }}
+        />
       ) : null}
       {runAgentId && showScreenshot ? (
         <ScreenshotStrip

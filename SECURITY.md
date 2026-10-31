@@ -81,6 +81,16 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
   thumbnail only uses Paseo's own local attachment files, never a remote URL.
   The thumbnail is read from the agent's own timeline and stays in your Paseo app. Turn off Show
   live screenshot to stop the screenshots (this also saves the tokens each image costs).
+- Questions and permission requests the browser agent puts to the owner (AskUserQuestion, tool
+  approvals) stay with the owner. The card shows them and sends the answer the owner clicks with
+  Paseo's `respondToPermission`, the same as answering in the run. Nothing answers them
+  automatically, the chat never sees them, and no server code responds to them. Answer buttons are
+  shown only after the run's own snapshot confirms it is this card's run, a question is sent only
+  after you select and press Send, and a permission offers Allow only when the card shows everything
+  it would allow: every input field in full and exactly as sent (nothing cut, no characters removed
+  or normalized, no unknown fields such as `dangerouslyDisableSandbox`), and Allow needs a second
+  "Confirm allow" tap. Otherwise only Deny. Values typed into a page are masked until you tap Show. The question text, options and details come from the agent and can echo a page; read them
+  before you click.
 - Self-update installs only fast-forward commits from the `https://` remote the plugin was installed
   from. Installing a plugin means trusting its repository: the server part runs unsandboxed with the
   daemon user's access.

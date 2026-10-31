@@ -240,7 +240,7 @@ Delivery:
   is a slash command, is compacting or has no live query, in which case Paseo replaces it), and a
   permission that turn had just raised would be denied.
 - A permission request or an AskUserQuestion of the browser agent does not message the source; the
-  card shows "Paseo agent needs you" instead.
+  card shows "Paseo agent needs you" and lets the owner answer there (see Answer on the card).
 
 ### Step progress
 
@@ -324,6 +324,42 @@ token, API key, 2FA or recovery code or other secret (skip it and say "screensho
   These patterns are linear and their input is capped (20,000 characters for stripping, 4,096 for
   image-message checks); `test/perf.test.mjs` runs 100k-character adversarial input through every
   chat-text and card path.
+
+### Answer on the card
+
+When the run waits for the owner (an AskUserQuestion or a permission request; the card says
+"Paseo agent needs you" in the theme's warning color), the card shows the request itself in a
+warning-bordered box:
+
+- `useOwnerPrompts` (`client/owner-prompt.tsx`) reads the run's `pendingPermissions` with
+  `paseo.agents.ref(run).refresh()` while the card is in "needs you", again whenever the agent's
+  snapshot changes. Answer buttons appear only when that same snapshot carries this card's run
+  labels (`verifiedRun`: `browser-prompt: run`, this card's chat as source, this card's id);
+  otherwise the box offers **Answer in run** only. `ownerPrompts` (`shared/owner-prompt.ts`) turns
+  the requests into prompts: questions with their header, text and options (at most 4 questions
+  and 8 options; text NFKC-normalized, invisible and control characters removed, capped), or
+  permissions. Claude permission requests have no title or description, so the card shows the
+  request's input and Paseo's tool-call detail as plain text (`permissionDetails`): the tool name
+  humanized, command and script as scrollable monospace blocks (up to 2,000 characters and 30
+  lines), URL, files and values (up to 1,000), element, key, click options, search, purpose,
+  timeout and scroll; for ExitPlanMode the plan text (up to 6,000, scrollable) and the plan's
+  actions in full. Values typed into a page (browser_fill, browser_type) are masked as
+  "•••• (N chars)" until the owner taps Show.
+- Allow is offered only when the card shows everything it would allow: every non-empty input field
+  is rendered (only `browserId`, the tab id, is hidden on purpose; any other key, for example
+  `dangerouslyDisableSandbox` or `run_in_background`, withholds Allow), nothing was cut, and
+  nothing was altered for display (`cleanPromptTextInfo` reports NFKC changes, removed invisible,
+  bidi or control characters, and collapsed whitespace). Otherwise the card offers only Deny and
+  **Open run**, and says so.
+- The owner answers with clicks: a tap on an option only selects it and **Send answer** sends it;
+  Allow on a permission asks for **Confirm allow** first; Deny is immediate. The answer goes to the run with the SDK's
+  `respondToPermission`: questions as `{ behavior: "allow", updatedInput: { answers } }` keyed by
+  each question's full text (several choices joined with ", "), permissions with the pressed
+  action's behavior and `selectedActionId`. **Other answer: open run** / **Open run** opens the run
+  for free text or anything the card does not show.
+- Only the owner's click answers: no server code and no chat path calls `respondToPermission`
+  (a test checks this), and these questions are never forwarded to the chat. If the request cannot
+  be read, the box offers **Answer in run**.
 
 ### Talk to the chat
 
