@@ -13,6 +13,7 @@ import { useRef, useState } from "react";
 import { Text } from "react-native";
 import { agentModeError, DEFAULT_AGENT_SETTINGS } from "../shared/agent-prompt";
 import { DEFAULT_APP_LINK_TEMPLATE, validateAppLinkTemplate } from "../shared/browser-prompt";
+import { parseReportMode, type ReportMode } from "../shared/report-back";
 import { preferences } from "../shared/settings";
 import { LauncherSettings } from "./launcher-settings";
 import { UpdateSettings } from "./update-settings";
@@ -34,6 +35,12 @@ const THINKING_OPTIONS: { label: string; value: string }[] = [
   { label: "High (default)", value: "high" },
   { label: "Extra high", value: "xhigh" },
   { label: "Max", value: "max" },
+];
+
+const REPORT_OPTIONS: { label: string; value: ReportMode }[] = [
+  { label: "Auto (default)", value: "auto" },
+  { label: "Always send the full report", value: "full" },
+  { label: "Off", value: "off" },
 ];
 
 type AgentDraft = { agentProvider: string; agentModel: string; agentMode: string };
@@ -134,6 +141,13 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
             hint="Ask “Start a Paseo agent to do these steps in your browser?” first."
             value={values.confirmAgentLaunch}
             onValueChange={(confirmAgentLaunch) => void settings.save({ ...values, confirmAgentLaunch }, revision)}
+          />
+          <SettingsSelect
+            label="Report back to chat"
+            hint="When the agent finishes or fails, tell the chat that showed the card. Auto forwards the report only to chats in an ask-first mode and sends a status-only notice otherwise. Always forwards it to any chat, including ones that act without approval; the report can contain text from web pages."
+            value={values.reportBack}
+            options={REPORT_OPTIONS}
+            onValueChange={(reportBack) => void settings.save({ ...values, reportBack: parseReportMode(reportBack) }, revision)}
           />
           <SettingsInput
             ref={providerInput}

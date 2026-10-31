@@ -58,7 +58,7 @@ export function AgentRunScreen({ params, navigation, theme, layout }: PluginScre
   return (
     <View style={styles.screen}>
       <Text style={styles.title}>{title}</Text>
-      <Text style={styles.hint}>The card shows whether the agent is running, needs your approval, or finished.</Text>
+      <Text style={styles.hint}>The card shows whether the agent is running, needs you, is done, or failed.</Text>
       <Text style={styles.hint}>
         The agent runs on the Paseo daemon and drives the browser tabs in your Paseo desktop app. Keep that app
         open. Tool use asks for your approval in the agent view.

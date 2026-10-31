@@ -1,5 +1,6 @@
 import type { PluginOpenScreenInput, usePaseo } from "@getpaseo/plugin/client";
 import { agentTitle, buildAgentPrompt, resolveAgentConfig, type AgentSettingsInput } from "../shared/agent-prompt";
+import { runLabels } from "../shared/report-back";
 
 type PaseoApi = ReturnType<typeof usePaseo>;
 
@@ -64,11 +65,15 @@ async function chooseWorkspace(
   return { workspaceId: recent.id, source: "most-recent" };
 }
 
-/** Creates the browser agent in the card agent's workspace with the safety-preamble prompt. */
+/**
+ * Creates the browser agent in the card agent's workspace with the safety-preamble prompt. Its labels
+ * link it to the card's agent and card, so the server can report back when it finishes.
+ */
 export async function startBrowserAgent(
   paseo: PaseoApi,
   input: {
     sourceAgentId: string;
+    cardId: string;
     cachedWorkspaceId: string | null;
     cardTitle: string;
     displayTitle: string;
@@ -82,7 +87,7 @@ export async function startBrowserAgent(
     config,
     title: agentTitle(input.cardTitle, input.displayTitle),
     prompt: buildAgentPrompt(input.cardTitle, input.steps),
-    labels: { "browser-prompt": "run" },
+    labels: runLabels(input.sourceAgentId, input.cardId),
   });
   return { agentId: agent.id, workspaceId, workspaceSource: source };
 }

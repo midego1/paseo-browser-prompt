@@ -1,5 +1,7 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { createLauncher } from "./server/launcher";
+import { registerReportBack } from "./server/report-back-hook";
+import { fileReportedStore } from "./server/reported-store";
 import { createServerUpdater, currentUpdateStatus } from "./server/updater";
 import { DEFAULT_APP_LINK_TEMPLATE } from "./shared/browser-prompt";
 import { preferences } from "./shared/settings";
@@ -34,7 +36,11 @@ export default function contribute(server: PluginServerContext) {
   });
   server.handle(getLauncherStatus, () => launcher.status());
 
+  // Report back to chat: a finished browser run reports to the agent whose card started it.
+  const reportBack = registerReportBack(server, settings, { store: fileReportedStore() });
+
   return async () => {
+    await reportBack.dispose();
     unsubscribe();
     await launcher.close();
   };

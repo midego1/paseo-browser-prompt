@@ -2,6 +2,8 @@ import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
 import { DEFAULT_AGENT_SETTINGS } from "./agent-prompt";
 import { DEFAULT_APP_LINK_TEMPLATE } from "./browser-prompt";
+import { DEFAULT_REPORT_MODE, REPORT_MODES } from "./report-back";
+import { migratePreferences } from "./settings-migrate";
 import { DEFAULT_TRAMPOLINE_PORT } from "./trampoline-host";
 
 /** Cap on remembered "done" marks; the oldest are dropped first. */
@@ -13,7 +15,7 @@ export const MAX_RUNS = 200;
 export const preferences = defineSettings({
   id: "preferences",
   scope: "host",
-  version: 4,
+  version: 6,
   schema: z.object({
     /**
      * Desktop and web clients.
@@ -35,18 +37,20 @@ export const preferences = defineSettings({
     agentMode: z.string().default(DEFAULT_AGENT_SETTINGS.agentMode),
     /** Ask before starting the agent. */
     confirmAgentLaunch: z.boolean().default(DEFAULT_AGENT_SETTINGS.confirmAgentLaunch),
-    /** Agents started from cards: `[<agentId>:<cardId>, startedAgentId]`, oldest first. */
-    runs: z.array(z.tuple([z.string(), z.string()])).default([]),
+    /**
+     * Report a finished browser agent back to the chat whose card started it. auto: the full report
+     * only to chats in an ask-first mode, a status-only notice otherwise. full: always. off: never.
+     */
+    reportBack: z.enum(REPORT_MODES).default(DEFAULT_REPORT_MODE),
+    /**
+     * Agents started from cards: `[<agentId>:<cardId>, startedAgentId]`, oldest first, plus
+     * `"most-recent"` when the run started outside the card agent's workspace.
+     */
+    runs: z.array(z.tuple([z.string(), z.string()], z.string())).default([]),
     /** ChatGPT launcher bind address on the daemon host; empty = this machine's Tailscale IPv4. */
     trampolineHost: z.string().default(""),
     /** ChatGPT launcher port. */
     trampolinePort: z.number().int().default(DEFAULT_TRAMPOLINE_PORT),
   }),
-  migrate(values, fromVersion) {
-    const old = (values ?? {}) as { done?: unknown };
-    // v1 only had startMode ("web-agent" | "copy-only") and done. The app is the new default.
-    if (fromVersion < 2) return { done: Array.isArray(old.done) ? old.done : [] };
-    // v3 and v4 only add fields with defaults.
-    return values;
-  },
+  migrate: migratePreferences,
 });

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+- Report back to chat: when a browser agent started from a card finishes or fails, the agent whose
+  chat showed the card is told. New setting **Report back to chat**: Auto (default) forwards the
+  report only to chats in an ask-first mode and a status-only notice to others; Always forwards it
+  to any chat; Off sends nothing.
+- Reports are escaped (NFKC, invisible characters removed, every `<` and `>` escaped), fenced and
+  framed as untrusted output, capped at 4,000 characters.
+- Once per run, persisted across plugin reloads; only runs a card recorded, in the same workspace;
+  never to another browser run.
+- A busy chat is never interrupted on purpose: deliveries to one chat are serialized and wait until
+  it is idle with no pending question or permission, for up to two hours.
+- Browser agents carry `browser-prompt-source` and `browser-prompt-card` labels; card run records
+  note when the most-recent-workspace fallback was used.
+- Settings schema v6: `reportBack` is `auto | full | off` (a v5 boolean migrates to `auto` / `off`).
+- Card status labels: running…, needs you (question or permission), done ✓, failed.
+
 ## 0.1.0 (unreleased)
 
 First public release.

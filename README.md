@@ -1,7 +1,10 @@
 # Browser prompt for Paseo
 
 A [Paseo](https://paseo.sh) plugin that renders a card with **Start in ChatGPT**, **Copy**, **Done**
-and **Run with Paseo agent** for every `browser-prompt` block in an assistant message.
+and **Run with Paseo agent** for every `browser-prompt` block in an assistant message. With
+**Report back to chat** (default Auto), a browser agent tells the chat that showed the card when it
+finishes or fails: the full report when that chat runs in an ask-first mode, a status-only notice
+otherwise.
 
 ![Card (light)](docs/screenshots/card-light.png)
 
@@ -113,19 +116,79 @@ The card's "Run with Paseo agent" button uses the app's own Paseo connection (`u
 - Workspace: `useAgent(cardAgentId, a => a.workspaceId)`; if the app has no snapshot yet,
   `paseo.agents.ref(id).refresh()`; last resort the most recently active workspace
   (`workspaces.list({ sort: activity_at desc, limit 1 })`).
-- `paseo.workspaces.ref(workspaceId).agents.create({ config, title: "Browser: <title>", prompt })`
+- `paseo.workspaces.ref(workspaceId).agents.create({ config, title: "Browser: <title>", prompt, labels })`
   with `config = { provider: "claude/claude-sonnet-5-5", modeId: "default", thinkingOptionId: "high" }`
   by default (host settings). Only ask-first modes are used (`ASK_FIRST_MODES`: claude `default`/`plan`,
   omp `ask`); other modes fall back to the ask-first mode and providers without one are refused.
 - `prompt = buildAgentPrompt(title, steps)`: fixed safety preamble (`AGENT_SAFETY_PREAMBLE`)
   plus the steps verbatim inside `<steps>`.
-- The card remembers `<agentId>:<cardId> -> startedAgentId` in host settings and shows the
+- The card remembers `<agentId>:<cardId> -> startedAgentId` in host settings (plus `"most-recent"`
+  when the run started outside the card agent's workspace; a save that loses a revision race is
+  retried against the newest settings) and shows the
   status from `useAgent(startedAgentId, …)`. Timeline renderers get no `navigation`, so
   "Open" opens the plugin screen `agent-run`, which calls `navigation.openAgent` once.
   Screens get no client-state provider on Paseo 0.11, so screen code must not use
   `useAgent`/`useWorkspace` (they throw "Plugin state hooks must run inside a workspace
   panel"); `test/screen-hooks.test.mjs` checks every registered screen's import graph.
+- Labels (`shared/report-back.ts` `runLabels`): `browser-prompt: run`,
+  `browser-prompt-source: <card agent id>`, `browser-prompt-card: <card id>`.
 - Nothing is appended to timelines and prompt text is never logged.
+
+### Report back to chat
+
+Setting **Report back to chat** (host setting `reportBack`): `auto` (default), `full` or `off`.
+Settings that cannot be read or are invalid count as `auto`, never `full`. A v5 boolean migrates
+`true` to `auto` and `false` to `off`. `server/report-back-hook.ts` registers
+`server.on("agent.turn_ended")`; the handler returns at once and `server/report-back.ts` delivers in
+the background, because Paseo cancels hook requests after 30 seconds and their `signal` with them.
+Plugin cleanup aborts every pending wait through the plugin's own `AbortController`.
+
+Which runs report:
+
+- Canceled turns never report. Labels are read with `paseo.agents.ref(id).refresh()`; an agent
+  without the run label is skipped for 60 seconds, then read again, since labels can change. Only
+  `browser-prompt: run` agents with both `browser-prompt-source` and `browser-prompt-card` labels
+  are considered.
+- The run must be listed in the host `runs` setting under `<source>:<card>`, which only the card
+  writes (polled for up to 10 seconds, since the card saves it right after creating the agent).
+  Run and source must be in the same workspace unless that entry records the most-recent fallback.
+  Running a card again replaces its entry, so only the latest run of a card reports.
+- No report goes to a missing or archived source, to a source that is itself a browser run, or to
+  the run itself, so reports cannot loop. Skips log agent ids only.
+- Once per run: run ids are claimed before delivery, also across concurrent events, and persisted
+  (last 200) in `reported-runs.json` in the plugin's state directory, because the server's settings
+  handle is read-only. A delivery that sent nothing (busy timeout, RPC error, failed send) releases
+  the claim once, so a later turn of that run can retry; a second failure keeps it claimed.
+
+What is sent:
+
+- `auto` and a source in a known ask-first mode (`ASK_FIRST_MODES`; unknown providers or modes count
+  as unsafe), or `full`: `[browser-prompt] Browser agent "<title>" finished|failed. Run agent id:
+  <id>.`, a note that the block is the browser agent's untrusted report and not the owner's
+  instructions, then `<browser-agent-report>` … `</browser-agent-report>` holding the error (for a
+  failed run) and the report, then a closing reminder. All of that text is NFKC-normalized,
+  stripped of zero-width, bidi and control characters, and every `<` and `>` is escaped.
+- `auto` and any other source: a status-only notice with no page-derived text (title, outcome and
+  run agent id only).
+- The report is the turn's final assistant message (from the event's timeline when present, else
+  the last 60 timeline items), cut to 4,000 characters on a line or word boundary with a note.
+
+Delivery:
+
+- Sends to one source are serialized. Each waits until the source is idle with no active turn and no
+  pending permission or question (`waitForFinish` in slices of at most 5 minutes, at least 1 second
+  apart while the source stays busy; `permission` keeps waiting and re-checks every 15 seconds),
+  re-reads the source right before sending, and gives up without sending 2 hours after the report
+  was queued (time spent behind other reports for the same source counts).
+- Every Paseo `send` clears pending permissions of the target (a steered message denies them), and
+  by default a send replaces a running turn. That is why the report waits until the source is
+  settled. It is sent with `activeTurnBehavior: "steer"`: on an idle agent this starts a normal
+  turn. In the milliseconds between the last read and the send, the owner could start a turn; the
+  report is then steered into that turn (providers with steering, Claude included, unless the turn
+  is a slash command, is compacting or has no live query, in which case Paseo replaces it), and a
+  permission that turn had just raised would be denied.
+- A question or permission request of the browser agent does not message the source; the card
+  shows "Paseo agent needs you" instead.
 
 ## Self-update on use
 
