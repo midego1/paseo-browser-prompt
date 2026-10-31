@@ -76,7 +76,9 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
   at most 60 characters) and shows it only in your Paseo app. It is never sent to a chat.
 - Screenshots can show anything on the page, including signed-in account details. The agent is
   told never to screenshot a page that shows a secret, but that is an instruction to a model. The
-  plugin never sends screenshots or their file paths to a chat: reports and questions are text only.
+  plugin never sends screenshots or their file paths to a chat: reports, questions and error text are
+  text only (Markdown and HTML images, `file://` URIs and Paseo attachment paths are removed). The
+  thumbnail only uses Paseo's own local attachment files, never a remote URL.
   The thumbnail is read from the agent's own timeline and stays in your Paseo app. Turn off Show
   live screenshot to stop the screenshots (this also saves the tokens each image costs).
 - Self-update installs only fast-forward commits from the `https://` remote the plugin was installed

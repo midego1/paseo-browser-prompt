@@ -2,7 +2,7 @@
 // started it, picking the browser agent's final report, and framing it as a prompt.
 // Imports only other dependency-free shared modules so `node --experimental-strip-types` can load it.
 import { isAskFirstMode } from "./agent-prompt.ts";
-import { isImageOnly, stripMarkdownImages } from "./screenshot.ts";
+import { isImageOnly, stripImagesForChat } from "./screenshot.ts";
 
 /** Marks agents the plugin started; only these are ever reported back. */
 export const RUN_LABEL = "browser-prompt";
@@ -106,7 +106,7 @@ export function finalAssistantText(items: readonly TimelineItemLike[]): string {
   if (tail.length === 0) {
     for (let i = turn.length - 1; i >= 0; i--) {
       const item = turn[i]!;
-      if (item.type === "assistant_message" && typeof item.text === "string" && item.text.trim()) return stripMarkdownImages(item.text).trim();
+      if (item.type === "assistant_message" && typeof item.text === "string" && item.text.trim()) return stripImagesForChat(item.text).trim();
     }
     return "";
   }
@@ -119,7 +119,7 @@ export function finalAssistantText(items: readonly TimelineItemLike[]): string {
     text += (separate ? "\n\n" : "") + (item.text as string);
     previousId = item.messageId;
   }
-  return stripMarkdownImages(text).trim();
+  return stripImagesForChat(text).trim();
 }
 
 /** Zero-width, bidi and other invisible format characters that can hide or disguise text. */
@@ -128,8 +128,10 @@ const INVISIBLE = /[­؜ᅟᅠ឴឵᠋-᠏​-‏‪-‮⁠-⁯ㅤ︀-️﻿ﾠ
 const CONTROLS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
 
 /**
- * Makes untrusted text inert inside the report block: NFKC-normalizes (so look-alike brackets become
- * ASCII), drops invisible and control characters, and escapes every `<` and `>`.
+ * Makes untrusted text inert and image-free before it goes to a chat (reports, questions, error
+ * text): NFKC-normalizes (so look-alike brackets become ASCII), drops invisible and control
+ * characters, removes images and image locations (`stripImagesForChat`), then escapes every `<`
+ * and `>`.
  */
 export function escapeUntrusted(text: string): string {
   const normalized = text
@@ -137,7 +139,7 @@ export function escapeUntrusted(text: string): string {
     .replace(/\r\n?/g, "\n")
     .replace(INVISIBLE, "")
     .replace(CONTROLS, "");
-  return escapeBrackets(normalized);
+  return escapeBrackets(stripImagesForChat(normalized));
 }
 
 function escapeBrackets(text: string): string {
