@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.2 (unreleased)
+
+- Image stripping for chat text and the screenshot checks are linear in their input: alt text no
+  longer spans `[`, `<img` tags stop at `<`, attachment paths only match at the start of a token,
+  stripping input is cut at 20,000 characters (chat text is cut to 4,000 or 1,500 afterwards) and
+  image-message checks skip anything over 4,096 characters. Adversarial input such as 100k
+  characters of `![` took seconds before and now takes milliseconds on every path (tested).
+
 ## 0.6.1 (unreleased)
 
 Security fixes for the 0.6.0 live screenshot (0.6.0 accepted any http(s) or absolute image source):

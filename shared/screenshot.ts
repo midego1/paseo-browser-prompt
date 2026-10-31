@@ -8,9 +8,9 @@
  * pointing at a private copy on the daemon host.
  */
 const INLINE_IMAGE =
-  /!\[(?:\\.|[^\]\\\n])*\]\(\s*(<[^>\n]*>|(?:\\.|[^\s()\\]|\((?:\\.|[^\s()\\])*\))+)(?:\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\((?:\\.|[^()\\])*\)))?\s*\)/g;
+  /!\[(?:\\.|[^[\]\\\n])*\]\(\s*(<[^>\n]*>|(?:\\.|[^\s()\\]|\((?:\\.|[^\s()\\])*\))+)(?:\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\((?:\\.|[^()\\])*\)))?\s*\)/g;
 /** `![alt][ref]`, `![alt][]` and the shortcut `![ref]`. */
-const REFERENCE_IMAGE = /!\[(?:\\.|[^\]\\\n])*\](?:\[(?:\\.|[^\]\\\n])*\])?/g;
+const REFERENCE_IMAGE = /!\[(?:\\.|[^[\]\\\n])*\](?:\[(?:\\.|[^[\]\\\n])*\])?/g;
 /**
  * Reference definitions `[ref]: destination "title"` on their own line whose destination is an image
  * or a local file (file:, data:, an absolute path, or an image extension). Other `[x]: text` lines,
@@ -19,18 +19,31 @@ const REFERENCE_IMAGE = /!\[(?:\\.|[^\]\\\n])*\](?:\[(?:\\.|[^\]\\\n])*\])?/g;
 const REFERENCE_DEFINITION =
   /^[ \t]{0,3}\[(?:\\.|[^\]\\\n])+\]:[ \t]*<?(?:file:|data:|\/|[A-Za-z]:[\\/]|\S*\.(?:png|jpe?g|webp|gif|bmp|svg|avif)\b)\S*.*$/gim;
 /** HTML image tags, also self-closing and spread over lines. */
-const IMG_TAG = /<img\b[^>]*>/gi;
+const IMG_TAG = /<img\b[^<>]*>/gi;
 /** file:// URIs, and bare paths into Paseo's private image attachment directory. */
 const FILE_URI = /\bfile:\/\/[^\s)>\]"']*/gi;
-const ATTACHMENT_PATH = /(?:[A-Za-z]:)?[^\s()<>\[\]"']*paseo-attachments[^\s()<>\[\]"']*/g;
+const ATTACHMENT_PATH = /(?<![^\s()<>\[\]"'])(?:[A-Za-z]:)?[^\s()<>\[\]"']*paseo-attachments[^\s()<>\[\]"']*/g;
+
+/**
+ * Text longer than this is cut before stripping. Chat-bound text is cut much shorter afterwards
+ * (reports 4,000, questions 1,500 characters), so nothing that would be sent is lost, and the
+ * regular expressions below never see unbounded input.
+ */
+export const MAX_STRIP_INPUT = 20_000;
+/** Paseo's image messages are one short `![Image](file:///…)` line; anything longer is not one. */
+export const MAX_IMAGE_MESSAGE = 4096;
 
 /**
  * Removes images and image locations from text bound for a chat: inline and reference-style
  * Markdown images (and reference definitions), <img> tags, file:// URIs and paths into Paseo's
- * attachment directory. Screenshots and their file paths never reach a chat.
+ * attachment directory. Screenshots and their file paths never reach a chat. Linear in the input:
+ * alt text never contains `[`, an `<img` tag never contains `<`, attachment paths only match at the
+ * start of a token, and input is cut at MAX_STRIP_INPUT. (An image whose alt text holds nested
+ * brackets is not removed as a whole; its file URI or attachment path still is.)
  */
 export function stripImagesForChat(text: string): string {
-  return text
+  const input = text.length > MAX_STRIP_INPUT ? text.slice(0, MAX_STRIP_INPUT) : text;
+  return input
     .replace(INLINE_IMAGE, "")
     .replace(REFERENCE_DEFINITION, "")
     .replace(REFERENCE_IMAGE, "")
@@ -43,6 +56,7 @@ export function stripImagesForChat(text: string): string {
 
 /** The destination of a message that is exactly one inline Markdown image, else null. */
 function soleImageSource(text: string): string | null {
+  if (text.length > MAX_IMAGE_MESSAGE) return null;
   const trimmed = text.trim();
   INLINE_IMAGE.lastIndex = 0;
   const match = INLINE_IMAGE.exec(trimmed);
@@ -53,7 +67,7 @@ function soleImageSource(text: string): string | null {
 
 /** True when the text is nothing but images (an image output of a tool). */
 export function isImageOnly(text: string): boolean {
-  if (!/!\[|<img\b/i.test(text)) return false;
+  if (text.length > MAX_IMAGE_MESSAGE || !/!\[|<img\b/i.test(text)) return false;
   return !stripImagesForChat(text).replace(/\[file omitted\]/g, "").trim();
 }
 
