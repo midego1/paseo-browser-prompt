@@ -20,12 +20,14 @@ import {
 import { openRunScreen, startBrowserAgent } from "./agent-run";
 import { MessageMarkdown } from "./markdown";
 import { RUN_LABELS, runVisual, useRunState } from "./run-status";
+import { SCREENSHOT_BLOCKED_HINT } from "../shared/screenshot";
 import { ScreenshotThumb } from "./screenshot-thumb";
 import { StepProgressRow, useStepProgress } from "./step-progress";
 import { countSteps } from "../shared/steps";
 import { useUpdateOnUse } from "./update";
 
 const DESKTOP_HINT = "Your Paseo desktop app must be open: the agent drives the browser tabs there.";
+
 
 export const cardSchema = z.object({
   cardId: z.string(),
@@ -84,7 +86,7 @@ export function BrowserPromptCard({
     settings.status === "ready" ? settings.values.showStepProgress : DEFAULT_AGENT_SETTINGS.showStepProgress;
   const showScreenshot =
     settings.status === "ready" ? settings.values.showLiveScreenshot : DEFAULT_AGENT_SETTINGS.showLiveScreenshot;
-  const { progress: stepProgress, asking, screenshot } = useStepProgress(
+  const { progress: stepProgress, asking, screenshot, screenshotsBlocked } = useStepProgress(
     runAgentId,
     totalSteps,
     runState,
@@ -356,6 +358,9 @@ export function BrowserPromptCard({
             if (!openRunScreen(runAgentId, agentTitle(title, displayTitle), true)) toast.error("Cannot open the agent from here.");
           }}
         />
+      ) : null}
+      {runAgentId && showScreenshot && screenshotsBlocked && !screenshot ? (
+        <Text style={styles.hint}>{SCREENSHOT_BLOCKED_HINT}</Text>
       ) : null}
       {runError ? (
         <View style={styles.runRow}>

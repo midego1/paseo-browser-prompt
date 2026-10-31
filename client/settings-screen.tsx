@@ -172,7 +172,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
           />
           <SettingsSwitch
             label="Show live screenshot"
-            hint="The agent takes a screenshot of the visible page after each step (never of pages showing secrets), and the card shows the latest one. Screenshots stay in your Paseo app and are never sent to a chat. Each one adds to the agent's token use. Needs Paseo 0.13 or later to show."
+            hint="The agent takes a screenshot of the visible page after each step (never of pages showing secrets), and the card shows the latest one. Screenshots stay in your Paseo app and are never sent to a chat. Each one adds to the agent's token use. Needs Paseo 0.13 or later to show, and the run's browser tab visible in the app: Paseo cannot capture a hidden tab, so a run in the background stops taking screenshots after the first one fails."
             value={values.showLiveScreenshot}
             onValueChange={(showLiveScreenshot) => void settings.save({ ...values, showLiveScreenshot }, revision)}
           />

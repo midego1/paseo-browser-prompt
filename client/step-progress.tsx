@@ -7,12 +7,13 @@ import { createRunTracker, type RunTracker, type RunView } from "../shared/run-t
 import { stepProgressView } from "../shared/step-view";
 import type { StepProgress } from "../shared/steps";
 
-const EMPTY: RunView = { progress: null, asking: false, screenshot: null };
+const EMPTY: RunView = { progress: null, asking: false, screenshot: null, screenshotsBlocked: false };
 
 function sameView(a: RunView, b: RunView): boolean {
   return (
     a.asking === b.asking &&
     a.screenshot === b.screenshot &&
+    a.screenshotsBlocked === b.screenshotsBlocked &&
     a.progress?.step === b.progress?.step &&
     a.progress?.text === b.progress?.text &&
     (a.progress === null) === (b.progress === null)

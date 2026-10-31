@@ -28,6 +28,7 @@ export const DEFAULT_AGENT_SETTINGS = {
 /** Rule asking the run for one viewport screenshot after each step, never of a page with secrets. */
 export const SCREENSHOT_RULE =
   "10. Screenshots: after you complete each numbered step, call browser_screenshot once for the current tab with fullPage false (only the visible part). " +
+  "If a screenshot fails because the tab \"has not painted\" (the owner's Paseo app is not showing that tab), do not retry it, do not ask the owner and do not try to bring the tab to the front for it: take no more screenshots in this run and add \"(screenshots off: tab not visible)\" to your next step line. For screenshots this replaces rule 2's handling of an unpainted tab. " +
   "Never take a screenshot while the page shows a password, token, API key, 2FA or recovery code or any other secret: skip it and say \"screenshot skipped\" in your next step line or your report. " +
   "The screenshots are only for the owner's card: do not describe them in questions for the chat.";
 

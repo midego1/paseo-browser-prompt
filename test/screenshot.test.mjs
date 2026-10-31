@@ -10,6 +10,8 @@ import { createRunTracker } from "../shared/run-tracker.ts";
 import {
   createScreenshotTracker,
   defuseImages,
+  isUnpaintedScreenshot,
+  SCREENSHOT_BLOCKED_HINT,
   isImageOnly,
   isScreenshotTool,
   latestScreenshot,
@@ -277,4 +279,51 @@ test("report, question and status texts never contain a live image, including in
   assert.ok(noLiveImage(question), question);
   const notice = buildStatusNotice({ title: deep, browserAgentId: "run", outcome: { kind: "completed" } });
   assert.ok(noLiveImage(notice), notice);
+});
+
+// ---- 0.6.4: hidden tabs cannot be captured ----
+
+const unpainted = (extra = {}) => ({
+  type: "tool_call",
+  name: "mcp__paseo__browser_screenshot",
+  status: "completed",
+  detail: { type: "unknown", input: { browserId: "b" }, output: "Browser error: The tab has not painted yet. Bring the Paseo app to the front." },
+  ...extra,
+});
+
+test("an unpainted screenshot is recognized from the call's output or error", () => {
+  assert.equal(isUnpaintedScreenshot(unpainted()), true, "browser tool errors arrive as a completed call with error text");
+  assert.equal(isUnpaintedScreenshot(unpainted({ status: "failed", detail: undefined, error: { message: "Tab not painted yet" } })), true);
+  assert.equal(isUnpaintedScreenshot(unpainted({ name: "browser_snapshot" })), false, "only screenshots");
+  assert.equal(isUnpaintedScreenshot(unpainted({ detail: { type: "unknown", output: "Browser error: tab closed" } })), false);
+  assert.equal(isUnpaintedScreenshot(unpainted({ detail: `${"x".repeat(5000)} has not painted` })), false, "only the first 4,000 characters are read");
+  assert.equal(isUnpaintedScreenshot({ type: "assistant_message", text: "The tab has not painted yet" }), false);
+});
+
+test("the card learns that screenshots are blocked, from history and from the stream", () => {
+  const fromHistory = createRunTracker(3, true, true);
+  fromHistory.history([{ type: "user_message", text: "go" }, unpainted()]);
+  assert.equal(fromHistory.view().screenshotsBlocked, true);
+  assert.equal(fromHistory.view().screenshot, null);
+  fromHistory.history([{ type: "user_message", text: "go" }, { type: "assistant_message", text: "later tail without the call" }]);
+  assert.equal(fromHistory.view().screenshotsBlocked, true, "kept after a tail read that no longer has the call");
+
+  const live = createRunTracker(3, true, true);
+  live.event({ type: "timeline", item: unpainted() });
+  assert.equal(live.view().screenshotsBlocked, true);
+  live.history([{ type: "user_message", text: "go" }, shot(), image(PNG_A)]);
+  assert.equal(live.view().screenshotsBlocked, true, "a later history read keeps what the stream saw");
+  assert.equal(live.view().screenshot, PNG_A, "a visible tab later can still give a screenshot");
+
+  const off = createRunTracker(3, true, false);
+  off.history([{ type: "user_message", text: "go" }, unpainted()]);
+  assert.equal(off.view().screenshotsBlocked, false, "setting off: no hint");
+  assert.match(SCREENSHOT_BLOCKED_HINT, /browser tab to be visible in your Paseo app/);
+});
+
+test("rule 10 tries once and stops on an unpainted tab, without asking the owner", () => {
+  assert.match(SCREENSHOT_RULE, /If a screenshot fails because the tab "has not painted"/);
+  assert.match(SCREENSHOT_RULE, /do not retry it, do not ask the owner and do not try to bring the tab to the front for it: take no more screenshots in this run/);
+  assert.match(SCREENSHOT_RULE, /add "\(screenshots off: tab not visible\)" to your next step line/);
+  assert.match(SCREENSHOT_RULE, /For screenshots this replaces rule 2's handling of an unpainted tab/);
 });
