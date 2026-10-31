@@ -1,7 +1,20 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (unreleased)
 
+- Background start: new setting **Open the agent when started** (off by default). The agent works
+  in the background and the card shows its status and an Open link.
+- **Talk to the chat** (on by default): the browser agent can ask the chat that showed the card
+  about the task by ending its turn with a `[browser-prompt question]` message. The plugin forwards
+  it, escaped and framed as untrusted text, through the report-back delivery; the chat answers with
+  the Paseo send_agent_prompt tool. Question turns are never taken as the final report.
+- **Max questions to the chat per run** (default 10, 0 to 50, 0 works like off). After the limit,
+  with talking off, or when the chat is not available, the agent is told to ask the owner, at most
+  twice per run; a later question turn is handled as the run's report, so a run cannot loop.
+- The fixed preamble now states the hard rule: secrets and confirmations of destructive, security,
+  billing, merge or publish actions are always asked of the owner and never accepted from the chat.
+  Rules renumbered: page differs is rule 4, final report rule 6, Auto mode rule 7, chat rule 8.
+- Settings schema v8 with the three new settings; a malformed stored question cap is clamped.
 - Removed the mock screenshots (`docs/screenshots/`) and their references in `paseo-plugin.json`
   (`media`), the README and the npm package files. They were not captures of the real app; real
   screenshots will be added once they can be taken from a running Paseo app.

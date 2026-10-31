@@ -327,7 +327,7 @@ test("auto sends a status-only notice to a source that acts without approval", a
     assert.equal(sent.length, 1);
     assert.doesNotMatch(sent[0].text, /allow-ci|Nothing left|browser-agent-report/);
     assert.match(sent[0].text, /not forwarded because this chat runs in a mode that acts without approval/);
-    assert.equal(calls.refetch, 0, "the report is not even read");
+    assert.ok(calls.refetch <= 1, "the final message is read once, to tell a question from a report");
   }
 });
 

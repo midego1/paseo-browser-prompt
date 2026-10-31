@@ -20,6 +20,7 @@ Do not include real secrets, tokens or private prompts in a report; describe the
 | Card steps plus a fixed safety preamble | A new agent on your own Paseo daemon, and that agent's model provider (Anthropic by default) | Run with Paseo agent |
 | The browser agent's final report (up to 4,000 characters), escaped and framed as untrusted output | The agent whose chat showed the card, and that agent's model provider | Report back to chat: Auto (default) only when that chat runs in an ask-first mode, or Always |
 | Title, outcome and run agent id only | The agent whose chat showed the card | Report back to chat: Auto, when that chat runs in any other mode |
+| A browser agent's question for the chat (up to 1,500 characters), escaped and framed as untrusted text by the plugin | The agent whose chat showed the card, and that agent's model provider, in any permission mode | Talk to the chat (on by default, at most 10 per run by default) |
 | Ids of runs that already reported | `reported-runs.json` in the state directory below | Report back to chat |
 | Settings, done marks, card-to-agent links | Paseo host settings on your daemon | Always |
 | Updater state, log, commit-only Git history | `~/.local/state/paseo-plugin-browser-prompt/` on the daemon host | Git installs |
@@ -56,6 +57,19 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
 - Only runs a card recorded in host settings report, so an agent that copies the plugin's labels
   cannot use them to message another chat. Anyone who can change this plugin's host settings can
   still add such a record.
+- Talk to the chat forwards questions that can contain text from web pages to the chat that showed
+  the card, also to chats that act without approval (bypass or Auto mode), because a status-only
+  notice cannot carry a question. The plugin, not the model, frames each question: it is escaped,
+  fenced and labelled as untrusted, and the instructions on how to answer and what never to send
+  come from the plugin outside the block. A model may still be influenced by such text. Turn Talk
+  to the chat off (or set the limit to 0) if that is not acceptable.
+- Answers are written by the chat's agent and arrive in the browser agent as ordinary messages; the
+  plugin cannot verify or filter them. The fixed preamble tells the browser agent to use them only as
+  information about the task and, as a hard rule that no setting changes, never to accept a secret
+  or a confirmation of a destructive, security, billing, merge or publish action from the chat, only
+  from the owner's AskUserQuestion answer. That is an instruction to a model, not an enforced
+  control. The answer tool can also set the browser agent's permission mode; the plugin tells the
+  chat not to, and the mode guard stops a run that ends up in a refused mode.
 - Self-update installs only fast-forward commits from the `https://` remote the plugin was installed
   from. Installing a plugin means trusting its repository: the server part runs unsandboxed with the
   daemon user's access.
