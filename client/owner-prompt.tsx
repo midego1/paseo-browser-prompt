@@ -1,6 +1,6 @@
 import type { PluginHostProps } from "@getpaseo/plugin/client";
 import { usePaseo } from "@getpaseo/plugin/client";
-import { Icon } from "@getpaseo/plugin/client/react-native";
+import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
 import {
@@ -12,6 +12,8 @@ import {
   questionResponse,
   selectOption,
   type Selections,
+  type PromptAction,
+  type SummaryLine,
   verifiedRun,
 } from "../shared/owner-prompt";
 
@@ -205,6 +207,57 @@ function QuestionPrompt({
   );
 }
 
+function MonoBlock({ text, theme, maxHeight }: { text: string; theme: Theme; maxHeight: number }) {
+  return (
+    <ScrollView
+      nestedScrollEnabled
+      style={{ maxHeight, backgroundColor: theme.colors.surface1, borderRadius: 6 }}
+      contentContainerStyle={{ padding: 8 }}
+    >
+      <Text selectable style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 17, fontFamily: MONO }}>
+        {text}
+      </Text>
+    </ScrollView>
+  );
+}
+
+function DetailLine({ line, theme }: { line: SummaryLine; theme: Theme }) {
+  const [revealed, setRevealed] = useState(false);
+  if (line.block) {
+    return (
+      <View style={{ gap: 2 }}>
+        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{line.label}</Text>
+        <MonoBlock text={line.value} theme={theme} maxHeight={240} />
+      </View>
+    );
+  }
+  if (line.masked && !revealed) {
+    const length = [...line.value].length;
+    return (
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <Text style={{ color: theme.colors.foreground, fontSize: 13 }}>
+          <Text style={{ color: theme.colors.foregroundMuted }}>{line.label}: </Text>
+          {`•••• (${length} char${length === 1 ? "" : "s"})`}
+        </Text>
+        <Pressable accessibilityRole="button" accessibilityLabel={`Show ${line.label.toLowerCase()}`} onPress={() => setRevealed(true)}>
+          <Text style={{ color: theme.colors.accent, fontSize: 13 }}>Show</Text>
+        </Pressable>
+      </View>
+    );
+  }
+  return (
+    <Text selectable style={{ color: theme.colors.foreground, fontSize: 13, lineHeight: 18 }}>
+      <Text style={{ color: theme.colors.foregroundMuted }}>{line.label}: </Text>
+      {line.value}
+      {line.masked ? (
+        <Text accessibilityRole="button" onPress={() => setRevealed(false)} style={{ color: theme.colors.accent }}>
+          {"  Hide"}
+        </Text>
+      ) : null}
+    </Text>
+  );
+}
+
 function PermissionPrompt({
   prompt,
   theme,
@@ -218,6 +271,8 @@ function PermissionPrompt({
   onAnswer: (response: PermissionResponse) => void;
   onOpen: () => void;
 }) {
+  // Allowing takes a second, explicit tap; denying does not.
+  const [confirming, setConfirming] = useState<PromptAction | null>(null);
   return (
     <View style={{ gap: 8 }}>
       <Text style={{ color: theme.colors.foreground, fontSize: 14, fontWeight: "600" }}>{prompt.title}</Text>
@@ -226,53 +281,43 @@ function PermissionPrompt({
           {prompt.description}
         </Text>
       ) : null}
-      {prompt.summary.map((line) =>
-        line.block ? (
-          <View key={`${line.label}:${line.value}`} style={{ gap: 2 }}>
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{line.label}</Text>
-            <Text
-              selectable
-              style={{
-                color: theme.colors.foreground,
-                fontSize: 12,
-                lineHeight: 17,
-                fontFamily: MONO,
-                backgroundColor: theme.colors.surface1,
-                borderRadius: 6,
-                padding: 8,
-              }}
-            >
-              {line.value}
-            </Text>
-          </View>
-        ) : (
-          <Text key={`${line.label}:${line.value}`} selectable style={{ color: theme.colors.foreground, fontSize: 13, lineHeight: 18 }}>
-            <Text style={{ color: theme.colors.foregroundMuted }}>{line.label}: </Text>
-            {line.value}
-          </Text>
-        ),
-      )}
-      {prompt.plan ? (
-        <Text selectable style={{ color: theme.colors.foreground, fontSize: 13, lineHeight: 19 }}>
-          {prompt.plan}
-        </Text>
-      ) : null}
+      {prompt.summary.map((line) => (
+        <DetailLine key={`${line.label}:${line.value}`} line={line} theme={theme} />
+      ))}
+      {prompt.plan ? <MonoBlock text={prompt.plan} theme={theme} maxHeight={320} /> : null}
       {!prompt.canAllow ? (
         <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
-          The card cannot show what this would allow, so only Deny is offered here. Open the run to see it.
+          The card cannot show everything this would allow, so only Deny is offered here. Open the run to see it.
         </Text>
       ) : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-        {prompt.actions.map((action) => (
-          <Button
-            key={`${action.id ?? action.behavior}:${action.label}`}
-            label={action.label}
-            primary={action.behavior === "allow"}
-            disabled={busy}
-            theme={theme}
-            onPress={() => onAnswer(permissionResponse(action))}
-          />
-        ))}
+        {confirming ? (
+          <>
+            <Button
+              label={`Confirm allow: ${confirming.label}`}
+              primary
+              disabled={busy}
+              theme={theme}
+              onPress={() => {
+                const action = confirming;
+                setConfirming(null);
+                onAnswer(permissionResponse(action));
+              }}
+            />
+            <Button label="Cancel" disabled={busy} theme={theme} onPress={() => setConfirming(null)} />
+          </>
+        ) : (
+          prompt.actions.map((action) => (
+            <Button
+              key={`${action.id ?? action.behavior}:${action.label}`}
+              label={action.label}
+              primary={action.behavior === "allow"}
+              disabled={busy}
+              theme={theme}
+              onPress={() => (action.behavior === "allow" ? setConfirming(action) : onAnswer(permissionResponse(action)))}
+            />
+          ))
+        )}
         <Button label="Open run" theme={theme} onPress={onOpen} />
       </View>
     </View>

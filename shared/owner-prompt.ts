@@ -10,9 +10,11 @@ export const MAX_OPTION_DESCRIPTION = 160;
 export const MAX_QUESTIONS = 4;
 export const MAX_OPTIONS = 8;
 export const MAX_ACTIONS = 4;
-export const MAX_SUMMARY_VALUE = 200;
-export const MAX_SUMMARY_BLOCK = 400;
-export const MAX_PLAN_TEXT = 1500;
+export const MAX_SUMMARY_VALUE = 1000;
+export const MAX_SUMMARY_BLOCK = 2000;
+export const MAX_SUMMARY_BLOCK_LINES = 30;
+export const MAX_SUMMARY_LINES = 12;
+export const MAX_PLAN_TEXT = 6000;
 /** Plan actions ("Implement with Auto mode") are shown in full, up to this length. */
 export const MAX_PLAN_ACTION_LABEL = 200;
 
@@ -23,13 +25,56 @@ const INVISIBLE = /[­؜ᅟᅠ឴឵᠋-᠏​-‏‪-‮⁠-⁯ㅤ︀-️﻿ﾠ
  * when `multiline`), trimmed and capped. It is shown as plain React Native text.
  */
 export function cleanPromptText(value: unknown, max: number, multiline = false): string {
-  if (typeof value !== "string") return "";
-  let text = value.normalize("NFKC").replace(INVISIBLE, "");
-  text = multiline
-    ? text.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]+/g, " ").replace(/\n{3,}/g, "\n\n")
-    : text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").replace(/\s+/g, " ");
+  return cleanPromptTextInfo(value, max, { multiline }).text;
+}
+
+export interface CleanedText {
+  text: string;
+  /** Cut at the character or line limit. */
+  truncated: boolean;
+  /**
+   * Shown differently from what the agent sent: NFKC changed it, invisible, bidi or control
+   * characters were removed, or (single line) line breaks, tabs or runs of spaces were collapsed.
+   * Leading and trailing whitespace does not count.
+   */
+  altered: boolean;
+}
+
+export function cleanPromptTextInfo(
+  value: unknown,
+  max: number,
+  { multiline = false, maxLines = Number.POSITIVE_INFINITY }: { multiline?: boolean; maxLines?: number } = {},
+): CleanedText {
+  if (typeof value !== "string") return { text: "", truncated: false, altered: false };
+  let altered = false;
+  const step = (before: string, after: string) => {
+    if (after !== before) altered = true;
+    return after;
+  };
+  let text = value.trim().replace(/\r\n/g, "\n");
+  text = step(text, text.normalize("NFKC"));
+  text = step(text, text.replace(INVISIBLE, ""));
+  if (multiline) {
+    text = step(text, text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]+/g, " "));
+    text = step(text, text.replace(/\n{3,}/g, "\n\n"));
+  } else {
+    text = step(text, text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " "));
+    text = step(text, text.replace(/\s{2,}/g, " "));
+  }
   text = text.trim();
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+  let truncated = false;
+  if (multiline) {
+    const lines = text.split("\n");
+    if (lines.length > maxLines) {
+      text = `${lines.slice(0, maxLines).join("\n")}\n…`;
+      truncated = true;
+    }
+  }
+  if (text.length > max) {
+    text = `${text.slice(0, max - 1)}…`;
+    truncated = true;
+  }
+  return { text, truncated, altered };
 }
 
 export interface PromptOption {
@@ -57,8 +102,10 @@ export interface PromptAction {
 export interface SummaryLine {
   label: string;
   value: string;
-  /** Shown as a block (commands, scripts) rather than on one line. */
+  /** Shown as a scrollable monospace block (commands, scripts) rather than on one line. */
   block: boolean;
+  /** Typed text: shown as "•••• (N chars)" until the owner reveals it. */
+  masked?: boolean;
 }
 
 export type OwnerPrompt =
@@ -130,59 +177,117 @@ export function humanizeToolName(name: unknown): string {
   return cleanPromptText(words.charAt(0).toUpperCase() + words.slice(1), MAX_OPTION_LABEL);
 }
 
-/** Known request fields, in display order: [field, label, shown as a block]. */
-const SUMMARY_FIELDS: [string, string, boolean][] = [
-  ["command", "Command", true],
-  ["url", "URL", false],
-  ["ref", "Element", false],
-  ["sourceRef", "From element", false],
-  ["targetRef", "To element", false],
-  ["selector", "Element", false],
-  ["value", "Value", false],
-  ["text", "Text", false],
-  ["key", "Key", false],
-  ["filePaths", "Files", false],
-  ["file_path", "File", false],
-  ["filePath", "File", false],
-  ["path", "Path", false],
-  ["function", "Script", true],
-  ["pattern", "Search", false],
-  ["query", "Search", false],
-  ["description", "Purpose", false],
-];
+interface FieldSpec {
+  field: string;
+  label: string;
+  block?: boolean;
+  max?: number;
+  /** Masked when the tool types it into a page. */
+  maskFor?: RegExp;
+}
 
-function fieldText(value: unknown): string {
+const TYPED_TEXT_TOOL = /(^|__)browser_(fill|type)$/;
+
+/** Every input field the card can show, in display order. */
+const SUMMARY_FIELDS: FieldSpec[] = [
+  { field: "command", label: "Command", block: true },
+  { field: "url", label: "URL" },
+  { field: "ref", label: "Element", max: 200 },
+  { field: "sourceRef", label: "From element", max: 200 },
+  { field: "targetRef", label: "To element", max: 200 },
+  { field: "selector", label: "Element", max: 200 },
+  { field: "value", label: "Value", maskFor: TYPED_TEXT_TOOL },
+  { field: "text", label: "Text", maskFor: TYPED_TEXT_TOOL },
+  { field: "key", label: "Key", max: 100 },
+  { field: "button", label: "Button", max: 50 },
+  { field: "doubleClick", label: "Double click", max: 10 },
+  { field: "modifiers", label: "Modifiers", max: 100 },
+  { field: "filePaths", label: "Files" },
+  { field: "file_path", label: "File" },
+  { field: "filePath", label: "File" },
+  { field: "path", label: "Path" },
+  { field: "function", label: "Script", block: true },
+  { field: "pattern", label: "Search", max: 500 },
+  { field: "query", label: "Search", max: 500 },
+  { field: "description", label: "Purpose", max: 500 },
+  { field: "timeout", label: "Timeout", max: 50 },
+  { field: "timeoutMs", label: "Timeout (ms)", max: 50 },
+  { field: "fullPage", label: "Full page", max: 10 },
+];
+const RENDERED_FIELDS = new Set([...SUMMARY_FIELDS.map((spec) => spec.field), "deltaX", "deltaY"]);
+/** Input fields hidden on purpose because they do not change what is allowed. */
+const HIDDEN_FIELDS = new Set(["browserId"]);
+
+/** A field's text, "" when empty, or null when it cannot be shown as text (objects, mixed arrays). */
+function fieldText(value: unknown): string | null {
+  if (value === undefined || value === null || value === false) return "";
+  if (value === true) return "yes";
   if (typeof value === "string") return value;
-  if (typeof value === "number" && Number.isFinite(value)) return String(value);
-  if (Array.isArray(value)) return value.filter((item) => typeof item === "string").join(", ");
-  return "";
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : null;
+  if (Array.isArray(value)) {
+    if (!value.every((item) => typeof item === "string" || (typeof item === "number" && Number.isFinite(item)))) return null;
+    return value.join(", ");
+  }
+  return null;
+}
+
+export interface PermissionDetails {
+  lines: SummaryLine[];
+  /**
+   * Every non-empty input field is shown, nothing was cut or altered: only then does the card
+   * offer Allow.
+   */
+  complete: boolean;
 }
 
 /**
- * A bounded plain-text summary of what a permission request would do, from the request's input
- * and the tool-call detail Paseo attaches (for example a shell command). Only known fields, each
- * cleaned and capped; the tool name is always first.
+ * What a permission request would do, as plain text, from the request's input and the tool-call
+ * detail Paseo attaches (for example a shell command). The tool name comes first. A field that is
+ * cut, altered for display, or cannot be shown at all makes the details incomplete.
  */
-export function permissionSummary(request: RequestLike): SummaryLine[] {
+export function permissionDetails(request: RequestLike): PermissionDetails {
   const lines: SummaryLine[] = [];
+  let complete = true;
   const tool = humanizeToolName(request.name);
   if (tool) lines.push({ label: "Tool", value: tool, block: false });
+  const name = typeof request.name === "string" ? request.name : "";
   const input = record(request.input) ?? {};
   const detail = record(request.detail) ?? {};
-  const seen = new Set<string>();
-  for (const [field, label, block] of SUMMARY_FIELDS) {
-    const raw = fieldText(input[field]) || fieldText(detail[field]);
-    const value = cleanPromptText(raw, block ? MAX_SUMMARY_BLOCK : MAX_SUMMARY_VALUE, block);
-    if (!value || seen.has(`${label}:${value}`)) continue;
-    seen.add(`${label}:${value}`);
-    lines.push({ label, value, block });
+  for (const key of Object.keys(input)) {
+    if (RENDERED_FIELDS.has(key) || HIDDEN_FIELDS.has(key)) continue;
+    const text = fieldText(input[key]);
+    if (text === null || text !== "" || (Array.isArray(input[key]) && (input[key] as unknown[]).length > 0)) complete = false;
+  }
+  for (const spec of SUMMARY_FIELDS) {
+    let raw = fieldText(input[spec.field]);
+    if (raw === "") raw = fieldText(detail[spec.field]);
+    if (raw === null) {
+      complete = false;
+      continue;
+    }
+    if (!raw.trim()) continue;
+    const cleaned = cleanPromptTextInfo(raw, spec.max ?? (spec.block ? MAX_SUMMARY_BLOCK : MAX_SUMMARY_VALUE), {
+      multiline: !!spec.block,
+      maxLines: MAX_SUMMARY_BLOCK_LINES,
+    });
+    if (cleaned.truncated || cleaned.altered) complete = false;
+    if (lines.some((line) => line.label === spec.label && line.value === cleaned.text)) continue;
+    const masked = !!spec.maskFor && spec.maskFor.test(name);
+    lines.push({ label: spec.label, value: cleaned.text, block: !!spec.block, ...(masked ? { masked: true } : {}) });
   }
   const dx = input.deltaX;
   const dy = input.deltaY;
-  if ((typeof dx === "number" && Number.isFinite(dx)) || (typeof dy === "number" && Number.isFinite(dy))) {
+  for (const delta of [dx, dy]) if (delta !== undefined && !(typeof delta === "number" && Number.isFinite(delta))) complete = false;
+  if (typeof dx === "number" || typeof dy === "number") {
     lines.push({ label: "Scroll", value: `${typeof dx === "number" ? dx : 0}, ${typeof dy === "number" ? dy : 0}`, block: false });
   }
-  return lines.slice(0, 8);
+  if (lines.length > MAX_SUMMARY_LINES) complete = false;
+  return { lines: lines.slice(0, MAX_SUMMARY_LINES), complete };
+}
+
+/** The lines of `permissionDetails`. */
+export function permissionSummary(request: RequestLike): SummaryLine[] {
+  return permissionDetails(request).lines;
 }
 
 function toActions(actions: unknown, labelMax = MAX_OPTION_LABEL): PromptAction[] {
@@ -222,15 +327,27 @@ export function ownerPrompts(requests: readonly RequestLike[] | null | undefined
     }
     const isPlan = request.kind === "plan";
     const metadata = record(request.metadata) ?? {};
-    const plan = isPlan
-      ? cleanPromptText(fieldText(metadata.planText) || fieldText(record(request.input)?.plan), MAX_PLAN_TEXT, true)
-      : "";
-    const title = cleanPromptText(request.title, MAX_OPTION_LABEL);
-    const description = cleanPromptText(request.description, MAX_QUESTION_TEXT, true);
-    const summary = isPlan ? [] : permissionSummary(request);
-    // Something the owner can judge: plan text, the provider's own title or description, or at least
-    // one known field beyond the tool name. Without it the card offers only Deny and Open run.
-    const canAllow = isPlan ? !!plan : !!title || !!description || summary.some((line) => line.label !== "Tool");
+    const planInfo = isPlan
+      ? cleanPromptTextInfo(
+          (typeof metadata.planText === "string" && metadata.planText) || (fieldText(record(request.input)?.plan) ?? ""),
+          MAX_PLAN_TEXT,
+          { multiline: true },
+        )
+      : { text: "", truncated: false, altered: false };
+    const plan = planInfo.text;
+    const titleInfo = cleanPromptTextInfo(request.title, MAX_OPTION_LABEL);
+    const descriptionInfo = cleanPromptTextInfo(request.description, MAX_QUESTION_TEXT, { multiline: true });
+    const title = titleInfo.text;
+    const description = descriptionInfo.text;
+    const details = isPlan ? { lines: [], complete: true } : permissionDetails(request);
+    const summary = details.lines;
+    const providerTextIntact = !titleInfo.truncated && !titleInfo.altered && !descriptionInfo.truncated && !descriptionInfo.altered;
+    // Allow only when the card shows everything it would allow: the whole, unaltered plan, or every
+    // input field in full and unaltered plus something to judge (a title, a description or at least
+    // one field beyond the tool name). Otherwise only Deny and Open run.
+    const canAllow = isPlan
+      ? !!plan && !planInfo.truncated && !planInfo.altered
+      : details.complete && providerTextIntact && (!!title || !!description || summary.some((line) => line.label !== "Tool"));
     const actions = toActions(request.actions, isPlan ? MAX_PLAN_ACTION_LABEL : MAX_OPTION_LABEL);
     const shown = canAllow ? actions : actions.filter((action) => action.behavior === "deny");
     prompts.push({

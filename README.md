@@ -338,15 +338,21 @@ warning-bordered box:
   otherwise the box offers **Answer in run** only. `ownerPrompts` (`shared/owner-prompt.ts`) turns
   the requests into prompts: questions with their header, text and options (at most 4 questions
   and 8 options; text NFKC-normalized, invisible and control characters removed, capped), or
-  permissions. Claude permission requests have no title or description, so the card shows a
-  bounded plain-text summary of the known fields in the request's input and Paseo's tool-call
-  detail (`permissionSummary`: the tool name humanized, command and script as blocks, URL, element,
-  value or typed text, key, files, search, purpose; at most 8 lines, values capped at 200 or 400
-  characters) and, for ExitPlanMode, the plan text with the plan's actions in full. When the card
-  cannot show what would be allowed (no plan text, no title, description or known field), it
-  offers only Deny and **Open run**.
-- The owner answers with clicks: a tap on an option only selects it, and **Send answer** sends it,
-  so a mis-tap never answers. The answer goes to the run with the SDK's
+  permissions. Claude permission requests have no title or description, so the card shows the
+  request's input and Paseo's tool-call detail as plain text (`permissionDetails`): the tool name
+  humanized, command and script as scrollable monospace blocks (up to 2,000 characters and 30
+  lines), URL, files and values (up to 1,000), element, key, click options, search, purpose,
+  timeout and scroll; for ExitPlanMode the plan text (up to 6,000, scrollable) and the plan's
+  actions in full. Values typed into a page (browser_fill, browser_type) are masked as
+  "•••• (N chars)" until the owner taps Show.
+- Allow is offered only when the card shows everything it would allow: every non-empty input field
+  is rendered (only `browserId`, the tab id, is hidden on purpose; any other key, for example
+  `dangerouslyDisableSandbox` or `run_in_background`, withholds Allow), nothing was cut, and
+  nothing was altered for display (`cleanPromptTextInfo` reports NFKC changes, removed invisible,
+  bidi or control characters, and collapsed whitespace). Otherwise the card offers only Deny and
+  **Open run**, and says so.
+- The owner answers with clicks: a tap on an option only selects it and **Send answer** sends it;
+  Allow on a permission asks for **Confirm allow** first; Deny is immediate. The answer goes to the run with the SDK's
   `respondToPermission`: questions as `{ behavior: "allow", updatedInput: { answers } }` keyed by
   each question's full text (several choices joined with ", "), permissions with the pressed
   action's behavior and `selectedActionId`. **Other answer: open run** / **Open run** opens the run
