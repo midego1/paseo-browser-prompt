@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0 (unreleased)
+
+- Live screenshot on the card (setting **Show live screenshot**, on by default): the agent takes a
+  viewport screenshot after each numbered step (never of pages showing secrets), and the card shows
+  the latest one as a thumbnail under the progress bar that opens the run when pressed. Uses the
+  host Markdown component, so it needs a Paseo 0.13+ app; older apps show no thumbnail.
+- Reports and questions to the chat are text only: image messages and Markdown images are removed
+  from the run's final message, so no screenshot or file path reaches a chat.
+- Settings schema v10.
+
 ## 0.5.1 (unreleased)
 
 - The card's done button reads **Mark done** instead of "Done ✓", so it no longer shows two

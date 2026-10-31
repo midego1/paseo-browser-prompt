@@ -30,6 +30,6 @@ export function migratePreferences(values: unknown, fromVersion: number): unknow
       else next.maxChatQuestions = value;
     }
   }
-  // v9 adds showStepProgress with its default; nothing stored changes.
+  // v9 adds showStepProgress and v10 showLiveScreenshot, both with defaults; nothing stored changes.
   return next;
 }

@@ -7,11 +7,12 @@ import { createRunTracker, type RunTracker, type RunView } from "../shared/run-t
 import { stepProgressView } from "../shared/step-view";
 import type { StepProgress } from "../shared/steps";
 
-const EMPTY: RunView = { progress: null, asking: false };
+const EMPTY: RunView = { progress: null, asking: false, screenshot: null };
 
 function sameView(a: RunView, b: RunView): boolean {
   return (
     a.asking === b.asking &&
+    a.screenshot === b.screenshot &&
     a.progress?.step === b.progress?.step &&
     a.progress?.text === b.progress?.text &&
     (a.progress === null) === (b.progress === null)
@@ -34,6 +35,7 @@ export function useStepProgress(
   state: RunState,
   status: string | null,
   showSteps: boolean,
+  showScreenshots = false,
 ): RunView {
   const paseo = usePaseo();
   const tracker = useRef<RunTracker | null>(null);
@@ -76,11 +78,11 @@ export function useStepProgress(
   };
 
   useEffect(() => {
-    tracker.current = agentId ? createRunTracker(total, showSteps) : null;
+    tracker.current = agentId ? createRunTracker(total, showSteps, showScreenshots) : null;
     fetchedFor.current = null;
     wasLive.current = false;
     setView(EMPTY);
-  }, [agentId, total, showSteps]);
+  }, [agentId, total, showSteps, showScreenshots]);
 
   // One read when the card shows the run. A read cancelled by a dependency change is redone.
   useEffect(() => {
@@ -91,7 +93,7 @@ export function useStepProgress(
       read.cancel();
       if (!read.settled) fetchedFor.current = null;
     };
-  }, [agentId, stopped, total, showSteps, paseo]);
+  }, [agentId, stopped, total, showSteps, showScreenshots, paseo]);
 
   // Live -> settled: one final read decides between waiting for the chat and done.
   useEffect(() => {
@@ -121,7 +123,7 @@ export function useStepProgress(
     });
     void subscription.ready?.catch(() => undefined);
     return () => subscription();
-  }, [agentId, live, total, showSteps, paseo]);
+  }, [agentId, live, total, showSteps, showScreenshots, paseo]);
 
   return agentId ? view : EMPTY;
 }

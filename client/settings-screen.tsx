@@ -171,6 +171,12 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
             onValueChange={(showStepProgress) => void settings.save({ ...values, showStepProgress }, revision)}
           />
           <SettingsSwitch
+            label="Show live screenshot"
+            hint="The agent takes a screenshot of the visible page after each step (never of pages showing secrets), and the card shows the latest one. Screenshots stay in your Paseo app and are never sent to a chat. Each one adds to the agent's token use. Needs Paseo 0.13 or later to show."
+            value={values.showLiveScreenshot}
+            onValueChange={(showLiveScreenshot) => void settings.save({ ...values, showLiveScreenshot }, revision)}
+          />
+          <SettingsSwitch
             label="Talk to the chat"
             hint="The agent may ask the chat that showed the card about the task (which button, which value, how to go on when the page differs). The plugin forwards each question marked as untrusted text. Not configurable: passwords, tokens, 2FA codes and approvals of destructive, security, billing, merge or publish actions are always asked of you, never of the chat."
             value={values.talkToChat}

@@ -100,7 +100,10 @@ export async function startBrowserAgent(
     prompt: buildAgentPrompt(input.cardTitle, input.steps, config, {
       sourceAgentId: input.sourceAgentId,
       maxQuestions: chatQuestionBudget(input.settings),
-    }, input.settings.showStepProgress === false ? undefined : { totalSteps: countSteps(input.steps) }),
+    },
+    input.settings.showStepProgress === false ? undefined : { totalSteps: countSteps(input.steps) },
+    input.settings.showLiveScreenshot !== false,
+    ),
     labels: runLabels(input.sourceAgentId, input.cardId),
   });
   // Paseo or the provider can end up in another mode than requested; never leave a run going in a
