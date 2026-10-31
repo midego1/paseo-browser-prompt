@@ -7,6 +7,7 @@ import {
   screenshotMarkdown,
   type StepScreenshot,
   THUMB_GAP,
+  thumbnailFrame,
   thumbnailLayout,
   type ThumbnailMode,
 } from "../shared/screenshot";
@@ -31,8 +32,12 @@ function Thumbnail({
   theme: Theme;
   onOpen: () => void;
 }) {
+  const [measured, setMeasured] = useState<number | null>(null);
   if (!HostMarkdown) return null;
   const label = shot.step ? `Step ${shot.step}` : "Screenshot";
+  const border = latest ? 2 : 1;
+  // A window onto the host's tall image box, so the screenshot fills the tile (see thumbnailFrame).
+  const frame = thumbnailFrame(size - 2 * border, measured);
   return (
     <Pressable
       accessibilityRole="button"
@@ -55,13 +60,19 @@ function Thumbnail({
         pointerEvents="none"
         style={{
           width: size,
+          ...(frame ? { height: frame.height + 2 * border } : {}),
           borderRadius: 8,
-          borderWidth: latest ? 2 : 1,
+          borderWidth: border,
           borderColor: latest ? theme.colors.accent : theme.colors.border,
           overflow: "hidden",
         }}
       >
-        <HostMarkdown>{screenshotMarkdown(shot.source, shot.step || undefined)}</HostMarkdown>
+        <View
+          onLayout={(event: LayoutChangeEvent) => setMeasured(Math.round(event.nativeEvent.layout.height))}
+          style={frame ? { marginTop: -frame.offset } : undefined}
+        >
+          <HostMarkdown>{screenshotMarkdown(shot.source, shot.step || undefined)}</HostMarkdown>
+        </View>
       </View>
     </Pressable>
   );

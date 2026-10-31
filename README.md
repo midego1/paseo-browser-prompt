@@ -354,11 +354,17 @@ token, API key, 2FA or recovery code or other secret (skip it and say "screensho
   the renderer Paseo uses for these image messages in an agent's own chat, each in a pressable frame
   with "Step N" above it that opens the run (accessibility label "Screenshot after step N"); the
   latest has an accent border. `thumbnailLayout` picks the layout from the card's measured width
-  (`onLayout`): a row when every step fits at 140 to 180 px, a horizontal scroll strip of 160 px
+  (`onLayout`): a row when every step fits at 140 to 260 px, a horizontal scroll strip of 180 px
   thumbnails when at least two fit but not all (readable step order, swipeable on phones), and the
-  latest alone (up to 240 px) when the card is narrower than two thumbnails, when there is one
+  latest alone (up to 320 px) when the card is narrower than two thumbnails, when there is one
   screenshot, or with Thumbnails set to Latest only. The plugin API has no other way to show a
   daemon-side image, so on older apps no thumbnail is shown.
+- The host's Markdown shows an image in a 320 px tall box with `contain`, which leaves a narrow
+  screenshot small in a tall empty tile. Each thumbnail is therefore a 16:10 window onto that box
+  (`thumbnailFrame`): the frame is the screenshot's height at the tile's width and the box is moved
+  up by half the difference, so the picture fills the tile (another window shape loses or gains a
+  thin strip). When the host content measures differently (another Paseo version), the thumbnail
+  shows the host's rendering unclipped.
 - Paseo's browser only captures a tab the desktop app is showing: a screenshot of a hidden tab
   fails with "The tab has not painted yet". No browser tool or plugin API can make a hidden tab
   paint or show the run's own tab (`browser_new_tab` always opens in the background;

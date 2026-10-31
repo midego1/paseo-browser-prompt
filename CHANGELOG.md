@@ -6,6 +6,10 @@
   live agent's `attentionReason` for a pending permission, so the card watches the run's stream for
   `permission_requested` / `permission_resolved` and reads `pendingPermissions` from the run's
   snapshot when it opens a running run, on those events and after an answer.
+- Thumbnails fill their tiles: each is a 16:10 window onto the host's fixed 320 px image box
+  (`thumbnailFrame`), instead of a small picture centered in a tall empty tile; unclipped when the
+  host's box measures differently. Larger tiles: up to 260 px in a row, 180 px in the scroll strip,
+  320 px alone.
 - browser_keypress text that is more than one key name (typed characters, not Enter or Control+A)
   is masked like typed values.
 - README: "How it works" with screenshots of each stage (`docs/screenshots/`); the listing's
@@ -16,7 +20,8 @@
 - `scripts/demo`: `record.sh --stills` captures the README screenshots; the stand-in run shows
   stand-in page screenshots (example.com and iana.org rendered by the recorder's own Chromium,
   stored as demo-daemon attachments) and asks the owner a question and a permission. The scenario
-  follows example.com as it is today.
+  follows example.com as it is today (step 3 opens its "Learn more" link; the agent asks the chat
+  before following it to iana.org).
 
 ## 0.8.0 (unreleased)
 

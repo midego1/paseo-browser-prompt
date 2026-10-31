@@ -60,17 +60,17 @@ const CARD_REPLY = [
   "```browser-prompt Check what example.com says",
   "1. Open https://example.com",
   "2. Read the first paragraph.",
-  '3. Open the "Docs" link.',
+  '3. Open the "Learn more" link.',
   "4. Report the first line and the title of the page it opens.",
   "```",
 ].join("\n");
-const QUESTION = "[browser-prompt question] The page has no “Docs” link, only “Learn more”. Should I open that one instead?";
-const ANSWER = "[browser-prompt answer] Yes, open “Learn more” instead.";
+const QUESTION = "[browser-prompt question] “Learn more” leads to another site, iana.org. Should I follow it there?";
+const ANSWER = "[browser-prompt answer] Yes, follow it to iana.org.";
 const REPORT = [
   "Done:",
   "1. Opened https://example.com",
   "2. Its first line: “This domain is for use in documentation examples without needing permission.”",
-  "3. There was no “Docs” link, so I opened “Learn more”, as the chat confirmed. Its title is “Example Domains”.",
+  "3. “Learn more” leads to iana.org; the chat confirmed, so I opened it. Its title is “Example Domains”.",
   "4. As you asked, I also opened IANA's list of reserved domains.",
   "",
   "Nothing is left for you.",
@@ -85,8 +85,8 @@ const RUN_UNTIL_QUESTION: Beat[] = [
   { wait: 1600, say: "[browser-prompt step 2/4] Reading the first paragraph" },
   { wait: 900, tool: "browser_snapshot", text: "paragraph “This domain is for use in documentation examples…”" },
   { wait: 700, screenshot: 1 },
-  { wait: 1500, say: "[browser-prompt step 3/4] Looking for the Docs link" },
-  { wait: 900, tool: "browser_snapshot", text: "links: “Learn more”" },
+  { wait: 1500, say: "[browser-prompt step 3/4] Checking where “Learn more” leads" },
+  { wait: 900, tool: "browser_snapshot", text: "link “Learn more” → www.iana.org" },
   { wait: 1400, say: QUESTION },
 ];
 
@@ -120,9 +120,9 @@ function runAfterAnswer(hold: number): Beat[] {
           },
         },
         allowed: [
-          { wait: 1000, say: "Okay, I'll open the reserved domains list too." },
+          { wait: 500, say: "Okay, I'll open the reserved domains list too." },
           {
-            wait: 1200,
+            wait: 600,
             ask: {
               request: {
                 name: "mcp__paseo__browser_navigate",

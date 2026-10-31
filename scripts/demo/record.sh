@@ -87,7 +87,7 @@ docker exec "$DAEMON" sh -c 'cd /tmp/paseo-attachments-demo && mv stand-ins.json
 echo "Creating the demo workspace and chat"
 as_paseo sh -c 'mkdir -p /tmp/demo-project && cd /tmp/demo-project && git init -q'
 WORKSPACE_ID="$(as_paseo paseo agent run --provider claude-demo/stand-in --mode default --title "Website check" \
-  --cwd /tmp/demo-project "Can you check what example.com says and the page its Docs link opens?" 2>&1 |
+  --cwd /tmp/demo-project "Can you check what example.com says and the page its Learn more link opens?" 2>&1 |
   grep -oE 'wks_[A-Za-z0-9]+' | head -1)"
 test -n "$WORKSPACE_ID"
 

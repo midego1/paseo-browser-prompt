@@ -43,6 +43,31 @@ async function smoothScroll(locator, block = "center") {
   await locator.evaluate((element, where) => element.scrollIntoView({ behavior: "smooth", block: where }), block);
 }
 const statusLine = () => page.getByText(/^Step \d of 4/).first();
+/**
+ * Camera work, not app behavior: while on, keeps the card's "Step N of 4" line at the top of the
+ * chat. The chat follows its bottom whenever the card changes height (a box appears or goes), which
+ * would otherwise jump away from the card mid-scene.
+ */
+async function pinCard(on) {
+  await page.evaluate((enable) => {
+    clearInterval(window.__demoPin);
+    if (!enable) return;
+    const find = () =>
+      document.evaluate(
+        "(//*[starts-with(normalize-space(text()), 'Step ') and contains(text(), ' of 4')])[1]",
+        document,
+        null,
+        XPathResult.FIRST_ORDERED_NODE_TYPE,
+        null,
+      ).singleNodeValue;
+    window.__demoPin = setInterval(() => {
+      const line = find();
+      if (!line) return;
+      const top = line.getBoundingClientRect().top;
+      if (top < 50 || top > 140) line.scrollIntoView({ block: "start" });
+    }, 80);
+  }, on);
+}
 
 // ---- film ----
 const film = new Screencast(page, OUT);
@@ -85,6 +110,7 @@ try {
   await caption("A screenshot for every step");
   await page.getByText("Step 3", { exact: true }).first().waitFor();
   await smoothScroll(statusLine(), "start");
+  await pinCard(true);
   await pause(1700);
 
   film.mark("owner-question");
@@ -106,8 +132,13 @@ try {
   await pointTo(url, { steps: 30 });
   await pause(1200);
   await pointTo(page.getByText("Allow", { exact: true }).first(), { click: true });
-  await pause(1100);
-  await pointTo(page.getByText(/^Confirm allow/).first(), { click: true });
+  const confirm = page.getByText(/^Confirm allow/).first();
+  await confirm.waitFor();
+  // The box changed height, and the chat may have followed its bottom: back to the card.
+  await smoothScroll(statusLine(), "start");
+  await pause(900);
+  await pointTo(confirm, { click: true });
+  await pinCard(false);
 
   film.mark("report");
   const report = page.getByText(/finished\. Run agent id/).first();
@@ -116,7 +147,7 @@ try {
   await page.mouse.move(1150, 600, { steps: 20 });
   await smoothScroll(report, "start");
   await page.getByText(/^Thanks!/).first().waitFor();
-  await pause(1400);
+  await pause(1100);
   await smoothScroll(statusLine(), "start");
   await page.getByText(/done ✓/).first().waitFor();
   await pause(1600);
@@ -137,7 +168,7 @@ try {
     await smoothScroll(page.getByText(name, { exact: true }).first(), "center");
     await pause(900);
   }
-  await pause(800);
+  await pause(300);
 } finally {
   await film.stop();
   await browser.close();
