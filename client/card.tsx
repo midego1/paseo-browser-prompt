@@ -82,13 +82,10 @@ export function BrowserPromptCard({
   const runAgentId = localRun ?? storedRun;
   // Started in this card session: an idle snapshot before its first turn means "starting".
   const {
-    state: runState,
+    state: observedState,
     status: runStatus,
     updatedAt: runUpdatedAt,
   } = useRunState(runAgentId, localRun !== null && localRun === runAgentId);
-  // The run's pending question or permission, answered here only by the owner's click.
-  const ownerCard = useMemo(() => ({ sourceAgentId: agentId, cardId }), [agentId, cardId]);
-  const owner = useOwnerPrompts(runAgentId, runState === "needs-input", runUpdatedAt, ownerCard);
   const totalSteps = useMemo(() => countSteps(text), [text]);
   const showSteps =
     settings.status === "ready" ? settings.values.showStepProgress : DEFAULT_AGENT_SETTINGS.showStepProgress;
@@ -96,14 +93,24 @@ export function BrowserPromptCard({
     settings.status === "ready" ? settings.values.showLiveScreenshot : DEFAULT_AGENT_SETTINGS.showLiveScreenshot;
   const thumbnailMode =
     settings.status === "ready" ? settings.values.thumbnailMode : DEFAULT_AGENT_SETTINGS.thumbnailMode;
-  const { progress: stepProgress, asking, screenshot, screenshots, screenshotStep, screenshotsBlocked } = useStepProgress(
-    runAgentId,
-    totalSteps,
-    runState,
-    runStatus,
-    showSteps,
-    showScreenshot,
-  );
+  const {
+    progress: stepProgress,
+    asking,
+    screenshot,
+    screenshots,
+    screenshotStep,
+    screenshotsBlocked,
+    permissionPending,
+    permissionEvents,
+  } = useStepProgress(runAgentId, totalSteps, observedState, runStatus, showSteps, showScreenshot);
+  // The run's pending question or permission, answered here only by the owner's click. Paseo does
+  // not mark a running agent that waits for a permission, so the card reads the run's snapshot when
+  // it opens a running run and whenever the live stream shows a request or its resolution.
+  const ownerCard = useMemo(() => ({ sourceAgentId: agentId, cardId }), [agentId, cardId]);
+  const active = observedState === "running" || observedState === "needs-input";
+  const ownerVersion = `${runStatus}:${permissionEvents}:${observedState === "needs-input" ? runUpdatedAt : ""}`;
+  const owner = useOwnerPrompts(runAgentId, active, ownerVersion, ownerCard, permissionPending);
+  const runState = active && (permissionPending || owner.pending > 0) ? "needs-input" : observedState;
   // An idle run whose latest turn is a question waits for the chat; it is not done yet.
   const shownState = asking && runState === "done" ? "asking" : runState;
   const confirmLaunch =

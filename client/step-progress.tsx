@@ -14,6 +14,8 @@ const EMPTY: RunView = {
   screenshots: [],
   screenshotStep: null,
   screenshotsBlocked: false,
+  permissionPending: false,
+  permissionEvents: 0,
 };
 
 const screenshotsKey = (view: RunView) => view.screenshots.map((shot) => `${shot.step}:${shot.source}`).join("|");
@@ -25,6 +27,8 @@ function sameView(a: RunView, b: RunView): boolean {
     a.screenshotStep === b.screenshotStep &&
     screenshotsKey(a) === screenshotsKey(b) &&
     a.screenshotsBlocked === b.screenshotsBlocked &&
+    a.permissionPending === b.permissionPending &&
+    a.permissionEvents === b.permissionEvents &&
     a.progress?.step === b.progress?.step &&
     a.progress?.text === b.progress?.text &&
     (a.progress === null) === (b.progress === null)

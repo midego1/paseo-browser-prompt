@@ -1,6 +1,7 @@
 // Run: npm test. One screenshot thumbnail per step: mapping screenshots to the step marker before
 // them, the per-run cap, live and history reads, the card's layout choice, and the setting.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { createRunTracker } from "../shared/run-tracker.ts";
 import {
@@ -8,9 +9,12 @@ import {
   MAX_STEP_SCREENSHOTS,
   screenshotMarkdown,
   stepScreenshots,
+  HOST_IMAGE_BOX,
   THUMB_GAP,
   THUMB_MAX,
   THUMB_MIN,
+  THUMB_SCROLL,
+  thumbnailFrame,
   thumbnailLayout,
 } from "../shared/screenshot.ts";
 import { migratePreferences } from "../shared/settings-migrate.ts";
@@ -114,12 +118,13 @@ test("layout: a row when all fit, a scroll strip when some do, the latest alone 
   assert.deepEqual(thumbnailLayout(900, 3, "all"), { kind: "row", size: THUMB_MAX });
   const exact = 3 * THUMB_MIN + 2 * THUMB_GAP;
   assert.deepEqual(thumbnailLayout(exact, 3, "all"), { kind: "row", size: THUMB_MIN });
-  assert.deepEqual(thumbnailLayout(exact - 1, 3, "all"), { kind: "scroll", size: 160 });
-  assert.deepEqual(thumbnailLayout(2 * THUMB_MIN + THUMB_GAP, 6, "all"), { kind: "scroll", size: 160 }, "phone width: swipe");
-  assert.deepEqual(thumbnailLayout(2 * THUMB_MIN + THUMB_GAP - 1, 6, "all"), { kind: "latest", size: 240 }, "too narrow for two");
+  assert.deepEqual(thumbnailLayout(exact - 1, 3, "all"), { kind: "scroll", size: THUMB_SCROLL });
+  assert.deepEqual(thumbnailLayout(2 * THUMB_MIN + THUMB_GAP, 6, "all"), { kind: "scroll", size: THUMB_SCROLL }, "phone width: swipe");
+  assert.deepEqual(thumbnailLayout(2 * THUMB_MIN + THUMB_GAP - 1, 6, "all"), { kind: "latest", size: 287 }, "too narrow for two");
   assert.deepEqual(thumbnailLayout(200, 6, "all"), { kind: "latest", size: 200 }, "never wider than the card");
-  assert.deepEqual(thumbnailLayout(900, 1, "all"), { kind: "latest", size: 240 }, "one screenshot");
-  assert.deepEqual(thumbnailLayout(900, 5, "latest"), { kind: "latest", size: 240 }, "setting: latest only");
+  assert.deepEqual(thumbnailLayout(900, 1, "all"), { kind: "latest", size: 320 }, "one screenshot");
+  assert.deepEqual(thumbnailLayout(900, 5, "latest"), { kind: "latest", size: 320 }, "setting: latest only");
+  assert.deepEqual(thumbnailLayout(774, 3, "all"), { kind: "row", size: 252 }, "a desktop card: three of about 250 px");
   assert.deepEqual(thumbnailLayout(0, 5, "all"), { kind: "latest", size: 0 }, "not measured yet");
   for (const [width, count] of [[Number.NaN, 3], [Number.POSITIVE_INFINITY, 3], [-5, 3], [900, Number.NaN], [900, Number.POSITIVE_INFINITY]]) {
     assert.deepEqual(thumbnailLayout(width, count, "all"), { kind: "latest", size: 0 }, `${width} x ${count}`);
@@ -136,4 +141,18 @@ test("settings migration to v11: thumbnail mode defaults to all steps; a bad sto
   assert.deepEqual(migratePreferences(v10, 10), v10);
   assert.equal("thumbnailMode" in migratePreferences({ ...v10, thumbnailMode: "grid" }, 10), false);
   assert.equal(migratePreferences({ ...v10, thumbnailMode: "latest" }, 10).thumbnailMode, "latest");
+});
+
+test("thumbnail frame: a 16:10 window onto the host's 320 px contain box, unclipped on an unknown host", () => {
+  assert.equal(HOST_IMAGE_BOX, 320);
+  assert.deepEqual(thumbnailFrame(248, null), { height: 155, offset: 83 }, "before layout: the known box");
+  assert.deepEqual(thumbnailFrame(248, 320), { height: 155, offset: 83 });
+  assert.deepEqual(thumbnailFrame(248, 336), { height: 155, offset: 83 }, "the host's block gap below the box");
+  assert.equal(thumbnailFrame(248, 200), null, "a smaller box: another Paseo version, shown as the host renders it");
+  assert.equal(thumbnailFrame(248, 600), null);
+  assert.deepEqual(thumbnailFrame(1000, 320), { height: 320, offset: 0 }, "never taller than the box");
+  for (const width of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) assert.equal(thumbnailFrame(width, null), null);
+  const ui = readFileSync(new URL("../client/screenshot-thumb.tsx", import.meta.url), "utf8");
+  assert.match(ui, /style=\{frame \? \{ marginTop: -frame\.offset \} : undefined\}/);
+  assert.match(ui, /overflow: "hidden"/);
 });

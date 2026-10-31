@@ -21,45 +21,61 @@ const MONO = Platform.select({ ios: "Menlo", android: "monospace", default: "ui-
 
 type Theme = PluginHostProps["theme"];
 
+/** When the stream announced a request the snapshot does not show yet, read once more after this. */
+const PENDING_RETRY_MS = 1000;
+
 /**
- * The run's pending questions and permission requests, read from its snapshot while the card says
- * "needs you" (again whenever the agent changes). They are offered for answering only when that
- * same snapshot shows this card's run (`verifiedRun`). `answer` sends the owner's choice with the
- * SDK's respondToPermission; the card calls it only from the owner's own click.
+ * The run's pending questions and permission requests, read from its snapshot while the run is
+ * active (`watch`): when the card opens it, whenever `version` changes (its status, and each
+ * permission request or resolution in the live stream), and after an answer. `pending` is the
+ * snapshot's count of pending requests: how the card knows a running run needs its owner. They are
+ * offered for answering only when that same snapshot shows this card's run (`verifiedRun`).
+ * `answer` sends the owner's choice with the SDK's respondToPermission; the card calls it only from
+ * the owner's own click.
  */
 export function useOwnerPrompts(
   agentId: string | null,
-  needsYou: boolean,
+  watch: boolean,
   version: string | null,
   card: { sourceAgentId: string; cardId: string },
+  expectPending = false,
 ) {
   const paseo = usePaseo();
   const [prompts, setPrompts] = useState<OwnerPrompt[]>([]);
   const [verified, setVerified] = useState(false);
+  const [pending, setPending] = useState(0);
   const [reload, setReload] = useState(0);
   useEffect(() => {
-    if (!agentId || !needsYou) {
+    if (!agentId || !watch) {
       setPrompts([]);
       setVerified(false);
+      setPending(0);
       return;
     }
     let cancelled = false;
-    void paseo.agents
-      .ref(agentId)
-      .refresh()
-      .then(
-        (result) => {
-          if (cancelled) return;
-          const ok = verifiedRun(result?.agent.labels, card.sourceAgentId, card.cardId);
-          setVerified(ok);
-          setPrompts(ok ? ownerPrompts(result?.agent.pendingPermissions ?? []) : []);
-        },
-        () => undefined,
-      );
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const read = (again: boolean) =>
+      void paseo.agents
+        .ref(agentId)
+        .refresh()
+        .then(
+          (result) => {
+            if (cancelled) return;
+            const requests = result?.agent.pendingPermissions ?? [];
+            const ok = verifiedRun(result?.agent.labels, card.sourceAgentId, card.cardId);
+            setVerified(ok);
+            setPending(requests.length);
+            setPrompts(ok ? ownerPrompts(requests) : []);
+            if (again && expectPending && requests.length === 0) retry = setTimeout(() => read(false), PENDING_RETRY_MS);
+          },
+          () => undefined,
+        );
+    read(true);
     return () => {
       cancelled = true;
+      if (retry) clearTimeout(retry);
     };
-  }, [agentId, needsYou, version, reload, paseo, card.sourceAgentId, card.cardId]);
+  }, [agentId, watch, version, reload, expectPending, paseo, card.sourceAgentId, card.cardId]);
 
   async function answer(requestId: string, response: PermissionResponse) {
     if (!agentId) return;
@@ -70,7 +86,7 @@ export function useOwnerPrompts(
       setReload((value) => value + 1);
     }
   }
-  return { prompts, verified, answer };
+  return { prompts, verified, pending, answer };
 }
 
 function Chip({

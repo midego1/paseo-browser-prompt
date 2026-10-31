@@ -152,3 +152,18 @@ test("message links open only for http(s) URLs", () => {
     assert.equal(isSafeLinkHref(bad), false, bad);
   }
 });
+
+test("listing media: GIF first, each file packaged, sizes bounded; the X cut and other stills stay out", async () => {
+  const { readFileSync, statSync } = await import("node:fs");
+  const root = new URL("../", import.meta.url);
+  const manifest = JSON.parse(readFileSync(new URL("paseo-plugin.json", root), "utf8"));
+  const pkg = JSON.parse(readFileSync(new URL("package.json", root), "utf8"));
+  assert.equal(manifest.media[0], "docs/assets/browser-prompt-tour.gif");
+  for (const file of manifest.media) {
+    assert.ok(pkg.files.includes(file), `${file} is in package files`);
+    const limit = file.endsWith(".gif") ? 5 * 1024 * 1024 : 250 * 1024;
+    assert.ok(statSync(new URL(file, root)).size <= limit, `${file} is within ${limit} bytes`);
+  }
+  const packagedMedia = pkg.files.filter((file) => file.startsWith("docs/"));
+  assert.deepEqual(packagedMedia.sort(), [...manifest.media].sort(), "only the listing's media are packaged");
+});

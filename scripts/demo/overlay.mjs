@@ -11,7 +11,7 @@ export const OVERLAY_SCRIPT = `(() => {
     #demo-pointer.down::after { transform: scale(1); opacity: 1; transition: none; }
     #demo-caption { position: fixed; left: 50%; bottom: 26px; z-index: 2147483646; pointer-events: none; display: flex; align-items: center; gap: 10px;
       padding: 11px 22px 11px 16px; border-radius: 999px; background: rgba(18,18,24,.86); color: #fff; box-shadow: 0 10px 34px rgba(0,0,0,.28), 0 0 0 1px rgba(255,255,255,.08) inset;
-      -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); font: 600 19px/1.2 var(--demo-font, system-ui), system-ui, sans-serif; letter-spacing: -.01em; white-space: nowrap;
+      -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); font: 600 19px/1.2 system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, "DejaVu Sans", sans-serif; letter-spacing: -.01em; white-space: nowrap;
       opacity: 0; transform: translate(-50%, 14px) scale(.98); transition: opacity .38s ease, transform .45s cubic-bezier(.2,.8,.2,1); }
     #demo-caption.shown { opacity: 1; transform: translate(-50%, 0) scale(1); }
   \`;
@@ -32,8 +32,6 @@ export const OVERLAY_SCRIPT = `(() => {
   const show = (text) => {
     caption.innerHTML = ${JSON.stringify(ICON)} + "<span></span>";
     caption.lastChild.textContent = text;
-    const font = document.body && getComputedStyle(document.body).fontFamily;
-    if (font) caption.style.setProperty("--demo-font", font);
     caption.classList.add("shown");
   };
   window.__demoCaption = (text) => {

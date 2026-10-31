@@ -258,9 +258,10 @@ export const THUMBNAIL_MODES = ["all", "latest"] as const;
 
 /** Thumbnail sizes in the card, in layout pixels. */
 export const THUMB_MIN = 140;
-export const THUMB_MAX = 180;
+export const THUMB_MAX = 260;
+export const THUMB_SCROLL = 180;
 export const THUMB_GAP = 8;
-export const THUMB_SINGLE_MAX = 240;
+export const THUMB_SINGLE_MAX = 320;
 
 export type ThumbnailLayout =
   | { kind: "latest"; size: number }
@@ -269,10 +270,10 @@ export type ThumbnailLayout =
 
 /**
  * How the card shows its screenshots in `width` layout pixels:
- * - "row": every step side by side when all fit at 140 px or more (up to 180 px each);
- * - "scroll": a horizontal strip of 160 px thumbnails when at least two fit but not all of them,
+ * - "row": every step side by side when all fit at 140 px or more (up to 260 px each);
+ * - "scroll": a horizontal strip of 180 px thumbnails when at least two fit but not all of them,
  *   so step order stays readable and phones can swipe it;
- * - "latest": only the newest one (up to 240 px) when there is one screenshot, the setting asks for
+ * - "latest": only the newest one (up to 320 px) when there is one screenshot, the setting asks for
  *   it, or the card is too narrow for two.
  */
 export function thumbnailLayout(width: number, count: number, mode: ThumbnailMode): ThumbnailLayout {
@@ -284,6 +285,30 @@ export function thumbnailLayout(width: number, count: number, mode: ThumbnailMod
     const size = Math.min(THUMB_MAX, Math.floor((width - (count - 1) * THUMB_GAP) / count));
     return { kind: "row", size };
   }
-  if (width >= 2 * THUMB_MIN + THUMB_GAP) return { kind: "scroll", size: 160 };
+  if (width >= 2 * THUMB_MIN + THUMB_GAP) return { kind: "scroll", size: THUMB_SCROLL };
   return { kind: "latest", size: single };
+}
+
+/**
+ * Paseo's Markdown (0.13, 0.14) shows an image in a box this tall with `contain`: a screenshot in a
+ * narrow thumbnail is a small picture centered in a tall, mostly empty box.
+ */
+export const HOST_IMAGE_BOX = 320;
+/** Extra height the host may add below its image box (its block gap) and still be recognized. */
+const HOST_IMAGE_SLACK = 48;
+/** Browser screenshots are assumed 16:10, the common desktop window shape; other shapes lose or gain a thin strip. */
+export const THUMB_ASPECT = 1.6;
+
+/**
+ * The visible window onto the host's image box for a thumbnail `width` wide: `height` is the
+ * screenshot's height at that width, and `offset` how far the box is moved up so the centered
+ * picture fills the window. `measured` is the host content's height (null until laid out); when it
+ * does not look like the known box (another Paseo version), returns null and the thumbnail shows
+ * the host's rendering unclipped.
+ */
+export function thumbnailFrame(width: number, measured: number | null): { height: number; offset: number } | null {
+  if (!Number.isFinite(width) || width <= 0) return null;
+  if (measured !== null && !(measured >= HOST_IMAGE_BOX && measured <= HOST_IMAGE_BOX + HOST_IMAGE_SLACK)) return null;
+  const height = Math.min(HOST_IMAGE_BOX, Math.round(width / THUMB_ASPECT));
+  return { height, offset: Math.round((HOST_IMAGE_BOX - height) / 2) };
 }

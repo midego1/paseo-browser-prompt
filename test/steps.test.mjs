@@ -191,7 +191,7 @@ test("3: a read after the run settles decides between waiting for the chat and d
   tracker.event(assistant(`${QUESTION_MARKER} Which Save button?`, "m1"));
   assert.equal(tracker.view().asking, false);
   tracker.history([user("go"), { type: "assistant_message", text: "[browser-prompt step 2/3] Choosing", messageId: "m0" }, { type: "tool_call" }, { type: "assistant_message", text: `${QUESTION_MARKER} Which Save button?`, messageId: "m1" }]);
-  assert.deepEqual(tracker.view(), { progress: { step: 2, total: 3, text: "Choosing" }, asking: true, screenshot: null, screenshots: [], screenshotStep: null, screenshotsBlocked: false });
+  assert.deepEqual(tracker.view(), { progress: { step: 2, total: 3, text: "Choosing" }, asking: true, screenshot: null, screenshots: [], screenshotStep: null, screenshotsBlocked: false, permissionPending: false, permissionEvents: 0 });
   tracker.resumed();
   assert.equal(tracker.view().asking, false, "an answer made it run again");
   tracker.history([user("go"), { type: "assistant_message", text: "Done: Example Domain.", messageId: "m2" }]);
@@ -255,5 +255,5 @@ test("5: after the redirect cap a question turn is the report, so the card is do
 test("with step progress off the tracker still tracks waiting, without steps", () => {
   const tracker = createRunTracker(2, false);
   tracker.history([user("go"), { type: "assistant_message", text: `[browser-prompt step 1/2] x\n${QUESTION_MARKER} Q?` }]);
-  assert.deepEqual(tracker.view(), { progress: null, asking: true, screenshot: null, screenshots: [], screenshotStep: null, screenshotsBlocked: false });
+  assert.deepEqual(tracker.view(), { progress: null, asking: true, screenshot: null, screenshots: [], screenshotStep: null, screenshotsBlocked: false, permissionPending: false, permissionEvents: 0 });
 });

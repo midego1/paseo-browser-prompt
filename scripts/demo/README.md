@@ -1,9 +1,16 @@
-# README tour recording
+# README tour and screenshots
 
-`record.sh` re-records `docs/assets/browser-prompt-tour.mp4` and `docs/assets/browser-prompt-tour.gif`.
+`record.sh` re-records the tour: `docs/assets/browser-prompt-tour.mp4`, the README GIF
+`docs/assets/browser-prompt-tour.gif` (at most 5 MB) and the X cut
+`docs/assets/browser-prompt-tour-x.mp4` (1280×720, H.264 High, yuv420p, faststart, no audio; the
+16:10 recording centered on a light background, at most 140 s and 15 MB). With `--stills` it
+captures the README screenshots in `docs/screenshots/` instead (PNG at 2×, cropped to the card or
+setting, palette-reduced with pngquant, recompressed with optipng, all metadata chunks stripped,
+each at most 250 KB).
 
 ```bash
-scripts/demo/record.sh
+scripts/demo/record.sh            # the tour
+scripts/demo/record.sh --stills   # the screenshots
 ```
 
 It needs Docker (rootless is fine) and network access to pull `ghcr.io/getpaseo/paseo` and the
@@ -21,6 +28,9 @@ Docker the container's root already is your user). Its dependencies are installe
   image, its own home inside the container, no published ports (it listens on 127.0.0.1 inside its
   own network namespace), relay off, host name `demo-host`. It is removed when the script ends.
 - This checkout of the plugin is installed into that daemon, plus `stand-in-model/`.
+- Stand-in page screenshots are rendered first (`stand-ins.mjs`, see below) and copied into the
+  daemon's attachment form: `/tmp/paseo-attachments-demo/<sha256>.png` (directory 700, files 600),
+  listed in `/tmp/browser-prompt-demo-stand-ins.json` for the stand-in model.
 - A demo workspace (`/tmp/demo-project` inside the container) and one chat are created with the CLI.
 - The recorder container (Playwright's Chromium, ffmpeg, exiftool; see `Dockerfile`) joins the
   daemon's network namespace and drives Paseo's bundled web UI headless. Your own Paseo daemon, home
@@ -29,14 +39,21 @@ Docker the container's root already is your user). Its dependencies are installe
 ## Real vs stand-in
 
 The scenes are the real Paseo app and the real plugin: the card, Run with Paseo agent, the
-confirmation, the background start, step progress, forwarding the browser agent's question to the
-chat, delivering the chat's answer, reporting back, and the settings screen.
+confirmation, the background start, step progress and the per-step thumbnails, forwarding the
+browser agent's question to the chat, delivering the chat's answer, the owner's question and
+permission answered on the card (Send answer, Confirm allow), reporting back, and the settings
+screen.
 
 The agent outputs are stand-ins. `stand-in-model/` is a demo-only provider plugin (`claude-demo`,
 Claude family, so the card accepts it) that answers with fixed text and paced timeline items and
 makes no model calls. The browser run does not drive a real browser (a headless web UI has no Paseo
-browser host), so its step lines, tool rows, question and report are scripted, and live screenshots
-are turned off for the recording. The settings scene is reset to the plugin's defaults off camera, so it shows the real defaults rather than the stand-in provider. A scripted model cannot call the Paseo `send_agent_prompt` tool, so
+browser host), so its step lines, tool rows, questions, permission request and report are scripted.
+Its screenshots are stand-ins too: `stand-ins.mjs` renders real pages (example.com, the same page
+with its first paragraph selected, and iana.org's Example Domains page) in the recorder's own
+headless Chromium, and the stand-in model shows them the way Paseo shows a tool's image, so the card
+renders them as it renders a real run's screenshots. The scenario follows example.com as it is
+today (one paragraph and a "Learn more" link). The run holds a state for 2.5 s in the tour and 15 s
+for the stills, long enough to capture it. The settings scene is reset to the plugin's defaults off camera, so it shows the real defaults rather than the stand-in provider. A scripted model cannot call the Paseo `send_agent_prompt` tool, so
 the stand-in model plugin delivers the chat's answer to the run itself through the plugin SDK. Never
 install `stand-in-model/` on a real daemon.
 
@@ -44,11 +61,15 @@ install `stand-in-model/` on a real daemon.
 
 | File | Role |
 | --- | --- |
-| `record.sh` | Starts the isolated daemon, installs the plugins, creates the demo chat, records, encodes, cleans up |
-| `capture.mjs` | Playwright scenes and captions |
+| `record.sh` | Starts the isolated daemon, installs the plugins, renders the stand-in screenshots, creates the demo chat, records or captures, encodes, cleans up |
+| `setup.mjs` | Opens the demo app and points the plugin at the stand-in model (shared, not filmed) |
+| `stand-ins.mjs` | Renders the stand-in page screenshots under their SHA-256 names |
+| `capture.mjs` | Playwright scenes and captions of the tour |
+| `stills.mjs` | The README screenshots, cropped to the card or setting (light theme, one dark) |
+| `optimize.mjs` | pngquant + optipng, metadata stripped, 250 KB limit, metadata dump |
 | `overlay.mjs` | Pointer and bottom caption drawn over the app |
 | `screencast.mjs` | Chromium screencast frames with timestamps |
-| `encode.mjs` | Frames to H.264 MP4 and GIF (under 10 MB), metadata stripped |
+| `encode.mjs` | Frames to the H.264 MP4, the X cut and the GIF (at most 5 MB), metadata stripped |
 | `stand-in-model/` | Demo-only scripted provider plugin |
 
 Adapted from the recording scripts in midego1/kite (`scripts/screenshots`).

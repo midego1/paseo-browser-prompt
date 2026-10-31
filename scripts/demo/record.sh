@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Re-records the README tour: docs/assets/browser-prompt-tour.mp4 and docs/assets/browser-prompt-tour.gif.
+# Re-records the README tour (docs/assets/browser-prompt-tour.mp4, .gif and the X cut -x.mp4), or
+# with --stills the README screenshots in docs/screenshots/.
 #
-#   scripts/demo/record.sh
+#   scripts/demo/record.sh            # the tour
+#   scripts/demo/record.sh --stills   # the screenshots
 #
 # Needs Docker (rootless is fine) and network access to pull images. Everything runs against an
 # isolated, throwaway Paseo daemon in a container: no published ports (it listens on 127.0.0.1 inside
@@ -10,8 +12,16 @@
 # are removed at the end.
 #
 # The scenes are the real Paseo app with this checkout of the plugin installed; the agent outputs
-# are stand-ins from stand-in-model/ (no model calls, no real browser). See README.md here.
+# are stand-ins from stand-in-model/ (no model calls, no real browser), and the run's screenshots
+# are stand-ins rendered by the recorder's own Chromium. See README.md here.
 set -euo pipefail
+
+MODE=tour
+case "${1:-}" in
+  "") ;;
+  --stills) MODE=stills ;;
+  *) echo "Usage: $0 [--stills]" >&2; exit 2 ;;
+esac
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 DEMO="$REPO/scripts/demo"
@@ -60,24 +70,45 @@ as_paseo paseo plugin install /opt/browser-prompt >/dev/null
 as_paseo paseo plugin install /opt/browser-prompt/scripts/demo/stand-in-model >/dev/null
 as_paseo paseo plugin ls
 
+echo "Rendering the stand-in screenshots (example.com and iana.org in the recorder's Chromium)"
+cp "$DEMO"/*.mjs "$DEMO"/package.json "$DEMO"/package-lock.json "$WORK"/
+# The tour holds a state for a moment; the stills hold it long enough to capture it.
+HOLD=2500
+[ "$MODE" = stills ] && HOLD=15000
+docker run --rm "${RUN_AS[@]}" -e HOME=/rec/.home -e npm_config_cache=/rec/.npm -e DEMO_HOLD="$HOLD" \
+  -v "$WORK:/rec" -w /rec "$TOOLS_IMAGE" sh -c 'npm ci --silent --no-audit --no-fund >/dev/null 2>&1 && node stand-ins.mjs'
+# Into the daemon's private attachment form: a paseo-attachments directory (700) of <sha256>.png files (600).
+docker exec "$DAEMON" sh -c 'mkdir -p /tmp/paseo-attachments-demo'
+(cd "$WORK/stand-ins" && tar -c -- *.png stand-ins.json) | docker exec -i "$DAEMON" tar -x -C /tmp/paseo-attachments-demo
+docker exec "$DAEMON" sh -c 'cd /tmp/paseo-attachments-demo && mv stand-ins.json /tmp/browser-prompt-demo-stand-ins.json &&
+  chown -R paseo:paseo /tmp/paseo-attachments-demo /tmp/browser-prompt-demo-stand-ins.json &&
+  chmod 700 /tmp/paseo-attachments-demo && chmod 600 /tmp/paseo-attachments-demo/*.png'
+
 echo "Creating the demo workspace and chat"
 as_paseo sh -c 'mkdir -p /tmp/demo-project && cd /tmp/demo-project && git init -q'
 WORKSPACE_ID="$(as_paseo paseo agent run --provider claude-demo/stand-in --mode default --title "Website check" \
-  --cwd /tmp/demo-project "Can you check the heading on example.com and the page its Docs link opens?" 2>&1 |
+  --cwd /tmp/demo-project "Can you check what example.com says and the page its Learn more link opens?" 2>&1 |
   grep -oE 'wks_[A-Za-z0-9]+' | head -1)"
 test -n "$WORKSPACE_ID"
 
+RECORD=(docker run --rm "${RUN_AS[@]}" --network "container:$DAEMON" -e DEMO_WORKSPACE_ID="$WORKSPACE_ID"
+  -e HOME=/rec/.home -e npm_config_cache=/rec/.npm -v "$WORK:/rec" -w /rec "$TOOLS_IMAGE")
+
+if [ "$MODE" = stills ]; then
+  echo "Capturing and optimizing the screenshots"
+  "${RECORD[@]}" sh -c 'node stills.mjs && node optimize.mjs'
+  mkdir -p "$REPO/docs/screenshots"
+  cp "$WORK"/out/stills/*.png "$REPO/docs/screenshots/"
+  echo "Wrote docs/screenshots/ (raw captures and metadata dump in $WORK/out)"
+  exit 0
+fi
+
 echo "Recording and encoding"
-cp "$DEMO"/capture.mjs "$DEMO"/overlay.mjs "$DEMO"/screencast.mjs "$DEMO"/encode.mjs \
-  "$DEMO"/package.json "$DEMO"/package-lock.json "$WORK"/
-docker run --rm "${RUN_AS[@]}" --network "container:$DAEMON" \
-  -e DEMO_WORKSPACE_ID="$WORKSPACE_ID" -e HOME=/rec/.home -e npm_config_cache=/rec/.npm \
-  -v "$WORK:/rec" -w /rec "$TOOLS_IMAGE" sh -c '
-  npm ci --silent --no-audit --no-fund >/dev/null 2>&1 &&
+"${RECORD[@]}" sh -c '
   node capture.mjs &&
   node encode.mjs &&
-  exiftool -s -s -s -All out/browser-prompt-tour.mp4 out/browser-prompt-tour.gif | grep -viE "^(\\[|$)" > out/metadata.txt || true'
+  exiftool -s -s -s -All out/browser-prompt-tour.mp4 out/browser-prompt-tour-x.mp4 out/browser-prompt-tour.gif | grep -viE "^(\\[|$)" > out/metadata.txt || true'
 
 mkdir -p "$REPO/docs/assets"
-cp "$WORK/out/browser-prompt-tour.mp4" "$WORK/out/browser-prompt-tour.gif" "$REPO/docs/assets/"
-echo "Wrote docs/assets/browser-prompt-tour.mp4 and .gif (frames and metadata dump in $WORK/out)"
+cp "$WORK"/out/browser-prompt-tour.mp4 "$WORK"/out/browser-prompt-tour-x.mp4 "$WORK"/out/browser-prompt-tour.gif "$REPO/docs/assets/"
+echo "Wrote docs/assets/browser-prompt-tour.mp4, -x.mp4 and .gif (frames and metadata dump in $WORK/out)"
