@@ -303,7 +303,7 @@ export function BrowserPromptCard({
           style={styles.secondary}
         >
           <Icon name={done ? "Undo2" : "Check"} size={14} color={done ? theme.colors.statusSuccess : theme.colors.foreground} />
-          <Text style={styles.doneText}>{done ? "Undo done" : "Done ✓"}</Text>
+          <Text style={styles.doneText}>{done ? "Undo done" : "Mark done"}</Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"

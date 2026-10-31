@@ -1,6 +1,6 @@
 # Browser prompt for Paseo
 
-A [Paseo](https://paseo.sh) plugin that renders a card with **Start in ChatGPT**, **Copy**, **Done**
+A [Paseo](https://paseo.sh) plugin that renders a card with **Start in ChatGPT**, **Copy**, **Mark done**
 and **Run with Paseo agent** for every `browser-prompt` block in an assistant message. With
 **Report back to chat** (default Auto), a browser agent tells the chat that showed the card when it
 finishes or fails: the full report when that chat runs in an ask-first mode, a status-only notice
