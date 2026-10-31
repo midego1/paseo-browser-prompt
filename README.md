@@ -6,6 +6,11 @@ and **Run with Paseo agent** for every `browser-prompt` block in an assistant me
 finishes or fails: the full report when that chat runs in an ask-first mode, a status-only notice
 otherwise.
 
+[![Browser prompt tour: a card in the chat, a background Paseo agent with live step progress, a question to the chat, the report coming back, and the settings](docs/assets/browser-prompt-tour.gif)](docs/assets/browser-prompt-tour.mp4)
+
+The tour is recorded in the real Paseo app with this plugin installed; the agents' replies are scripted
+stand-ins ([how it is made](scripts/demo/README.md)). [MP4 version](docs/assets/browser-prompt-tour.mp4).
+
 See [OVERVIEW.md](OVERVIEW.md) for what it does, what data goes where, and its limits, and
 [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
 
