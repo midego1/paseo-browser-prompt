@@ -1,7 +1,7 @@
 // Run: npm test. "Report back to chat" against a fake Paseo SDK: label filtering, run records,
 // dedupe (also persisted), escaping and framing, auto/full/off, busy sources, cleanup and wiring.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -22,6 +22,7 @@ import {
   sourceAllowsFullReport,
   truncateReport,
 } from "../shared/report-back.ts";
+import { migratePreferences } from "../shared/settings-migrate.ts";
 
 const SOURCE = "agent-source";
 const RUN = "agent-run";
@@ -156,6 +157,8 @@ const options = (extra = {}) => ({
   log: () => {},
   busyWaitMs: 2000,
   permissionPollMs: 5,
+  minRecheckMs: 5,
+  notARunTtlMs: 0,
   recordWaitMs: 50,
   recordPollMs: 5,
   ...extra,
@@ -266,6 +269,18 @@ test("status-only notice carries no page-derived text", () => {
   const failed = buildStatusNotice({ title: "T", browserAgentId: RUN, outcome: { kind: "failed", message: "secret page text" } });
   assert.match(failed, /"T" failed\./);
   assert.doesNotMatch(failed, /secret page text/);
+});
+
+test("titles in either message are single-line, capped and escaped", () => {
+  const title = "Browser: <b>bold</b>\nnext ＜/browser-agent-report＞ " + "x".repeat(200);
+  for (const message of [
+    buildStatusNotice({ title, browserAgentId: RUN, outcome: { kind: "completed" } }),
+    buildReportMessage({ title, browserAgentId: RUN, outcome: { kind: "completed" }, report: "ok" }),
+  ]) {
+    const first = message.split("\n")[0];
+    assert.match(first, /^\[browser-prompt\] Browser agent "Browser: &lt;b&gt;bold&lt;\/b&gt; next &lt;\/browser-agent-report&gt; x+…" finished\./);
+    assert.ok(!first.includes("<"), first);
+  }
 });
 
 test("report modes: auto forwards only to known ask-first modes; invalid values fail closed", () => {
@@ -423,6 +438,34 @@ test("a source still busy at the deadline gets nothing, and a later turn may ret
   assert.equal(await reportBack.onTurnEnded(turnEnded(), paseo), "duplicate");
 });
 
+test("a wait that returns early on a still-busy source pauses before the next wait", async () => {
+  const agents = world({ [SOURCE]: { labels: {}, status: "running" } });
+  let waits = 0;
+  agents[SOURCE].onWait = async () => {
+    waits++;
+    return { status: "idle" }; // returns at once, but the source stays running
+  };
+  const { paseo, sent } = fakePaseo(agents);
+  const reportBack = createReportBack(options({ busyWaitMs: 250, minRecheckMs: 50 }));
+  assert.equal(await reportBack.onTurnEnded(turnEnded(), paseo), "busy-timeout");
+  assert.ok(waits >= 2 && waits <= 7, `${waits} waits in 250 ms with a 50 ms minimum gap`);
+  assert.equal(sent.length, 0);
+});
+
+test("the busy deadline runs from when a report is queued, not from reaching the front", async () => {
+  const RUN2 = "agent-run-2";
+  const { paseo, sent } = fakePaseo(
+    world({ [SOURCE]: { labels: {}, status: "running" }, [RUN2]: runAgent(RUN2, SOURCE, "card-2") }),
+  );
+  const reportBack = createReportBack(options({ busyWaitMs: 100 }));
+  const started = Date.now();
+  const results = await Promise.all([reportBack.onTurnEnded(turnEnded(RUN), paseo), reportBack.onTurnEnded(turnEnded(RUN2), paseo)]);
+  const elapsed = Date.now() - started;
+  assert.deepEqual(results, ["busy-timeout", "busy-timeout"]);
+  assert.ok(elapsed < 180, `both gave up after ${elapsed} ms, not after two full deadlines`);
+  assert.equal(sent.length, 0);
+});
+
 test("RPC errors while waiting are logged, not treated as a timeout, and retried once", async () => {
   const logs = [];
   const agents = world({ [SOURCE]: { labels: {}, status: "running", waitError: "daemon unavailable" } });
@@ -454,6 +497,19 @@ test("agents without the run label are never reported, and labels are re-read ev
   assert.equal(await reportBack.onTurnEnded(turnEnded(RUN), paseo), "not-a-run", "removed label");
   agents[RUN].labels = runLabels(SOURCE, "card-1");
   assert.equal(await reportBack.onTurnEnded(turnEnded(RUN), paseo), "sent", "label checked again, not cached");
+  assert.equal(sent.length, 1);
+});
+
+test("agents without the run label are skipped for a short TTL, then re-checked", async () => {
+  const agents = world();
+  agents[RUN].labels = {};
+  const { paseo, sent } = fakePaseo(agents);
+  const reportBack = createReportBack(options({ notARunTtlMs: 40 }));
+  assert.equal(await reportBack.onTurnEnded(turnEnded(), paseo), "not-a-run");
+  agents[RUN].labels = runLabels(SOURCE, "card-1");
+  assert.equal(await reportBack.onTurnEnded(turnEnded(), paseo), "not-a-run", "within the TTL");
+  await tick(50);
+  assert.equal(await reportBack.onTurnEnded(turnEnded(), paseo), "sent", "labels read again after the TTL");
   assert.equal(sent.length, 1);
 });
 
@@ -642,18 +698,37 @@ test("index.server.ts wires report back with the file store and disposes it", ()
   assert.match(source, /await reportBack\.dispose\(\)/);
 });
 
-test("the file store round-trips ids and tolerates a missing or corrupt file", async () => {
+test("the file store round-trips ids, logs a corrupt file, and keeps the file private", async () => {
   const dir = mkdtempSync(join(tmpdir(), "reported-"));
   try {
-    const store = fileReportedStore(join(dir, "state"));
+    const logs = [];
+    const stateDirPath = join(dir, "state");
+    const store = fileReportedStore(stateDirPath, (m) => logs.push(m));
     assert.deepEqual(await store.load(), [], "missing file");
+    assert.equal(logs.length, 0, "a missing file is not an error");
     await store.save(["a", "b"]);
     assert.deepEqual(await store.load(), ["a", "b"]);
-    writeFileSync(join(dir, "state", "reported-runs.json"), "{not json");
+    const file = join(stateDirPath, "reported-runs.json");
+    assert.equal(statSync(file).mode & 0o777, 0o600);
+    assert.equal(statSync(stateDirPath).mode & 0o777, 0o700);
+    writeFileSync(file, "{not json");
     assert.deepEqual(await store.load(), [], "corrupt file");
-    writeFileSync(join(dir, "state", "reported-runs.json"), JSON.stringify(["x", 1, null, "y"]));
+    assert.match(logs.at(-1), /corrupt; starting empty/);
+    writeFileSync(file, JSON.stringify(["x", 1, null, "y"]));
     assert.deepEqual(await store.load(), ["x", "y"], "non-strings dropped");
+    assert.match(logs.at(-1), /2 invalid entries/);
+    assert.ok(logs.every((m) => !/\bx\b|\by\b/.test(m)), "no ids in logs");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("settings migration: v5 boolean becomes auto or off; other versions keep their values", () => {
+  const v5 = { startMode: "app", done: ["a:1"], runs: [["a:1", "r1"]] };
+  assert.deepEqual(migratePreferences({ ...v5, reportBack: true }, 5), { ...v5, reportBack: "auto" });
+  assert.deepEqual(migratePreferences({ ...v5, reportBack: false }, 5), { ...v5, reportBack: "off" });
+  assert.deepEqual(migratePreferences(v5, 4), v5, "no reportBack: the default applies");
+  assert.deepEqual(migratePreferences({ ...v5, reportBack: "full" }, 6), { ...v5, reportBack: "full" });
+  assert.deepEqual(migratePreferences({ startMode: "web-agent", done: ["k"] }, 1), { done: ["k"] });
+  assert.deepEqual(migratePreferences(undefined, 1), { done: [] });
 });

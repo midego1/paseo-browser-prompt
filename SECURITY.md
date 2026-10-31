@@ -37,8 +37,10 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
 - Report back to chat can forward the browser agent's report, which can echo text from web pages,
   to the agent that showed the card. The report is escaped, fenced and labelled as untrusted
   output, but a model may still be influenced by it. Auto (the default) therefore forwards it only
-  to chats in a known ask-first mode, where you approve each tool use, and sends a status-only
-  notice to every other chat. **Always send the full report** removes that check; use it only if
+  to chats in a known ask-first mode and sends a status-only notice to every other chat. An
+  ask-first mode does not mean the agent cannot act on its own: allow rules you configured for that
+  provider (for example always-allowed tools or commands) still run without asking, so a report
+  could lead to those actions. **Always send the full report** removes that check; use it only if
   you accept that a web page could steer an agent that acts without approval.
 - Only runs a card recorded in host settings report, so an agent that copies the plugin's labels
   cannot use them to message another chat. Anyone who can change this plugin's host settings can

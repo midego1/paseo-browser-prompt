@@ -145,9 +145,10 @@ Plugin cleanup aborts every pending wait through the plugin's own `AbortControll
 
 Which runs report:
 
-- Canceled turns never report. Labels are read with `paseo.agents.ref(id).refresh()` on every
-  event (not cached, since labels can change); only `browser-prompt: run` agents with both
-  `browser-prompt-source` and `browser-prompt-card` labels are considered.
+- Canceled turns never report. Labels are read with `paseo.agents.ref(id).refresh()`; an agent
+  without the run label is skipped for 60 seconds, then read again, since labels can change. Only
+  `browser-prompt: run` agents with both `browser-prompt-source` and `browser-prompt-card` labels
+  are considered.
 - The run must be listed in the host `runs` setting under `<source>:<card>`, which only the card
   writes (polled for up to 10 seconds, since the card saves it right after creating the agent).
   Run and source must be in the same workspace unless that entry records the most-recent fallback.
@@ -175,13 +176,17 @@ What is sent:
 Delivery:
 
 - Sends to one source are serialized. Each waits until the source is idle with no active turn and no
-  pending permission or question (`waitForFinish` in slices; `permission` keeps waiting), re-reads
-  the source right before sending, and gives up after 2 hours without sending.
-- Paseo's `send` replaces a running turn by default and clears pending permissions. The report is
-  sent with `activeTurnBehavior: "steer"`: on an idle agent this starts a normal turn, and if the
-  owner starts a turn in the moment before delivery, providers that support steering add the report
-  to it. Providers without steering (Claude among them) would still replace that turn; the wait
-  above makes that window milliseconds wide.
+  pending permission or question (`waitForFinish` in slices of at most 5 minutes, at least 1 second
+  apart while the source stays busy; `permission` keeps waiting and re-checks every 15 seconds),
+  re-reads the source right before sending, and gives up without sending 2 hours after the report
+  was queued (time spent behind other reports for the same source counts).
+- Every Paseo `send` clears pending permissions of the target (a steered message denies them), and
+  by default a send replaces a running turn. That is why the report waits until the source is
+  settled. It is sent with `activeTurnBehavior: "steer"`: on an idle agent this starts a normal
+  turn. In the milliseconds between the last read and the send, the owner could start a turn; the
+  report is then steered into that turn (providers with steering, Claude included, unless the turn
+  is a slash command, is compacting or has no live query, in which case Paseo replaces it), and a
+  permission that turn had just raised would be denied.
 - A question or permission request of the browser agent does not message the source; the card
   shows "Paseo agent needs you" instead.
 

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { DEFAULT_AGENT_SETTINGS } from "./agent-prompt";
 import { DEFAULT_APP_LINK_TEMPLATE } from "./browser-prompt";
 import { DEFAULT_REPORT_MODE, REPORT_MODES } from "./report-back";
+import { migratePreferences } from "./settings-migrate";
 import { DEFAULT_TRAMPOLINE_PORT } from "./trampoline-host";
 
 /** Cap on remembered "done" marks; the oldest are dropped first. */
@@ -51,15 +52,5 @@ export const preferences = defineSettings({
     /** ChatGPT launcher port. */
     trampolinePort: z.number().int().default(DEFAULT_TRAMPOLINE_PORT),
   }),
-  migrate(values, fromVersion) {
-    const old = (values ?? {}) as { done?: unknown; reportBack?: unknown };
-    // v1 only had startMode ("web-agent" | "copy-only") and done. The app is the new default.
-    if (fromVersion < 2) return { done: Array.isArray(old.done) ? old.done : [] };
-    // v5 stored reportBack as a boolean: true becomes auto, false becomes off.
-    if (fromVersion < 6 && typeof old.reportBack === "boolean") {
-      return { ...(values as object), reportBack: old.reportBack ? "auto" : "off" };
-    }
-    // v3 to v6 only add fields with defaults.
-    return values;
-  },
+  migrate: migratePreferences,
 });

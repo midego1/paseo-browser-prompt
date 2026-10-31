@@ -18,6 +18,10 @@ export const SOURCE_BUSY_WAIT_MS = 2 * 60 * 60 * 1000;
 const WAIT_SLICE_MS = 5 * 60 * 1000;
 /** Pause between checks while the source waits for a permission or question. */
 export const PERMISSION_POLL_MS = 15 * 1000;
+/** Least time between two waits on a source that is still not settled, so the loop cannot spin. */
+export const MIN_RECHECK_MS = 1000;
+/** Agents seen without the run label are skipped for this long, then their labels are read again. */
+export const NOT_A_RUN_TTL_MS = 60 * 1000;
 /** How long to wait for the card to record a new run in host settings. */
 export const RECORD_WAIT_MS = 10 * 1000;
 const RECORD_POLL_MS = 500;
@@ -75,6 +79,8 @@ export interface ReportBackOptions {
   log?(message: string): void;
   busyWaitMs?: number;
   permissionPollMs?: number;
+  minRecheckMs?: number;
+  notARunTtlMs?: number;
   recordWaitMs?: number;
   recordPollMs?: number;
 }
@@ -156,6 +162,8 @@ export function createReportBack(options: ReportBackOptions) {
   const log = options.log ?? ((message: string) => console.log(`[browser-prompt] ${message}`));
   const busyWaitMs = options.busyWaitMs ?? SOURCE_BUSY_WAIT_MS;
   const permissionPollMs = options.permissionPollMs ?? PERMISSION_POLL_MS;
+  const minRecheckMs = options.minRecheckMs ?? MIN_RECHECK_MS;
+  const notARunTtlMs = options.notARunTtlMs ?? NOT_A_RUN_TTL_MS;
   const recordWaitMs = options.recordWaitMs ?? RECORD_WAIT_MS;
   const recordPollMs = options.recordPollMs ?? RECORD_POLL_MS;
   const lifetime = new AbortController();
@@ -164,6 +172,8 @@ export function createReportBack(options: ReportBackOptions) {
   /** Runs whose delivery failed once; a second failure keeps them claimed. */
   const retried = new Set<string>();
   const inFlight = new Set<string>();
+  /** Agents seen without the run label, until when they are skipped. Labels can change, hence the TTL. */
+  const notRuns = new Map<string, number>();
   /** Per source agent: the tail of its delivery queue. */
   const queues = new Map<string, Promise<unknown>>();
   const active = new Set<Promise<ReportResult>>();
@@ -202,9 +212,13 @@ export function createReportBack(options: ReportBackOptions) {
     }
   }
 
-  /** Waits until the source is settled; re-reads it right before returning. */
-  async function waitUntilSettled(source: ReturnType<ReportBackPaseo["agents"]["ref"]>, signal: AbortSignal) {
-    const deadline = Date.now() + busyWaitMs;
+  /**
+   * Waits until the source is settled or `deadline` passes; re-reads it right before returning.
+   * A wait that returns early while the source is still busy is followed by a pause (longer while a
+   * permission or question is pending), so the loop never spins.
+   */
+  async function waitUntilSettled(source: ReturnType<ReportBackPaseo["agents"]["ref"]>, deadline: number, signal: AbortSignal) {
+    let pause = 0;
     for (;;) {
       if (signal.aborted) throw new AbortedError();
       const snapshot = (await source.refresh())?.agent ?? null;
@@ -212,12 +226,17 @@ export function createReportBack(options: ReportBackOptions) {
       if (isSettled(snapshot)) return snapshot;
       const remaining = deadline - Date.now();
       if (remaining <= 0) return "timeout" as const;
+      if (pause > 0) {
+        if ((await sleep(Math.min(pause, remaining), signal)) === ABORTED) throw new AbortedError();
+        pause = 0;
+        continue;
+      }
+      const started = Date.now();
       const waited = await abortable(source.waitForFinish(Math.min(remaining, WAIT_SLICE_MS)), signal);
       if (waited === ABORTED) throw new AbortedError();
       // A pending permission or question keeps the turn open: wait for the owner, never steer into it.
-      if (waited.status === "permission") {
-        if ((await sleep(Math.min(permissionPollMs, Math.max(remaining, 0)), signal)) === ABORTED) throw new AbortedError();
-      }
+      const elapsed = Date.now() - started;
+      pause = waited.status === "permission" ? permissionPollMs : Math.max(0, minRecheckMs - elapsed);
     }
   }
 
@@ -250,16 +269,23 @@ export function createReportBack(options: ReportBackOptions) {
     // A stopped run is not a report; a later turn of the same agent may still report.
     if (event.outcome.kind === "canceled") return "canceled";
     if (signal.aborted) return "aborted";
+    if ((notRuns.get(runId) ?? 0) > Date.now()) return "not-a-run";
     await loaded;
     if (reported.includes(runId) || inFlight.has(runId)) return "duplicate";
     inFlight.add(runId);
     let claimed = false;
     try {
       const run = paseo.agents.ref(runId);
-      // Labels can change after creation, so they are read on every event.
+      // Labels can change after creation, so a non-run is only skipped for a short while.
       const runSnapshot = (await run.refresh())?.agent ?? null;
       const labels = runSnapshot?.labels ?? null;
-      if (!isBrowserRun(labels)) return "not-a-run";
+      if (!isBrowserRun(labels)) {
+        const now = Date.now();
+        if (notRuns.size >= 1000) for (const [id, until] of notRuns) if (until <= now) notRuns.delete(id);
+        if (notRuns.size < 1000) notRuns.set(runId, now + notARunTtlMs);
+        return "not-a-run";
+      }
+      notRuns.delete(runId);
       const mode = await options.mode();
       if (mode === "off") return "disabled";
       const target = reportTarget(runId, labels);
@@ -317,11 +343,13 @@ export function createReportBack(options: ReportBackOptions) {
         report = finalAssistantText(items);
       }
 
-      // Claim before waiting so a later turn of the same run cannot report twice.
+      // Claim before waiting so a later turn of the same run cannot report twice. The deadline runs
+      // from here, so waiting behind other reports for the same source counts against it.
       claim(runId);
       claimed = true;
+      const deadline = Date.now() + busyWaitMs;
       const delivered = await enqueue(sourceId, async () => {
-        const settled = await waitUntilSettled(source, signal);
+        const settled = await waitUntilSettled(source, deadline, signal);
         if (typeof settled === "string") return settled;
         if (signal.aborted) throw new AbortedError();
         // The source's mode may have changed while waiting; decide on the snapshot just read.
@@ -329,8 +357,10 @@ export function createReportBack(options: ReportBackOptions) {
         const message = full
           ? buildReportMessage({ title: event.agent.title, browserAgentId: runId, outcome, report: report! })
           : buildStatusNotice({ title: event.agent.title, browserAgentId: runId, outcome });
-        // Steer: on an idle agent this starts a normal turn; if the owner started a turn in the
-        // meantime, providers that support steering add the report to it instead of replacing it.
+        // Every send clears (denies) pending permissions, which is why the source must be settled.
+        // Steer: on an idle agent this starts a normal turn. If the owner starts a turn in the
+        // moment since the last read, the report is steered into it (most providers, Claude
+        // included) or replaces it, and a permission that turn just raised would be denied.
         await source.send(message, { activeTurnBehavior: "steer" });
         return full ? ("sent" as const) : ("sent-status" as const);
       });

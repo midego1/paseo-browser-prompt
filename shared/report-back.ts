@@ -124,13 +124,16 @@ const CONTROLS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
  * ASCII), drops invisible and control characters, and escapes every `<` and `>`.
  */
 export function escapeUntrusted(text: string): string {
-  return text
+  const normalized = text
     .normalize("NFKC")
     .replace(/\r\n?/g, "\n")
     .replace(INVISIBLE, "")
-    .replace(CONTROLS, "")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+    .replace(CONTROLS, "");
+  return escapeBrackets(normalized);
+}
+
+function escapeBrackets(text: string): string {
+  return text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 /** One short line: normalized, no controls, newlines or quotes, capped. */
@@ -165,7 +168,8 @@ export function truncateReport(text: string, max = MAX_REPORT_CHARS): string {
 export type ReportOutcome = { kind: "completed" } | { kind: "failed"; message: string };
 
 function header(title: string | null, runId: string, outcome: ReportOutcome): string {
-  const name = oneLine(title ?? "", MAX_REPORT_TITLE) || "browser steps";
+  // The title is single-line, capped and escaped like the report: agents can be renamed.
+  const name = escapeBrackets(oneLine(title ?? "", MAX_REPORT_TITLE)) || "browser steps";
   const status = outcome.kind === "completed" ? "finished" : "failed";
   return `[browser-prompt] Browser agent "${name}" ${status}. Run agent id: ${oneLine(runId, 100)}.`;
 }
