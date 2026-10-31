@@ -6,8 +6,6 @@ and **Run with Paseo agent** for every `browser-prompt` block in an assistant me
 finishes or fails: the full report when that chat runs in an ask-first mode, a status-only notice
 otherwise.
 
-![Card (light)](docs/screenshots/card-light.png)
-
 See [OVERVIEW.md](OVERVIEW.md) for what it does, what data goes where, and its limits, and
 [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
 
