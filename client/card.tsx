@@ -186,6 +186,7 @@ export function BrowserPromptCard({
       const values = settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS;
       const started = await startBrowserAgent(paseo, {
         sourceAgentId: agentId,
+        cardId,
         cachedWorkspaceId: sourceWorkspaceId,
         cardTitle: title,
         displayTitle,

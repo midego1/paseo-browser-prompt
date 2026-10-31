@@ -18,6 +18,7 @@ Do not include real secrets, tokens or private prompts in a report; describe the
 | Prompt text | Plugin memory on your Paseo daemon, under a random one-time id, at most 10 minutes; then the ChatGPT app via its `codex://` deep link | ChatGPT app mode |
 | Launcher URL `http://<own Tailscale IP or 127.0.0.1>:5299/open?id=<id>` | Your browser; contains no prompt text | ChatGPT app mode |
 | Card steps plus a fixed safety preamble | A new agent on your own Paseo daemon, and that agent's model provider (Anthropic by default) | Run with Paseo agent |
+| The browser agent's final report (up to 4,000 characters), framed as untrusted output | The agent whose chat showed the card, and that agent's model provider | Report back to chat (on by default) |
 | Settings, done marks, card-to-agent links | Paseo host settings on your daemon | Always |
 | Updater state, log, commit-only Git history | `~/.local/state/paseo-plugin-browser-prompt/` on the daemon host | Git installs |
 | `git ls-remote` / `git fetch` | The `https://` remote the plugin was installed from | Git installs with auto-update on |
@@ -31,6 +32,9 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
   guess a live 18-byte random id within 10 minutes could open that one prompt; ids are single-use.
 - Run with Paseo agent starts agents only in ask-first permission modes. The agent acts in your
   Paseo desktop app's browser, where you may be signed in; review each tool approval.
+- Report back to chat sends the browser agent's report, which can echo text from web pages, to the
+  agent that showed the card. It is fenced and labelled as untrusted output, but a model may still be
+  influenced by it; turn the setting off if that agent can act without your approval.
 - Self-update installs only fast-forward commits from the `https://` remote the plugin was installed
   from. Installing a plugin means trusting its repository: the server part runs unsandboxed with the
   daemon user's access.

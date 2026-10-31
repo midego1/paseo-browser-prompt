@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+- Report back to chat: when a browser agent started from a card finishes or fails, its final report
+  (up to 4,000 characters, framed as untrusted output) is sent to the agent whose chat showed the
+  card. Once per run, only for agents the plugin started, never to another browser run, and it
+  waits for a busy agent instead of interrupting it. New setting **Report back to chat**, on by default.
+- Browser agents carry `browser-prompt-source` and `browser-prompt-card` labels.
+- Card status labels: running…, needs you (question or permission), done ✓, failed.
+
 ## 0.1.0 (unreleased)
 
 First public release.

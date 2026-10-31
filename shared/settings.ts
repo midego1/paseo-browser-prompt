@@ -13,7 +13,7 @@ export const MAX_RUNS = 200;
 export const preferences = defineSettings({
   id: "preferences",
   scope: "host",
-  version: 4,
+  version: 5,
   schema: z.object({
     /**
      * Desktop and web clients.
@@ -35,6 +35,8 @@ export const preferences = defineSettings({
     agentMode: z.string().default(DEFAULT_AGENT_SETTINGS.agentMode),
     /** Ask before starting the agent. */
     confirmAgentLaunch: z.boolean().default(DEFAULT_AGENT_SETTINGS.confirmAgentLaunch),
+    /** Send a finished browser agent's report back to the chat whose card started it. */
+    reportBack: z.boolean().default(true),
     /** Agents started from cards: `[<agentId>:<cardId>, startedAgentId]`, oldest first. */
     runs: z.array(z.tuple([z.string(), z.string()])).default([]),
     /** ChatGPT launcher bind address on the daemon host; empty = this machine's Tailscale IPv4. */
@@ -46,7 +48,7 @@ export const preferences = defineSettings({
     const old = (values ?? {}) as { done?: unknown };
     // v1 only had startMode ("web-agent" | "copy-only") and done. The app is the new default.
     if (fromVersion < 2) return { done: Array.isArray(old.done) ? old.done : [] };
-    // v3 and v4 only add fields with defaults.
+    // v3, v4 and v5 only add fields with defaults.
     return values;
   },
 });

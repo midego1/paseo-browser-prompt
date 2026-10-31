@@ -135,6 +135,12 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
             value={values.confirmAgentLaunch}
             onValueChange={(confirmAgentLaunch) => void settings.save({ ...values, confirmAgentLaunch }, revision)}
           />
+          <SettingsSwitch
+            label="Report back to chat"
+            hint="When the agent finishes or fails, send its final report to the chat that showed the card."
+            value={values.reportBack}
+            onValueChange={(reportBack) => void settings.save({ ...values, reportBack }, revision)}
+          />
           <SettingsInput
             ref={providerInput}
             label="Provider"

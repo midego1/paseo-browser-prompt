@@ -24,10 +24,10 @@ export function useRunState(agentId: string | null): RunState {
 }
 
 export const RUN_LABELS: Record<RunState, string> = {
-  starting: "Starting Paseo agent",
-  running: "Running in Paseo agent",
-  "needs-input": "Paseo agent needs your approval",
-  done: "Paseo agent finished",
+  starting: "Starting Paseo agent…",
+  running: "Running in Paseo agent…",
+  "needs-input": "Paseo agent needs you",
+  done: "Paseo agent done ✓",
   failed: "Paseo agent failed",
   stopped: "Paseo agent stopped",
   unknown: "Started in Paseo agent",

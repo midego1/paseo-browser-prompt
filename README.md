@@ -1,7 +1,9 @@
 # Browser prompt for Paseo
 
 A [Paseo](https://paseo.sh) plugin that renders a card with **Start in ChatGPT**, **Copy**, **Done**
-and **Run with Paseo agent** for every `browser-prompt` block in an assistant message.
+and **Run with Paseo agent** for every `browser-prompt` block in an assistant message. With
+**Report back to chat** on (default), a browser agent's final report is sent back to the chat that
+showed the card.
 
 ![Card (light)](docs/screenshots/card-light.png)
 
@@ -113,7 +115,7 @@ The card's "Run with Paseo agent" button uses the app's own Paseo connection (`u
 - Workspace: `useAgent(cardAgentId, a => a.workspaceId)`; if the app has no snapshot yet,
   `paseo.agents.ref(id).refresh()`; last resort the most recently active workspace
   (`workspaces.list({ sort: activity_at desc, limit 1 })`).
-- `paseo.workspaces.ref(workspaceId).agents.create({ config, title: "Browser: <title>", prompt })`
+- `paseo.workspaces.ref(workspaceId).agents.create({ config, title: "Browser: <title>", prompt, labels })`
   with `config = { provider: "claude/claude-sonnet-5-5", modeId: "default", thinkingOptionId: "high" }`
   by default (host settings). Only ask-first modes are used (`ASK_FIRST_MODES`: claude `default`/`plan`,
   omp `ask`); other modes fall back to the ask-first mode and providers without one are refused.
@@ -125,7 +127,33 @@ The card's "Run with Paseo agent" button uses the app's own Paseo connection (`u
   Screens get no client-state provider on Paseo 0.11, so screen code must not use
   `useAgent`/`useWorkspace` (they throw "Plugin state hooks must run inside a workspace
   panel"); `test/screen-hooks.test.mjs` checks every registered screen's import graph.
+- Labels (`shared/report-back.ts` `runLabels`): `browser-prompt: run`,
+  `browser-prompt-source: <card agent id>`, `browser-prompt-card: <card id>`.
 - Nothing is appended to timelines and prompt text is never logged.
+
+### Report back to chat
+
+Setting **Report back to chat** (host setting `reportBack`, default on). `server/report-back.ts`
+listens with `server.on("agent.turn_ended")`:
+
+- Only agents labelled `browser-prompt: run` are considered (labels are read with
+  `paseo.agents.ref(id).refresh()`; other agents are remembered and skipped). Canceled turns are
+  ignored. Completed and failed turns report once per run (in-memory dedupe, also across
+  concurrent events; a plugin reload resets it).
+- The report is the browser agent's final assistant message (`finalAssistantText` over the last 60
+  timeline items), cut to 4,000 characters on a line or word boundary with a truncation note.
+- It is sent to the `browser-prompt-source` agent as a new prompt:
+  `[browser-prompt] Browser agent "<title>" finished.` (or `failed.` plus the error), followed by a
+  note that the block is the browser agent's untrusted report and not the owner's instructions, and
+  the report inside `<browser-agent-report>` … `</browser-agent-report>`. Delimiters inside the
+  report are neutralized so it cannot close the block early.
+- No report goes to an agent that is missing or archived, to an agent that is itself a browser run,
+  or back to the run itself, so reports cannot loop. These cases log agent ids only.
+- A busy source agent is never interrupted: the plugin waits up to 30 minutes for its turn to end
+  (`waitForFinish`), then sends; if it is still busy, the report is sent with
+  `activeTurnBehavior: "steer"`. The SDK has no message queue.
+- A question or permission request does not message the source agent; the card shows
+  "Paseo agent needs you" instead.
 
 ## Self-update on use
 
