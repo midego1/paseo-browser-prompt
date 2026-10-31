@@ -239,7 +239,7 @@ Delivery:
   is a slash command, is compacting or has no live query, in which case Paseo replaces it), and a
   permission that turn had just raised would be denied.
 - A permission request or an AskUserQuestion of the browser agent does not message the source; the
-  card shows "Paseo agent needs you" instead.
+  card shows "Paseo agent needs you" and lets the owner answer there (see Answer on the card).
 
 ### Step progress
 
@@ -314,6 +314,28 @@ token, API key, 2FA or recovery code or other secret (skip it and say "screensho
   These patterns are linear and their input is capped (20,000 characters for stripping, 4,096 for
   image-message checks); `test/perf.test.mjs` runs 100k-character adversarial input through every
   chat-text and card path.
+
+### Answer on the card
+
+When the run waits for the owner (an AskUserQuestion or a permission request; the card says
+"Paseo agent needs you" in the theme's warning color), the card shows the request itself in a
+warning-bordered box:
+
+- `useOwnerPrompts` (`client/owner-prompt.tsx`) reads the run's `pendingPermissions` with
+  `paseo.agents.ref(run).refresh()` while the card is in "needs you", again whenever the agent's
+  snapshot changes. `ownerPrompts` (`shared/owner-prompt.ts`) turns them into prompts: questions
+  with their header, text and options (at most 4 questions and 8 options; text NFKC-normalized,
+  invisible and control characters removed, capped), or permissions with their actions (Allow and
+  Deny when the request has none).
+- The owner answers with a click. One single-choice question answers on the click; several
+  questions or multiple choice use **Send answer**. The answer goes to the run with the SDK's
+  `respondToPermission`: questions as `{ behavior: "allow", updatedInput: { answers } }` keyed by
+  each question's full text (several choices joined with ", "), permissions with the pressed
+  action's behavior and `selectedActionId`. **Other answer: open run** / **Open run** opens the run
+  for free text or anything the card does not show.
+- Only the owner's click answers: no server code and no chat path calls `respondToPermission`
+  (a test checks this), and these questions are never forwarded to the chat. If the request cannot
+  be read, the box offers **Answer in run**.
 
 ### Talk to the chat
 

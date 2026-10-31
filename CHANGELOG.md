@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0 (unreleased)
+
+- Answer on the card: when the run waits for the owner (AskUserQuestion or a permission request),
+  the card shows the question and its options, or the permission and its actions, in a
+  warning-bordered box and sends the owner's click with Paseo's `respondToPermission`. Free-text
+  answers open the run. Only the owner's click answers; nothing is forwarded to the chat.
+- The card's "Paseo agent needs you" status is shown in the theme's warning color.
+
 ## 0.6.6 (unreleased)
 
 - The README tour GIF is the listing's interface image: `media` in `paseo-plugin.json` and in the
