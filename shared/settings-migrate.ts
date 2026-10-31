@@ -30,6 +30,11 @@ export function migratePreferences(values: unknown, fromVersion: number): unknow
       else next.maxChatQuestions = value;
     }
   }
-  // v9 adds showStepProgress and v10 showLiveScreenshot, both with defaults; nothing stored changes.
+  // v9 adds showStepProgress, v10 showLiveScreenshot and v11 thumbnailMode, all with defaults.
+  // A stored thumbnailMode that is not "all" or "latest" would make the document invalid: drop it.
+  if (fromVersion < 11 && "thumbnailMode" in next && next.thumbnailMode !== "all" && next.thumbnailMode !== "latest") {
+    next = { ...next };
+    delete next.thumbnailMode;
+  }
   return next;
 }

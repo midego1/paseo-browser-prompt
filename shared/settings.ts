@@ -3,6 +3,7 @@ import { z } from "zod";
 import { DEFAULT_AGENT_SETTINGS, MAX_CHAT_QUESTIONS_LIMIT } from "./agent-prompt";
 import { DEFAULT_APP_LINK_TEMPLATE } from "./browser-prompt";
 import { DEFAULT_REPORT_MODE, REPORT_MODES } from "./report-back";
+import { THUMBNAIL_MODES } from "./screenshot";
 import { migratePreferences } from "./settings-migrate";
 import { DEFAULT_TRAMPOLINE_PORT } from "./trampoline-host";
 
@@ -15,7 +16,7 @@ export const MAX_RUNS = 200;
 export const preferences = defineSettings({
   id: "preferences",
   scope: "host",
-  version: 10,
+  version: 11,
   schema: z.object({
     /**
      * Desktop and web clients.
@@ -48,6 +49,8 @@ export const preferences = defineSettings({
     showStepProgress: z.boolean().default(DEFAULT_AGENT_SETTINGS.showStepProgress),
     /** Ask the run for a viewport screenshot after each step and show the latest on the card. */
     showLiveScreenshot: z.boolean().default(DEFAULT_AGENT_SETTINGS.showLiveScreenshot),
+    /** Card thumbnails: one per step, or only the newest. */
+    thumbnailMode: z.enum(THUMBNAIL_MODES).default(DEFAULT_AGENT_SETTINGS.thumbnailMode),
     /** Questions a run may send to the chat (0 to 50; 0 behaves like Talk to the chat off). */
     maxChatQuestions: z
       .number()

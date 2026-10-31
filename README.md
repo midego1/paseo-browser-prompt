@@ -122,7 +122,8 @@ Settings (**Settings → Plugins → Browser prompts → Run with Paseo agent**)
 | Confirm before starting | on | Asks before starting the agent; says when it will run in Auto mode. |
 | Open the agent when started | off | Off: the agent works in the background; the card shows its status (running…, needs you, done ✓, failed) and an Open link. On: its view opens right away. |
 | Show step progress | on | The agent marks each numbered step as it starts it (`[browser-prompt step N/M] …`); the card shows "Step N of M · …" with a progress bar. |
-| Show live screenshot | on | The agent takes a viewport screenshot after each numbered step (never of pages showing secrets); the card shows the latest one as a thumbnail under the progress bar. Needs a Paseo 0.13+ app to show it. |
+| Show live screenshot | on | The agent takes a viewport screenshot after each numbered step (never of pages showing secrets); the card shows them as thumbnails under the progress bar. Needs a Paseo 0.13+ app to show them. |
+| Thumbnails | All steps | All steps: one thumbnail per step with "Step N" above it and the latest highlighted, side by side when the card is wide enough, a horizontal strip otherwise, the latest alone on very narrow screens. Latest only: just the newest screenshot. |
 | Report back to chat | Auto | Auto, Always send the full report, or Off (see below). |
 | Talk to the chat | on | The agent may ask the chat that showed the card about the task; the plugin forwards each question framed as untrusted text (see below). |
 | Max questions to the chat per run | `10` | Whole number from 0 to 50; 0 works like Talk to the chat off. After the limit the agent asks the owner. |
@@ -287,13 +288,22 @@ token, API key, 2FA or recovery code or other secret (skip it and say "screensho
   only Paseo's attachment shape: a `file://` URI or absolute path whose file is
   `<64 hex>.<png|jpg|jpeg|webp|gif>` directly inside a `paseo-attachments[-suffix]` directory; no
   http(s) or other schemes, no query or fragment, no traversal (segments are decoded first). The
-  source is passed on unchanged, in the form Paseo's own renderer gets. One reference per card,
-  never image data. It is fed by the same timeline read and live stream as step progress, so it
-  updates while the run works and the last one stays after it is done.
-- The card shows it with the host `Markdown` component (`@getpaseo/plugin/client/ui`, Paseo 0.13+),
-  the renderer Paseo uses for these image messages in an agent's own chat, inside a pressable frame
-  (max 240 px wide, rounded, theme border) that opens the run. The plugin API has no other way to
-  show a daemon-side image, so on older apps the thumbnail is not shown.
+  source is passed on unchanged, in the form Paseo's own renderer gets. Each screenshot belongs to
+  the step whose `[browser-prompt step N/M]` marker came last before it (N clamped to the card's M;
+  step 0 before any marker); a later screenshot in the same step replaces the earlier one. Path
+  strings only, never image data, at most 20 steps per card (least recently captured dropped). It
+  is fed by the same timeline read and live stream as step progress (the stream also passes the step
+  it read from its buffer, for markers split across chunks; a newer tail read keeps earlier steps it
+  no longer reaches), so it updates while the run works and stays after it is done.
+- The card shows them with the host `Markdown` component (`@getpaseo/plugin/client/ui`, Paseo 0.13+),
+  the renderer Paseo uses for these image messages in an agent's own chat, each in a pressable frame
+  with "Step N" above it that opens the run (accessibility label "Screenshot after step N"); the
+  latest has an accent border. `thumbnailLayout` picks the layout from the card's measured width
+  (`onLayout`): a row when every step fits at 140 to 180 px, a horizontal scroll strip of 160 px
+  thumbnails when at least two fit but not all (readable step order, swipeable on phones), and the
+  latest alone (up to 240 px) when the card is narrower than two thumbnails, when there is one
+  screenshot, or with Thumbnails set to Latest only. The plugin API has no other way to show a
+  daemon-side image, so on older apps no thumbnail is shown.
 - Paseo's browser only captures a tab the desktop app is showing: a screenshot of a hidden tab
   fails with "The tab has not painted yet". No browser tool or plugin API can make a hidden tab
   paint or show the run's own tab (`browser_new_tab` always opens in the background;
