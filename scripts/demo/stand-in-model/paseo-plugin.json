@@ -1,0 +1,6 @@
+{
+  "id": "browser-prompt-demo-model",
+  "name": "Browser prompt demo stand-in model",
+  "description": "Demo only: a scripted stand-in model for recording the browser-prompt README video. Never install it on a real daemon.",
+  "requirements": { "paseo": ">=0.14.0" }
+}

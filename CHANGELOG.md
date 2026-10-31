@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.5 (unreleased)
+
+- README tour: `docs/assets/browser-prompt-tour.gif` (linking to the `.mp4`) with captions, recorded
+  in the real Paseo web UI against an isolated, throwaway Paseo daemon in Docker. The agents' replies
+  are scripted stand-ins from a demo-only provider plugin; `scripts/demo/record.sh` re-records it.
+
 ## 0.6.4 (unreleased)
 
 - Paseo cannot capture a browser tab the desktop app is not showing ("The tab has not painted
