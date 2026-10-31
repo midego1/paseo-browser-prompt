@@ -6,13 +6,68 @@ and **Run with Paseo agent** for every `browser-prompt` block in an assistant me
 finishes or fails: the full report when that chat runs in an ask-first mode, a status-only notice
 otherwise.
 
-[![Browser prompt tour: a card in the chat, a background Paseo agent with live step progress, a question to the chat, the report coming back, and the settings](docs/assets/browser-prompt-tour.gif)](docs/assets/browser-prompt-tour.mp4)
+[![Browser prompt tour: a card in the chat, a background Paseo agent with step progress and a screenshot per step, a question to the chat, a question and a permission answered on the card, the report coming back, and the settings](docs/assets/browser-prompt-tour.gif)](docs/assets/browser-prompt-tour.mp4)
 
-The tour is recorded in the real Paseo app with this plugin installed; the agents' replies are scripted
-stand-ins ([how it is made](scripts/demo/README.md)). [MP4 version](docs/assets/browser-prompt-tour.mp4).
+The tour is recorded in the real Paseo app with this plugin installed; the agents' replies and the
+run's page screenshots are stand-ins ([how it is made](scripts/demo/README.md)).
+[MP4 version](docs/assets/browser-prompt-tour.mp4).
 
 See [OVERVIEW.md](OVERVIEW.md) for what it does, what data goes where, and its limits, and
 [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
+
+## How it works
+
+The screenshots below are the real Paseo app with this plugin. The agent text and the run's page
+screenshots (real example.com and iana.org pages) are demo stand-ins; see
+[how they are made](scripts/demo/README.md). The settings named here are under Settings → Plugins →
+Browser prompt.
+
+**1. The card.** Every `browser-prompt` block in an agent's reply becomes a card. **Start in
+ChatGPT** copies the steps and opens ChatGPT, **Copy** only copies them, **Mark done** marks the
+card done on this host, and **Run with Paseo agent** starts a Paseo browser agent (after a
+confirmation, **Confirm before starting**).
+
+![The card: the steps with Start in ChatGPT, Copy, Mark done and Run with Paseo agent](docs/screenshots/card.png)
+
+**2. Running in the background.** The agent works in the background and the card shows its state
+with an Open link (**Open the agent when started** opens it right away instead). "Step N of M" and
+the bar follow the agent's step lines (**Show step progress**), and a screenshot per step appears
+under it with its step number, the latest highlighted (**Show live screenshot**, **Thumbnails**).
+
+![Running: Step 3 of 4 with a progress bar and thumbnails for steps 1, 2 and 3](docs/screenshots/running.png)
+
+The same card in the dark theme:
+
+![The running card in the dark theme](docs/screenshots/running-dark.png)
+
+**3. Asking the chat.** When the page differs from the steps, the agent may ask the chat that
+showed the card. The plugin forwards the question marked as untrusted text, and the card says
+"Waiting for the chat's answer" until the chat replies (**Talk to the chat**, **Max questions to
+the chat per run**). Secrets and risky approvals are never asked of the chat.
+
+![Waiting for the chat's answer, and the forwarded question in the chat](docs/screenshots/asking.png)
+
+**4. The agent needs you.** A question for you or a permission request appears on the card. Tap an
+option and press **Send answer**. A permission shows exactly what it would allow (typed text masked
+until you tap Show) and needs **Confirm allow**; when the card cannot show all of it, it offers only
+Deny and Open run. **Permission mode** decides how often the agent asks.
+
+![The agent needs you: a question with its options, one selected, and Send answer](docs/screenshots/needs-you-question.png)
+
+![A permission request: Browser navigate with its URL, and Confirm allow](docs/screenshots/needs-you-permission.png)
+
+**5. Done, and the report.** The card shows done ✓, and the chat gets the run's report as untrusted
+data (**Report back to chat**: Auto sends the full report to a chat in an ask-first mode and a
+status-only notice otherwise).
+
+![Done: the card's done status, the report back in the chat, and the chat's reply](docs/screenshots/done.png)
+
+**6. Settings.** Each behavior above is a setting, and so are the agent's provider, model,
+permission mode and thinking level.
+
+![Settings: Run with Paseo agent options](docs/screenshots/settings-run.png)
+
+![Settings: the agent's provider, model, permission mode and thinking](docs/screenshots/settings-agent.png)
 
 ## Install
 
@@ -331,9 +386,12 @@ When the run waits for the owner (an AskUserQuestion or a permission request; th
 "Paseo agent needs you" in the theme's warning color), the card shows the request itself in a
 warning-bordered box:
 
-- `useOwnerPrompts` (`client/owner-prompt.tsx`) reads the run's `pendingPermissions` with
-  `paseo.agents.ref(run).refresh()` while the card is in "needs you", again whenever the agent's
-  snapshot changes. Answer buttons appear only when that same snapshot carries this card's run
+- Paseo does not mark a running agent that waits for a permission (its `attentionReason` is only
+  set for finished and error), so the card watches the run's live stream for `permission_requested`
+  and `permission_resolved` (`shared/run-tracker.ts`). `useOwnerPrompts` (`client/owner-prompt.tsx`)
+  reads the run's `pendingPermissions` with `paseo.agents.ref(run).refresh()` while the run is
+  active: when the card opens it, on each of those events and on status changes, and after an
+  answer. The card says "needs you" when the stream shows an open request or the snapshot has one. Answer buttons appear only when that same snapshot carries this card's run
   labels (`verifiedRun`: `browser-prompt: run`, this card's chat as source, this card's id);
   otherwise the box offers **Answer in run** only. `ownerPrompts` (`shared/owner-prompt.ts`) turns
   the requests into prompts: questions with their header, text and options (at most 4 questions

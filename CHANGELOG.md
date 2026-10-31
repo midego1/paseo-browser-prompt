@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.1 (unreleased)
+
+- Fix: "Paseo agent needs you" and the answer box now appear on Paseo 0.14. Paseo does not set a
+  live agent's `attentionReason` for a pending permission, so the card watches the run's stream for
+  `permission_requested` / `permission_resolved` and reads `pendingPermissions` from the run's
+  snapshot when it opens a running run, on those events and after an answer.
+- browser_keypress text that is more than one key name (typed characters, not Enter or Control+A)
+  is masked like typed values.
+- README: "How it works" with screenshots of each stage (`docs/screenshots/`); the listing's
+  `media` adds three of them after the GIF.
+- The tour is re-recorded with the new features: thumbnails per step, a question and a permission
+  answered on the card. New X cut `docs/assets/browser-prompt-tour-x.mp4` (1280×720, H.264 High;
+  not in the package).
+- `scripts/demo`: `record.sh --stills` captures the README screenshots; the stand-in run shows
+  stand-in page screenshots (example.com and iana.org rendered by the recorder's own Chromium,
+  stored as demo-daemon attachments) and asks the owner a question and a permission. The scenario
+  follows example.com as it is today.
+
 ## 0.8.0 (unreleased)
 
 - Answer on the card: when the run waits for the owner (AskUserQuestion or a permission request),

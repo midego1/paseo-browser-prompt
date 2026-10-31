@@ -2,7 +2,12 @@
   "id": "browser-prompt",
   "name": "Browser prompt",
   "description": "Turns browser-prompt code blocks in agent replies into cards that start the steps in ChatGPT or in a Paseo browser agent, copy them, or mark them done.",
-  "media": ["docs/assets/browser-prompt-tour.gif"],
+  "media": [
+    "docs/assets/browser-prompt-tour.gif",
+    "docs/screenshots/running.png",
+    "docs/screenshots/needs-you-question.png",
+    "docs/screenshots/needs-you-permission.png"
+  ],
   "requirements": {
     "paseo": ">=0.11.4"
   }
