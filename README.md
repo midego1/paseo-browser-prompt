@@ -270,18 +270,26 @@ token, API key, 2FA or recovery code or other secret (skip it and say "screensho
 
 - Where the image comes from: Paseo's browser_screenshot returns a PNG as an MCP image block; the
   Claude provider stores a private copy on the daemon host and emits an assistant message
-  `![Image](<path>)` right after the tool call. The timeline has no separate image item.
-- `createScreenshotTracker` (`shared/screenshot.ts`) takes the image message that directly follows a
-  `browser_screenshot` call and keeps only its path (absolute path or http(s) URL; data URIs,
-  relative paths and odd characters are refused). One reference per card, never image data. It is
-  fed by the same timeline read and live stream as step progress, so it updates while the run works
-  and the last one stays after it is done.
+  `![Image](file:///<tmp>/paseo-attachments-<random>/<sha256>.png)` right after the tool call. The
+  timeline has no separate image item.
+- `createScreenshotTracker` (`shared/screenshot.ts`) only looks at the first assistant message after
+  a `browser_screenshot` call, and only when that message is a lone image. `safeImageSource` accepts
+  only Paseo's attachment shape: a `file://` URI or absolute path whose file is
+  `<64 hex>.<png|jpg|jpeg|webp|gif>` directly inside a `paseo-attachments[-suffix]` directory; no
+  http(s) or other schemes, no query or fragment, no traversal (segments are decoded first). The
+  source is passed on unchanged, in the form Paseo's own renderer gets. One reference per card,
+  never image data. It is fed by the same timeline read and live stream as step progress, so it
+  updates while the run works and the last one stays after it is done.
 - The card shows it with the host `Markdown` component (`@getpaseo/plugin/client/ui`, Paseo 0.13+),
   the renderer Paseo uses for these image messages in an agent's own chat, inside a pressable frame
   (max 240 px wide, rounded, theme border) that opens the run. The plugin API has no other way to
   show a daemon-side image, so on older apps the thumbnail is not shown.
-- Screenshots never reach a chat: `finalAssistantText` skips image-only messages and removes
-  Markdown images, so reports and questions are text only and carry no image paths.
+- Screenshots never reach a chat. `finalAssistantText` skips image-only messages, and the shared
+  chat escape (`escapeUntrusted`, used for reports, questions and error text) runs
+  `stripImagesForChat` after NFKC normalization: inline Markdown images (titles, escaped brackets
+  and parentheses, `<…>` destinations), reference-style images and image or file reference
+  definitions, `<img>` tags, `file://` URIs and paths into `paseo-attachments` are removed or
+  replaced by `[file omitted]`. The preamble no longer asks for a screenshot path in the report.
 
 ### Talk to the chat
 

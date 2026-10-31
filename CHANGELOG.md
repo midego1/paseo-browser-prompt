@@ -1,13 +1,22 @@
 # Changelog
 
+## 0.6.1 (unreleased)
+
+Security fixes for the 0.6.0 live screenshot (0.6.0 accepted any http(s) or absolute image source):
+
+- The thumbnail only uses Paseo's own attachment file (`file://` or absolute path, `<sha256>.<image
+  ext>` inside `paseo-attachments[-suffix]`), from the first message after the screenshot call when
+  it is a lone image; remote URLs are never loaded.
+- Reports, questions and error text to the chat are text only: image messages are skipped, and
+  inline and reference Markdown images, `<img>` tags, `file://` URIs and attachment paths are
+  removed. The final report no longer includes a screenshot path.
+
 ## 0.6.0 (unreleased)
 
 - Live screenshot on the card (setting **Show live screenshot**, on by default): the agent takes a
   viewport screenshot after each numbered step (never of pages showing secrets), and the card shows
   the latest one as a thumbnail under the progress bar that opens the run when pressed. Uses the
   host Markdown component, so it needs a Paseo 0.13+ app; older apps show no thumbnail.
-- Reports and questions to the chat are text only: image messages and Markdown images are removed
-  from the run's final message, so no screenshot or file path reaches a chat.
 - Settings schema v10.
 
 ## 0.5.1 (unreleased)

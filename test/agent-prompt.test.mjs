@@ -49,10 +49,10 @@ test("prompt starts with the safety preamble", () => {
     /page differs from what the steps expect/,
     /Never read out, print, copy or repeat secret values/,
     /what is left for the owner/,
-    /screenshot path/,
   ]) {
     assert.match(prompt, rule);
   }
+  assert.doesNotMatch(prompt, /screenshot path/, "reports never point at screenshot files");
 });
 
 test("prompt carries the steps verbatim and the task title", () => {
