@@ -38,7 +38,7 @@ const lsRemote = (heads, head = "refs/heads/main") =>
 // The owner enabled auto-update for REMOTE, unless a test says otherwise.
 const CONSENTED = { autoUpdate: true, consentRemote: REMOTE };
 
-function harness({ install = { kind: "git", remote: REMOTE, revision: A }, remote, state = {}, lock = true, spawnError, fastForward = true, saveError, loadError, consent = CONSENTED } = {}) {
+function harness({ install = { kind: "git", remote: REMOTE, revision: A }, remote, state = {}, lock = true, spawnError, fastForward = true, saveError, loadError, consent = CONSENTED, afterLock } = {}) {
   const calls = { lsRemote: 0, spawn: [], logs: [], lock: 0, release: 0, ff: [], listInstall: 0 };
   let now = 1_000_000_000;
   let stored = { ...DEFAULT_UPDATE_STATE, ...consent, ...state };
@@ -62,6 +62,12 @@ function harness({ install = { kind: "git", remote: REMOTE, revision: A }, remot
     },
     acquireLock: async () => {
       calls.lock++;
+      // Lets a test change the settings or the install between the check and the install.
+      afterLock?.({
+        revoke: (patch) => (stored = { ...stored, ...patch }),
+        moveInstall: (next) => (install = next),
+        breakLoad: () => (loadError = new Error("settings invalid")),
+      });
       return lock;
     },
     releaseLock: async () => {
@@ -361,6 +367,46 @@ test("Update now installs only the commit and remote the owner was shown, only o
   const sideways = harness({ remote: lsRemote({ "refs/heads/main": B }), consent: NO_CONSENT, fastForward: false });
   assert.equal((await sideways.updater.check({ install: { remote: REMOTE, revision: B } })).status, "not-fast-forward");
   assert.equal(sideways.calls.spawn.length, 0);
+});
+
+test("automatic path: consent revoked or remote changed after the check installs nothing", async () => {
+  const revoked = harness({ remote: lsRemote({ "refs/heads/main": B }), afterLock: ({ revoke }) => revoke({ autoUpdate: false }) });
+  const off = await revoked.updater.check();
+  assert.equal(off.status, "not-consented");
+  assert.equal(off.applied, false);
+  assert.deepEqual(revoked.calls.spawn, [], "Not now pressed during the check: no install");
+  assert.equal(revoked.calls.release, 1, "the update lock is given back");
+
+  const otherRemote = harness({ remote: lsRemote({ "refs/heads/main": B }), afterLock: ({ revoke }) => revoke({ consentRemote: "https://github.com/other/fork.git" }) });
+  assert.equal((await otherRemote.updater.check()).status, "not-consented");
+  assert.deepEqual(otherRemote.calls.spawn, [], "consent now names another repository");
+
+  const moved = harness({
+    remote: lsRemote({ "refs/heads/main": B }),
+    afterLock: ({ moveInstall }) => moveInstall({ kind: "git", remote: "https://github.com/other/fork.git", revision: A }),
+  });
+  assert.equal((await moved.updater.check()).status, "not-consented");
+  assert.deepEqual(moved.calls.spawn, [], "the install moved to another remote during the check");
+
+  const unreadable = harness({ remote: lsRemote({ "refs/heads/main": B }), afterLock: ({ breakLoad }) => breakLoad() });
+  assert.equal((await unreadable.updater.check()).status, "not-consented", "settings unreadable at the re-read");
+  assert.deepEqual(unreadable.calls.spawn, []);
+  const broken = harness({ remote: lsRemote({ "refs/heads/main": B }), afterLock: ({ revoke }) => revoke({ autoUpdate: "yes" }) });
+  assert.equal((await broken.updater.check()).status, "not-consented", "anything but true is no consent");
+  assert.deepEqual(broken.calls.spawn, []);
+
+  const kept = harness({ remote: lsRemote({ "refs/heads/main": B }) });
+  assert.equal((await kept.updater.check()).status, "updating", "consent still given: installs as before");
+  assert.deepEqual(kept.calls.spawn, [B]);
+  assert.equal(kept.calls.listInstall, 2, "the install is read again right before the install");
+});
+
+test("Update now is not affected by the automatic path's consent re-read", async () => {
+  const h = harness({ remote: lsRemote({ "refs/heads/main": B }), consent: NO_CONSENT, afterLock: ({ revoke }) => revoke({ autoUpdate: false }) });
+  const result = await h.updater.check({ install: { remote: REMOTE, revision: B } });
+  assert.equal(result.status, "updating");
+  assert.deepEqual(h.calls.spawn, [B]);
+  assert.equal(h.calls.listInstall, 1, "no second read on the owner's own click");
 });
 
 test("settings migration: auto-update stored before 0.10.0 starts off and asks", () => {

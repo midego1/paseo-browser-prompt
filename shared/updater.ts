@@ -360,6 +360,12 @@ export function createUpdater(deps: UpdaterDeps) {
     if (!(await deps.acquireLock())) {
       return { ...result, status: "busy", applied: false, message: "An update is already running." };
     }
+    if (!manual && !(await stillConsented(install.remote))) {
+      // Consent was revoked, or the install moved to another remote, while this check ran.
+      await deps.releaseLock().catch(() => undefined);
+      await deps.saveState({ ...result, lastResult: "update-available" }).catch(() => undefined);
+      return { ...result, status: "not-consented", applied: false, message: "Auto-update was turned off or the install changed; nothing was installed." };
+    }
     updating = true;
     let started = false;
     try {
@@ -384,6 +390,19 @@ export function createUpdater(deps: UpdaterDeps) {
     } finally {
       // Only a started update keeps later checks busy (the plugin reloads when it finishes).
       if (!started) updating = false;
+    }
+  }
+
+  /**
+   * The automatic path installs only if, right before the install, the settings still hold consent
+   * for the remote the check read and the install still uses that remote. A failed read is no consent.
+   */
+  async function stillConsented(remote: string): Promise<boolean> {
+    try {
+      const [fresh, current] = await Promise.all([deps.loadState(), deps.listInstall()]);
+      return current.kind === "git" && current.remote === remote && hasConsent(fresh, remote);
+    } catch {
+      return false;
     }
   }
 
