@@ -106,11 +106,7 @@ if [ "$MODE" = stills ]; then
     --cwd /tmp/demo-repeats "Can you check what example.com says and the page its Learn more link opens?" 2>&1 |
     grep -oE 'wks_[A-Za-z0-9]+' | head -1)"
   test -n "$REPEAT_WORKSPACE_ID"
-  REPEAT_AGENT="$(as_paseo paseo ls --json | as_paseo node -e '
-    let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
-      const agent = JSON.parse(s).find((entry) => entry.name === "Steps again");
-      if (agent) console.log(agent.id);
-    });')"
+  REPEAT_AGENT="$(as_paseo paseo ls --json | grep -B2 '"name": "Steps again"' | grep -oE '"id": "[^"]+"' | cut -d'"' -f4 | head -1)"
   test -n "$REPEAT_AGENT"
   for prompt in "Could you give me those steps again?" "Link me the steps here again, please."; do
     as_paseo paseo wait "$REPEAT_AGENT" >/dev/null 2>&1 || true
