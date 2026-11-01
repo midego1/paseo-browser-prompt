@@ -141,7 +141,7 @@ connected app shares them.
 | Show step progress | on | The agent marks each numbered step as it starts it (`[browser-prompt step N/M] …`); the card shows "Step N of M · …" with a progress bar. |
 | Show live screenshot | on | The agent takes a viewport screenshot after each numbered step (never of pages showing secrets); the card shows them as thumbnails under the progress bar. Needs a Paseo 0.13+ app to show them. |
 | Thumbnails | All steps | All steps: one thumbnail per step with "Step N" above it and the latest highlighted, side by side when the card is wide enough, a horizontal strip otherwise, the latest alone on very narrow screens. Latest only: just the newest screenshot. |
-| Close tabs after a successful run | on | When every step succeeded, the agent closes the browser tabs it opened itself (with `browser_new_tab`) as its last action and names them in its report. Tabs that were open before the run stay open; a run that fails, stops or needs you leaves every tab open. In Always Ask mode you approve the close like any other new tool. |
+| Close tabs after a successful run | on | When every step succeeded, the agent closes the browser tabs it opened itself (with `browser_new_tab`) as its last action and names their hosts in its report. Tabs that were open before the run, tabs a step says to leave open and tabs it is unsure about stay open; a run that fails, stops or needs you leaves every tab open. In Always Ask mode you approve the close like any other new tool. An instruction in the agent's prompt, not enforced: it depends on the provider and model, which may close the wrong tab or none. |
 | Talk to the chat | on | The agent may ask the chat that showed the card about the task; the plugin forwards each question framed as untrusted text (see below). |
 | Max questions to the chat per run | `10` | Whole number from 0 to 50; 0 works like Talk to the chat off. After the limit the agent asks you. |
 | Report back to chat | Auto | Auto, Always send the full report, or Off (see below). |
@@ -330,7 +330,7 @@ The card's "Run with Paseo agent" button uses the app's own Paseo connection (`u
   in Auto mode followed by `CLASSIFIER_MODE_RULE` (an approved tool call is not the owner's
   approval; the stops of rule 3 must be AskUserQuestion questions), the chat, progress and
   screenshot rules when their settings are on, and with **Close tabs after a successful run**
-  `CLOSE_TABS_RULE` (rule 11: list the tabs at the start, and only after a fully successful run close
+  `CLOSE_TABS_RULE` (rule 11, refining rule 2: list the tabs first, and only after a fully successful run close
   the tabs the run opened with `browser_new_tab`, after the last screenshot and before the report;
   no step marker for it), then the steps verbatim inside `<steps>`.
 - Mode guard (`shared/mode-guard.ts`): right after creating the agent the card reads its actual

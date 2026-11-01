@@ -197,7 +197,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
           />
           <SettingsSwitch
             label="Close tabs after a successful run"
-            hint="When every step succeeded, the agent closes the browser tabs it opened itself for the run, as its last action before its report, and names them in the report. Tabs that were already open stay open, and a run that fails, stops or still needs you leaves every tab open so you can see where it stopped. In Always Ask mode you approve the close like any other new tool."
+            hint="When every step succeeded, the agent closes the browser tabs it opened itself for the run, as its last action before its report, and names their sites in the report. Tabs that were already open stay open, and a run that fails, stops or still needs you leaves every tab open so you can see where it stopped. In Always Ask mode you approve the close like any other new tool. This is an instruction in the agent's prompt, not enforced: how well it holds depends on the provider and model, which may close the wrong tab or none."
             value={values.closeTabsOnSuccess}
             onValueChange={(closeTabsOnSuccess) => void settings.save({ ...values, closeTabsOnSuccess }, revision)}
           />

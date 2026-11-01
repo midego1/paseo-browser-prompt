@@ -86,6 +86,11 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
   thumbnail only uses Paseo's own local attachment files, never a remote URL.
   The thumbnail is read from the agent's own timeline and stays in your Paseo app. Turn off Show
   live screenshot to stop the screenshots (this also saves the tokens each image costs).
+- Close tabs after a successful run (on by default) tells the agent to close only the tabs it opened
+  itself, and only after a fully successful run. That is an instruction to a model, not an enforced
+  control: the plugin does not check which tab a `browser_close_tab` call closes, so a model may
+  close the wrong tab (for example one you had open with unsaved work) or none. In Always Ask mode
+  you approve each new tool, including the close. Turn the setting off to keep every tab open.
 - Questions and permission requests the browser agent puts to the owner (AskUserQuestion, tool
   approvals) stay with the owner. The card shows them and sends the answer the owner clicks with
   Paseo's `respondToPermission`, the same as answering in the run. Nothing answers them

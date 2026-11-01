@@ -28,7 +28,7 @@ const PNG_B = `file:///tmp/paseo-attachments-Ab12Cd/${HASH_B}.png`;
 const tool = (name) => ({ type: "tool_call", name: `mcp__paseo__${name}`, status: "completed" });
 const image = (path) => ({ type: "assistant_message", text: `\n\n![Image](${path})\n\n` });
 const say = (text) => ({ type: "assistant_message", text });
-const REPORT = "Done: both steps. The title is Example Domain.\nClosed the tab I opened: Example Domain.";
+const REPORT = "Done: both steps. The title is Example Domain.\nClosed the tab I opened: example.com.";
 
 /** A fully successful two-step run that closes its own tab after the last screenshot. */
 const successfulRun = [
@@ -69,17 +69,19 @@ test("the close-tabs rule is in the preamble only when the setting is on", () =>
 
 test("the close-tabs rule: only own tabs, only after full success, last, reported", () => {
   for (const rule of [
-    /start the run with browser_list_tabs \(before any browser_new_tab\) and remember which tabs already exist/,
+    /this refines rule 2: start the run with browser_list_tabs \(before any browser_new_tab\) and remember which tabs already exist/,
     /remember each tab you open yourself with browser_new_tab/,
-    /Only when the run is fully successful \(every numbered step done, none failed, skipped or blocked, no question left unanswered, nothing left for the owner to do\)/,
-    /as your very last action, after the last step's screenshot and right before your final report/,
+    /Only when the run is fully successful \(every numbered step done, none failed, skipped or blocked, no question left unanswered, nothing left for the owner to do; a skipped screenshot is not a skipped step\)/,
+    /as your very last action, after the last step \(and its screenshot, if you take one\) and right before your final report/,
     /close with browser_close_tab each tab you opened yourself with browser_new_tab, and only those/,
     /Never close a tab that already existed when the run started, even if you used it/,
+    /never a tab a step tells you to leave open \(for example so the owner can look at it\)/,
+    /If you cannot tell whether you opened a tab yourself, leave it open/,
     /write no step marker and take no screenshot for it/,
     /it is not a destructive action under rule 3/,
     /If a close fails, leave that tab open and go on to your report/,
     /anything less than fully successful, close no tab, so the owner can see where it stopped/,
-    /In your report, say which tabs you closed \(by page title, never a secret\) or that you left them open and why/,
+    /In your report, say which tabs you closed \(by URL host only, such as example\.com, never a full address or a secret\) or that you left them open and why/,
   ]) {
     assert.match(CLOSE_TABS_RULE, rule);
   }
@@ -95,6 +97,7 @@ test("the card passes the setting to the prompt, on unless it is false", () => {
   const screen = readFileSync(new URL("../client/settings-screen.tsx", import.meta.url), "utf8");
   assert.match(screen, /label="Close tabs after a successful run"/);
   assert.match(screen, /value=\{values\.closeTabsOnSuccess\}/);
+  assert.match(screen, /instruction in the agent's prompt, not enforced/);
 });
 
 test("settings migration to v13: the default (on) applies to existing settings; a bad stored value is dropped", () => {

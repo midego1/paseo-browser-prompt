@@ -41,12 +41,12 @@ export const SCREENSHOT_RULE =
  * Tabs that were open before the run, and every tab after a run that fell short, stay open.
  */
 export const CLOSE_TABS_RULE =
-  "11. Closing tabs: start the run with browser_list_tabs (before any browser_new_tab) and remember which tabs already exist; also remember each tab you open yourself with browser_new_tab. " +
-  "Only when the run is fully successful (every numbered step done, none failed, skipped or blocked, no question left unanswered, nothing left for the owner to do), then as your very last action, after the last step's screenshot and right before your final report, close with browser_close_tab each tab you opened yourself with browser_new_tab, and only those. " +
-  "Never close a tab that already existed when the run started, even if you used it, and never a tab a page opened by itself. " +
+  "11. Closing tabs: this refines rule 2: start the run with browser_list_tabs (before any browser_new_tab) and remember which tabs already exist; also remember each tab you open yourself with browser_new_tab. " +
+  "Only when the run is fully successful (every numbered step done, none failed, skipped or blocked, no question left unanswered, nothing left for the owner to do; a skipped screenshot is not a skipped step), then as your very last action, after the last step (and its screenshot, if you take one) and right before your final report, close with browser_close_tab each tab you opened yourself with browser_new_tab, and only those. " +
+  "Never close a tab that already existed when the run started, even if you used it, never a tab a page opened by itself, and never a tab a step tells you to leave open (for example so the owner can look at it). If you cannot tell whether you opened a tab yourself, leave it open. " +
   "Closing is cleanup, not a numbered step: write no step marker and take no screenshot for it; it is not a destructive action under rule 3. If a close fails, leave that tab open and go on to your report. " +
   "If the run is anything less than fully successful, close no tab, so the owner can see where it stopped. " +
-  "In your report, say which tabs you closed (by page title, never a secret) or that you left them open and why.";
+  "In your report, say which tabs you closed (by URL host only, such as example.com, never a full address or a secret) or that you left them open and why.";
 
 /** Start of a step marker line: `[browser-prompt step N/M] what the run is doing`. */
 export const STEP_MARKER_PREFIX = "[browser-prompt step";
