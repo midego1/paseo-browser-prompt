@@ -11,7 +11,16 @@ each at most 250 KB).
 ```bash
 scripts/demo/record.sh            # the tour
 scripts/demo/record.sh --stills   # the screenshots
+# the Updates screenshot needs a Git install of a pushed branch:
+DEMO_PLUGIN_GIT=midego1/paseo-browser-prompt DEMO_PLUGIN_REF=<branch> scripts/demo/record.sh --stills
 ```
+
+With `DEMO_PLUGIN_GIT` (owner/repo) and `DEMO_PLUGIN_REF`, the demo daemon installs the plugin from
+that GitHub repository over HTTPS instead of from this checkout, so the Updates settings name a real
+repository and show the consent text. Without them the Updates screenshot shows a local install.
+For the repeat screenshot, `--stills` also creates a second demo chat in its own workspace and asks
+it for the same steps three times; the stills mark the first card done, open the second copy with
+Show and capture it above the collapsed third.
 
 It needs Docker (rootless is fine) and network access to pull `ghcr.io/getpaseo/paseo` and the
 Playwright image. The Paseo image is pinned to the release the tour was recorded with
