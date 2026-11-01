@@ -1,7 +1,8 @@
-import type { PluginServerContext, PluginSettingsState } from "@getpaseo/plugin/server";
+import type { PluginSettingsState } from "@getpaseo/plugin/server";
 import type { preferences } from "../shared/settings";
 import { DEFAULT_REPORT_MODE, MOST_RECENT_FALLBACK, parseReportMode, runKey, type ReportMode } from "../shared/report-back.ts";
 import { chatQuestionBudget } from "../shared/agent-prompt.ts";
+import { addLifecycleHook, type HookServer } from "./hooks.ts";
 import { createReportBack, type ReportBackOptions, type ReportBackPaseo, type TalkSettings } from "./report-back.ts";
 
 type PreferencesState = PluginSettingsState<(typeof preferences)["schema"]>;
@@ -41,12 +42,13 @@ export async function readRecordedRun(settings: SettingsReader, query: { sourceI
 }
 
 /**
- * Wires "Report back to chat" to `agent.turn_ended`. The handler returns at once and the report is
- * delivered in the background, because Paseo cancels hook requests after 30 seconds and a report may
- * wait for a busy chat. The returned cleanup aborts every pending wait.
+ * Wires "Report back to chat" to the turn-ended hook (`agent.turn.after`, `agent.turn_ended` on Paseo
+ * 0.14). The handler returns at once and the report is delivered in the background, because Paseo
+ * cancels hook requests after 30 seconds and a report may wait for a busy chat. The returned cleanup
+ * aborts every pending wait.
  */
 export function registerReportBack(
-  server: Pick<PluginServerContext, "on">,
+  server: HookServer,
   settings: SettingsReader,
   extra: Partial<Pick<ReportBackOptions, "store" | "log" | "busyWaitMs" | "permissionPollMs" | "recordWaitMs" | "recordPollMs">> = {},
 ) {
@@ -56,7 +58,7 @@ export function registerReportBack(
     recordedRun: (query) => readRecordedRun(settings, query),
     ...extra,
   });
-  const off = server.on("agent.turn_ended", async (event, { paseo }) => {
+  const off = addLifecycleHook(server, "agent.turn_ended", async (event, { paseo }) => {
     void reportBack.onTurnEnded(event, paseo as ReportBackPaseo);
   });
   return {

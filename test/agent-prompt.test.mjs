@@ -317,6 +317,18 @@ test("server mode guard checks recorded browser runs on turn start and permissio
   assert.equal(handlers.size, 0);
 });
 
+test("server mode guard uses addHook names when the host has addHook", () => {
+  const handlers = new Map();
+  const server = {
+    addHook: (name, handler) => (handlers.set(name, handler), () => handlers.delete(name)),
+    on: () => assert.fail("on must not be used when addHook exists"),
+  };
+  const guard = registerModeGuard(server, recordedRuns([]), { log: () => {}, recordWaitMs: 0 });
+  assert.deepEqual([...handlers.keys()].sort(), ["agent.permission.before", "agent.turn.before"]);
+  guard.dispose();
+  assert.equal(handlers.size, 0);
+});
+
 test("server mode guard never archives an agent the card did not record, labels or not", async () => {
   const { handlers, server } = captureHooks();
   const logs = [];

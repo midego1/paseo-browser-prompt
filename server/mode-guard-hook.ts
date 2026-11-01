@@ -1,6 +1,6 @@
-import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { enforceRunMode, type ModeGuardAgent } from "../shared/mode-guard.ts";
 import { reportTarget } from "../shared/report-back.ts";
+import { addLifecycleHook, type HookServer } from "./hooks.ts";
 import { readRecordedRun, type SettingsReader } from "./report-back-hook.ts";
 
 type GuardHandle = Omit<ModeGuardAgent, "refresh"> & {
@@ -24,7 +24,7 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
  * report back uses; labels alone are not enough, so the guard never archives an agent that merely
  * carries the plugin's labels. Handlers return at once; logs carry agent ids and mode ids only.
  */
-export function registerModeGuard(server: Pick<PluginServerContext, "on">, settings: SettingsReader, options: ModeGuardOptions = {}) {
+export function registerModeGuard(server: HookServer, settings: SettingsReader, options: ModeGuardOptions = {}) {
   const log = options.log ?? ((m: string) => console.log(`[browser-prompt] ${m}`));
   const recordWaitMs = options.recordWaitMs ?? 10_000;
   const recordPollMs = options.recordPollMs ?? 500;
@@ -69,8 +69,8 @@ export function registerModeGuard(server: Pick<PluginServerContext, "on">, setti
   }
 
   const offs = [
-    server.on("agent.turn_started", async (event, { paseo }) => void check(event.agent, paseo as unknown as GuardPaseo)),
-    server.on("agent.permission_requested", async (event, { paseo }) => void check(event.agent, paseo as unknown as GuardPaseo)),
+    addLifecycleHook(server, "agent.turn_started", async (event, { paseo }) => void check(event.agent, paseo as unknown as GuardPaseo)),
+    addLifecycleHook(server, "agent.permission_requested", async (event, { paseo }) => void check(event.agent, paseo as unknown as GuardPaseo)),
   ];
   return {
     check,

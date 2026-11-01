@@ -113,7 +113,7 @@ from and offers **Enable auto-update** (newer commits from that repository are t
 installed when the plugin is used) or **Not now**; **Check now** and **Update now** work by hand.
 
 `paseo plugin add` and `paseo plugin install` are aliases. The plugin has no runtime npm
-dependencies and no build step. Paseo 0.11.4 or later; thumbnails need a Paseo 0.13 or later app.
+dependencies and no build step. Paseo 0.14 or later; thumbnails need a Paseo 0.13 or later app.
 Tailscale on the daemon host is needed only for the ChatGPT desktop app launcher; everything else
 works without it.
 
@@ -357,15 +357,18 @@ The card's "Run with Paseo agent" button uses the app's own Paseo connection (`u
 
 ### Report back to chat
 
-The server hooks use `server.on("agent.turn_ended" | "agent.turn_started" | "agent.permission_requested")`.
-Paseo 0.14 renamed them (`server.addHook("agent.turn.after", …)` and so on) but still delivers the old
-names; they are deprecated until 2027-04-30. Moving to `addHook` needs the 0.14 plugin SDK and
-`requirements.paseo` `>=0.14.0`, so it is left for a later release.
+The server hooks (`server/hooks.ts` `addLifecycleHook`) register with
+`server.addHook("agent.turn.after" | "agent.turn.before" | "agent.permission.before")` when the
+daemon passes `addHook`, else with the deprecated `server.on("agent.turn_ended" | "agent.turn_started" |
+"agent.permission_requested")`, which is removed after 2027-04-30. Both deliver the same payload and
+the daemon does not wait for either. The Paseo 0.14.0 daemon and its plugin SDK have only `on`;
+`addHook` comes with the next plugin SDK (0.15 beta), and daemons that have it get it without a new
+plugin release.
 
 Setting **Report back to chat** (host setting `reportBack`): `auto` (default), `full` or `off`.
 Settings that cannot be read or are invalid count as `auto`, never `full`. An old boolean value
 migrates `true` to `auto` and `false` to `off`. `server/report-back-hook.ts` registers
-`server.on("agent.turn_ended")`; the handler returns at once and `server/report-back.ts` delivers in
+the turn-ended hook; the handler returns at once and `server/report-back.ts` delivers in
 the background, because Paseo cancels hook requests after 30 seconds and their `signal` with them.
 Plugin cleanup aborts every pending wait through the plugin's own `AbortController`.
 
@@ -552,7 +555,7 @@ model, frames what reaches the chat:
 
 - The run asks by ending its turn with a final message that starts with `[browser-prompt question]`
   (`QUESTION_MARKER`) and nothing else. It does not message the chat itself.
-- On `agent.turn_ended` the server reads the final message (`parseQuestion`). A question turn is
+- When a turn ends (`agent.turn.after`) the server reads the final message (`parseQuestion`). A question turn is
   never claimed as the run's report, so the real final report later still goes out once. Failed
   and canceled turns are never questions.
 - The question is forwarded only for runs a card recorded, through the same serialized

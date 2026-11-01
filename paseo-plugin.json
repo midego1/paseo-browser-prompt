@@ -9,6 +9,6 @@
     "docs/screenshots/needs-you-permission.png"
   ],
   "requirements": {
-    "paseo": ">=0.11.4"
+    "paseo": ">=0.14.0"
   }
 }
