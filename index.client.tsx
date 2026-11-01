@@ -18,7 +18,8 @@ export default function contribute(client: PluginClientContext) {
     id: "browser-prompt",
     query: { itemType: "assistant_message" },
     transform({ item, phase }) {
-      const items = explodeMessage(item.text, phase);
+      const messageId = typeof item.messageId === "string" && item.messageId ? item.messageId : undefined;
+      const items = explodeMessage(item.text, phase, messageId);
       return items ? { items } : undefined;
     },
   });

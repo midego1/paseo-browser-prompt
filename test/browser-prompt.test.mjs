@@ -45,13 +45,19 @@ test("finds blocks with and without titles", () => {
 test("explodes into markdown + card per block without losing text", () => {
   const items = explodeMessage(message, "complete");
   assert.ok(items);
+  const scope = /^md-(h[0-9a-f]{8}-)0$/.exec(items[0].id)?.[1];
+  assert.ok(scope, "ids name the message (no message id: a hash of its text up to the first block)");
   assert.deepEqual(items.map((i) => `${i.kind}:${i.id}`), [
-    "browser-prompt-markdown:md-0",
-    "browser-prompt-card:card-0",
-    "browser-prompt-markdown:md-1",
-    "browser-prompt-card:card-1",
-    "browser-prompt-markdown:md-2",
+    `browser-prompt-markdown:md-${scope}0`,
+    `browser-prompt-card:card-${scope}0`,
+    `browser-prompt-markdown:md-${scope}1`,
+    `browser-prompt-card:card-${scope}1`,
+    `browser-prompt-markdown:md-${scope}2`,
   ]);
+  assert.deepEqual(
+    explodeMessage(message, "complete", "msg-7").map((i) => i.id),
+    ["md-msg-7-0", "card-msg-7-0", "md-msg-7-1", "card-msg-7-1", "md-msg-7-2"],
+  );
   const rebuilt = items.filter((i) => i.kind === "browser-prompt-markdown").map((i) => i.data.text).join("");
   assert.equal(rebuilt, message, "markdown segments concatenate back to the original text");
   assert.doesNotThrow(() => JSON.stringify(items));
@@ -166,4 +172,13 @@ test("listing media: GIF first, each file packaged, sizes bounded; the X cut and
   }
   const packagedMedia = pkg.files.filter((file) => file.startsWith("docs/"));
   assert.deepEqual(packagedMedia.sort(), [...manifest.media].sort(), "only the listing's media are packaged");
+});
+
+test("two messages never share item ids, so each shows its own cards", () => {
+  const block = "```browser-prompt Same\n1. Open https://example.com\n```";
+  const ids = (text, id) => explodeMessage(text, "complete", id).map((item) => item.id);
+  assert.notDeepEqual(ids(block, "msg-1"), ids(block, "msg-2"), "same text, two message ids");
+  assert.notDeepEqual(ids(`First\n\n${block}`), ids(`Second\n\n${block}`), "no message ids, different text before the block");
+  // Streaming: later text does not change the ids of what is already shown.
+  assert.equal(explodeMessage(`${block}\nmore`, "streaming")[0].id, explodeMessage(`${block}\nmore and more`, "streaming")[0].id);
 });
