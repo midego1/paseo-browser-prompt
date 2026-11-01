@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.13.1 (unreleased)
+
+- Fix: a stopped run could turn up as done, because the plugin woke it. Reading a closed agent's
+  timeline makes the Paseo daemon load it again, so it goes from closed to idle. The card now skips
+  the read when a run goes from running to closed during the session (the settle read had no check)
+  and when the run is not in the app's agent cache yet, which covers closed runs while the app
+  starts and archived runs: every card read first asks for the run's status with `refresh()`, which
+  loads nothing, and reads only when the run is neither closed nor archived. A run that closes
+  between that check and the read is still woken; no check can close that gap from a plugin.
+- Report back does the same: a run that is closed or archived when its turn ended is not read and not
+  reported (result `run-closed`), unless the event itself carries the report. A later turn still
+  reports. A question redirect no longer goes to a run that closed in the meantime, for example during
+  the wait for a busy chat: the send would have loaded it and started a turn.
+- A card that skipped its read for a closed run reads once when something else, such as the owner
+  opening the agent, loads the run again.
+
 ## 0.13.0 (unreleased)
 
 - The card shows one small line for a "Run with Paseo agent" run under the step progress: the time

@@ -1,4 +1,5 @@
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
+import { mayLoadRun } from "../shared/agent-prompt.ts";
 import {
   buildReportMessage,
   buildStatusNotice,
@@ -101,6 +102,7 @@ export type ReportResult =
   | "sent"
   | "sent-status"
   | "canceled"
+  | "run-closed"
   | "aborted"
   | "duplicate"
   | "not-a-run"
@@ -270,13 +272,19 @@ export function createReportBack(options: ReportBackOptions) {
     return next;
   }
 
-  /** The turn's final assistant text, and the id of its last assistant message when known. */
+  /**
+   * The turn's final assistant text, and the id of its last assistant message when known. Null when
+   * that takes reading the timeline of a run that is closed by now, which would load it again.
+   */
   async function readFinal(
     event: TurnEndedEvent,
     run: ReturnType<ReportBackPaseo["agents"]["ref"]>,
-  ): Promise<{ text: string; messageId: string | null }> {
+    runSnapshot: AgentSnapshotLike | null,
+  ): Promise<{ text: string; messageId: string | null } | null> {
     const fromEvent = event.timeline ?? [];
-    const items: readonly { type: string; text?: unknown; messageId?: unknown }[] = fromEvent.some((item) => item.type === "assistant_message")
+    const inEvent = fromEvent.some((item) => item.type === "assistant_message");
+    if (!inEvent && !mayLoadRun(runSnapshot)) return null;
+    const items: readonly { type: string; text?: unknown; messageId?: unknown }[] = inEvent
       ? fromEvent
       : (await run.timeline.refetch({ direction: "tail", limit: REPORT_TAIL_ITEMS })).entries.map((entry) => entry.item);
     let messageId: string | null = null;
@@ -294,13 +302,19 @@ export function createReportBack(options: ReportBackOptions) {
   /**
    * Tells the run its question did not reach the chat, so it asks the owner instead. Returns null,
    * sending nothing, once the run had MAX_REDIRECTS notices: the caller then treats the turn as the
-   * run's report.
+   * run's report. A run closed by now (the wait for a busy chat can take hours) gets no notice: a send
+   * would load it and start a turn.
    */
   async function redirect(run: ReturnType<ReportBackPaseo["agents"]["ref"]>, runId: string, reason: RedirectReason, max: number) {
     const count = redirectCounts.get(runId) ?? 0;
     if (count >= MAX_REDIRECTS) {
       log(`run ${runId} kept asking after ${count} redirects; handling its turn as the report`);
       return null;
+    }
+    const fresh = await run.refresh().then((r) => r?.agent ?? null, () => null);
+    if (!mayLoadRun(fresh)) {
+      log(`question of run ${runId} not forwarded; the run is closed, so it is not told`);
+      return "run-closed" as const;
     }
     redirectCounts.set(runId, count + 1);
     if (redirectCounts.size > 1000) redirectCounts.delete(redirectCounts.keys().next().value!);
@@ -414,7 +428,12 @@ export function createReportBack(options: ReportBackOptions) {
 
       // The final message decides: a question for the chat, or the run's final report. Read it now,
       // since the run's next turn would make a later read return the wrong message.
-      const final = event.outcome.kind === "completed" || event.outcome.kind === "failed" ? await readFinal(event, run) : null;
+      const ended = event.outcome.kind === "completed" || event.outcome.kind === "failed";
+      const final = ended ? await readFinal(event, run, runSnapshot) : null;
+      if (ended && !final) {
+        log(`run ${runId} is closed; its turn is not read or reported`);
+        return "run-closed";
+      }
       const finalText = final?.text ?? "";
       const question = event.outcome.kind === "completed" ? parseQuestion(finalText) : null;
       if (question !== null) {

@@ -403,7 +403,8 @@ What is sent:
 - `auto` and any other source: a status-only notice with no page-derived text (title, outcome and
   run agent id only).
 - The report is the turn's final assistant message (from the event's timeline when present, else
-  the last 60 timeline items), cut to 4,000 characters on a line or word boundary with a note.
+  the last 60 timeline items), cut to 4,000 characters on a line or word boundary with a note. A run
+  that is closed or archived by then is not read, since that would load it again, and does not report.
 
 Delivery:
 
@@ -432,10 +433,10 @@ ordinary assistant text, not a message to the chat, and does not end the turn.
 - The card reads the markers without polling (`useAgent`, the card's status source, has no message
   text): one tail read of the run's timeline (`timeline.refetch`, last 40 items) when the card shows
   the run, also for finished runs so a waiting question can be told from a report (skipped for
-  stopped runs; redone if a dependency change cancels it); the live timeline stream
+  stopped and archived runs; redone if a dependency change cancels it); the live timeline stream
   (`timeline.subscribe`) only while the agent's own status is running or initializing; and one more
-  tail read when a live run settles, because its idle status can arrive before the stream's
-  `turn_completed`. An idle run that this card session did not just start is shown as done.
+  tail read when a live run settles (not when it closes), because its idle status can arrive before
+  the stream's `turn_completed`. An idle run that this card session did not just start is shown as done.
 - The pure `createRunTracker` (`shared/run-tracker.ts`) holds this state: the latest marker (a new
   message id starts a new line, so a marker is never glued to the previous message) and whether the
   latest turn's final message is a question still waiting for the chat. After `MAX_REDIRECTS`
@@ -473,7 +474,11 @@ Under the step progress the card shows one line for the run, `RunStatsRow`
   while the card shows the run) gives client now minus that timestamp, and the smallest of these is
   the estimate (`observeSkew`), subtracted from the client's now. The time never goes below 0.
 - Stopped runs get no tail read: reading a closed agent's timeline makes the daemon load it again,
-  so it would turn idle and the card would show it as done.
+  so it would turn idle and the card would show it as done. Each read first checks the app's status
+  and then a fresh `refresh()`, which loads nothing (`readRunTail`, `mayLoadRun`); both count because
+  the daemon does not store that an agent was closed during its session, while a run the app's cache
+  does not know yet has only the fresh status. A run that closes between the check and the read is
+  still loaded, and so is a run the daemon unloaded while idle (restart): its stored status is idle.
 - The icon spins (`LoaderCircle`, React Native `Animated`) only while the run is starting or
   running, not while it needs the owner, is done, failed or stopped. With reduced motion
   (`AccessibilityInfo.isReduceMotionEnabled`, prefers-reduced-motion on the web) it stays still.
