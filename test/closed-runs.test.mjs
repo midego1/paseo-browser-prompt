@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { createReportBack } from "../server/report-back.ts";
 import { mayLoadRun, QUESTION_MARKER, readRunTail } from "../shared/agent-prompt.ts";
-import { runLabels } from "../shared/report-back.ts";
+import { buildClosedRunNotice, runLabels } from "../shared/report-back.ts";
 
 const SOURCE = "agent-source";
 const RUN = "agent-run";
@@ -23,7 +23,7 @@ test("mayLoadRun: only a run the daemon knows that is neither closed nor archive
 });
 
 test("mayLoadRun: the app's closed status wins over a stored status that is out of date", () => {
-  // Closing an agent does not write its stored status, so a fresh read can still say idle or running.
+  // A stored status can be out of date, for example when the daemon failed to store the close.
   assert.equal(mayLoadRun({ status: "idle" }, "closed"), false);
   assert.equal(mayLoadRun({ status: "running" }, "closed"), false);
   assert.equal(mayLoadRun({ status: "idle" }, "idle"), true);
@@ -168,30 +168,83 @@ const reportOptions = (extra = {}) => ({
   ...extra,
 });
 
-test("report back: a closed or archived run's timeline is not read, nothing is sent, and it is not claimed", async () => {
-  for (const run of [{ status: "closed" }, { status: "idle", archivedAt: "2026-11-01T07:00:00.000Z" }]) {
-    for (const outcome of [{ kind: "completed" }, { kind: "failed", error: { message: "boom" } }]) {
+const CLOSED_TEXT = "It was closed or archived, so its report was not read.";
+const ARCHIVED = { status: "idle", archivedAt: "2026-11-01T07:00:00.000Z" };
+const FAILED = { kind: "failed", error: { message: "boom <b>" } };
+
+test("the closed-run notice: outcome and id only, the error only for a chat that may get a report", () => {
+  const input = { title: "Browser: <Example>", browserAgentId: RUN };
+  assert.equal(
+    buildClosedRunNotice({ ...input, outcome: { kind: "completed" }, withError: true }),
+    `[browser-prompt] Browser agent "Browser: &lt;Example&gt;" finished. Run agent id: ${RUN}. ${CLOSED_TEXT}`,
+  );
+  const failed = { kind: "failed", message: "boom <b>" };
+  assert.equal(
+    buildClosedRunNotice({ ...input, outcome: failed, withError: false }),
+    `[browser-prompt] Browser agent "Browser: &lt;Example&gt;" failed. Run agent id: ${RUN}. ${CLOSED_TEXT}`,
+  );
+  const withError = buildClosedRunNotice({ ...input, outcome: failed, withError: true });
+  assert.ok(withError.includes(`${CLOSED_TEXT}\n\nThe block below is the browser agent's error text.`));
+  assert.ok(withError.endsWith("<browser-agent-report>\nError: boom &lt;b&gt;\n</browser-agent-report>"));
+  assert.doesNotMatch(buildClosedRunNotice({ ...input, outcome: failed, withError: false }), /boom|mode that acts/);
+});
+
+test("report back: a closed or archived run is not read, the chat gets the notice, and the run is claimed", async () => {
+  for (const run of [{ status: "closed" }, ARCHIVED]) {
+    for (const outcome of [{ kind: "completed" }, FAILED]) {
       const w = reportWorld({ run });
       const reportBack = createReportBack(reportOptions());
-      assert.equal(await reportBack.onTurnEnded(ended({}, outcome), w.paseo), "run-closed");
+      assert.equal(await reportBack.onTurnEnded(ended({}, outcome), w.paseo), "sent-closed");
       assert.equal(w.calls.refetch, 0);
-      assert.deepEqual(w.sent, []);
+      assert.deepEqual(w.sent.map((m) => m.id), [SOURCE]);
+      assert.ok(w.sent[0].text.includes(CLOSED_TEXT));
+      assert.match(w.sent[0].text, outcome.kind === "failed" ? /" failed\. / : /" finished\. /);
 
-      // The owner loads the run again and a later turn ends: that one still reports.
+      // The owner loads the run again and a later turn ends: the run already reported.
       w.agents[RUN].status = "idle";
       w.agents[RUN].archivedAt = null;
-      assert.equal(await reportBack.onTurnEnded(ended({ turnId: "t2" }), w.paseo), "sent");
-      assert.equal(w.calls.refetch, 1);
+      assert.equal(await reportBack.onTurnEnded(ended({ turnId: "t2" }), w.paseo), "duplicate");
+      assert.equal(w.sent.length, 1);
     }
   }
 });
 
-test("report back: a closed run whose event carries the report still reports, since that reads nothing", async () => {
+test("report back: the notice goes only where a report would have gone", async () => {
+  const off = reportWorld({ run: { status: "closed" } });
+  assert.equal(await createReportBack(reportOptions({ mode: async () => "off" })).onTurnEnded(ended(), off.paseo), "disabled");
+  assert.deepEqual(off.sent, []);
+
+  const unrecorded = reportWorld({ run: { status: "closed" } });
+  assert.equal(await createReportBack(reportOptions({ recordedRun: async () => null })).onTurnEnded(ended(), unrecorded.paseo), "unrecorded");
+  assert.deepEqual(unrecorded.sent, []);
+
+  const gone = reportWorld({ run: { status: "closed" }, sourceAgent: { archivedAt: "2026-11-01T07:00:00.000Z" } });
+  assert.equal(await createReportBack(reportOptions()).onTurnEnded(ended(), gone.paseo), "source-missing");
+  assert.deepEqual(gone.sent, []);
+
+  const canceled = reportWorld({ run: { status: "closed" } });
+  assert.equal(await createReportBack(reportOptions()).onTurnEnded(ended({}, { kind: "canceled", reason: "x" }), canceled.paseo), "canceled");
+  assert.deepEqual(canceled.sent, []);
+});
+
+test("report back: a failed run's error reaches only a chat that may get a report", async () => {
+  const auto = { mode: async () => "auto" };
+  const askFirst = reportWorld({ run: { status: "closed" } });
+  assert.equal(await createReportBack(reportOptions(auto)).onTurnEnded(ended({}, FAILED), askFirst.paseo), "sent-closed");
+  assert.match(askFirst.sent[0].text, /Error: boom &lt;b&gt;/);
+
+  const bypass = reportWorld({ run: { status: "closed" }, sourceAgent: { currentModeId: "bypassPermissions" } });
+  assert.equal(await createReportBack(reportOptions(auto)).onTurnEnded(ended({}, FAILED), bypass.paseo), "sent-closed");
+  assert.ok(bypass.sent[0].text.endsWith(CLOSED_TEXT));
+  assert.doesNotMatch(bypass.sent[0].text, /boom/);
+});
+
+test("report back: an event that carries the report needs no read, so it reports as usual", async () => {
   const w = reportWorld({ run: { status: "closed" } });
   const timeline = [{ type: "assistant_message", text: "From the event." }];
   assert.equal(await createReportBack(reportOptions()).onTurnEnded(ended({ timeline }), w.paseo), "sent");
   assert.equal(w.calls.refetch, 0);
-  assert.deepEqual(w.sent.map((m) => m.id), [SOURCE]);
+  assert.match(w.sent[0].text, /From the event\./);
 });
 
 test("report back: an awake run is read and reported as before", async () => {
@@ -201,32 +254,43 @@ test("report back: an awake run is read and reported as before", async () => {
   assert.deepEqual(w.sent.map((m) => m.id), [SOURCE]);
 });
 
-test("question redirect: an awake run is told, a closed run is not sent anything", async () => {
+test("question redirect: an awake run is told; a run that closed after its turn was read gets nothing", async () => {
   const awake = reportWorld({ final: QUESTION });
   assert.equal(await createReportBack(reportOptions()).onTurnEnded(ended(), awake.paseo), "question-redirected");
   assert.deepEqual(awake.sent.map((m) => m.id), [RUN]);
 
-  const timeline = [{ type: "assistant_message", text: QUESTION }];
-  const closed = reportWorld({ run: { status: "closed" } });
-  assert.equal(await createReportBack(reportOptions()).onTurnEnded(ended({ timeline }), closed.paseo), "run-closed");
-  assert.deepEqual(closed.sent, []);
+  for (const closing of [{ status: "closed" }, ARCHIVED]) {
+    const w = reportWorld({ final: QUESTION });
+    const reportBack = createReportBack(reportOptions({
+      recordedRun: async () => {
+        Object.assign(w.agents[RUN], closing);
+        return { fallback: false };
+      },
+    }));
+    assert.equal(await reportBack.onTurnEnded(ended(), w.paseo), "not-forwarded-closed");
+    assert.deepEqual(w.sent, []);
+  }
+});
 
-  // The status cannot be read right before the send: no send either.
-  const unreadable = reportWorld({ final: QUESTION });
+test("question redirect: a failed status read is not taken for closed; the notice goes out and it is logged", async () => {
+  const w = reportWorld({ final: QUESTION });
+  const logs = [];
   const reportBack = createReportBack(reportOptions({
+    log: (message) => logs.push(message),
     recordedRun: async () => {
-      unreadable.agents[RUN].refreshError = true;
+      w.agents[RUN].refreshError = true;
       return { fallback: false };
     },
   }));
-  assert.equal(await reportBack.onTurnEnded(ended(), unreadable.paseo), "run-closed");
-  assert.deepEqual(unreadable.sent, []);
+  assert.equal(await reportBack.onTurnEnded(ended(), w.paseo), "question-redirected");
+  assert.deepEqual(w.sent.map((m) => m.id), [RUN]);
+  assert.ok(logs.some((line) => line.includes("could not read the status of run")));
 });
 
 test("question redirect: a run closed while its question waited for a busy chat is not woken", async () => {
   const w = reportWorld({ final: QUESTION, sourceAgent: { status: "running", activeTurn: { turnId: "s" } } });
   w.agents[SOURCE].onWait = () => (w.agents[RUN].status = "closed");
   const reportBack = createReportBack(reportOptions({ talk: async () => ({ maxQuestions: 5 }), busyWaitMs: 5 }));
-  assert.equal(await reportBack.onTurnEnded(ended(), w.paseo), "run-closed");
+  assert.equal(await reportBack.onTurnEnded(ended(), w.paseo), "not-forwarded-closed");
   assert.deepEqual(w.sent, []);
 });

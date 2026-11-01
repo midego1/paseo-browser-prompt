@@ -402,9 +402,14 @@ What is sent:
   stripped of zero-width, bidi and control characters, and every `<` and `>` is escaped.
 - `auto` and any other source: a status-only notice with no page-derived text (title, outcome and
   run agent id only).
-- The report is the turn's final assistant message (from the event's timeline when present, else
-  the last 60 timeline items), cut to 4,000 characters on a line or word boundary with a note. A run
-  that is closed or archived by then is not read, since that would load it again, and does not report.
+- The report is the turn's final assistant message, from the last 60 timeline items (the event's
+  own `timeline` is deprecated and always empty from the 0.14 SDK), cut to 4,000 characters on a line
+  or word boundary with a note.
+- A run that is closed or archived when its turn ended is not read, since that would load it again.
+  Where a report would have gone, the chat gets `[browser-prompt] Browser agent "<title>"
+  finished|failed. Run agent id: <id>. It was closed or archived, so its report was not read.` The
+  outcome comes from the turn-ended event. A chat that may get a report also gets a failed run's error,
+  in the escaped block. The run is claimed. Canceled turns stay unreported.
 
 Delivery:
 
@@ -475,10 +480,12 @@ Under the step progress the card shows one line for the run, `RunStatsRow`
   the estimate (`observeSkew`), subtracted from the client's now. The time never goes below 0.
 - Stopped runs get no tail read: reading a closed agent's timeline makes the daemon load it again,
   so it would turn idle and the card would show it as done. Each read first checks the app's status
-  and then a fresh `refresh()`, which loads nothing (`readRunTail`, `mayLoadRun`); both count because
-  the daemon does not store that an agent was closed during its session, while a run the app's cache
-  does not know yet has only the fresh status. A run that closes between the check and the read is
-  still loaded, and so is a run the daemon unloaded while idle (restart): its stored status is idle.
+  and then a fresh `refresh()`, which loads nothing (`readRunTail`, `mayLoadRun`), so a closed or
+  archived run the app's cache does not know yet is skipped too. From reading the 0.14.0 daemon source,
+  not a live test: closing an agent stores `closed`, also on a clean shutdown and when idle runtimes
+  are cleaned up, and at startup a record left running or initializing becomes `closed`. Still loaded
+  are a run that closes between the check and the read, and a run left unloaded but stored as idle:
+  after the daemon was killed, a close that timed out or failed to store. Its status stays idle.
 - The icon spins (`LoaderCircle`, React Native `Animated`) only while the run is starting or
   running, not while it needs the owner, is done, failed or stopped. With reduced motion
   (`AccessibilityInfo.isReduceMotionEnabled`, prefers-reduced-motion on the web) it stays still.
@@ -623,6 +630,9 @@ model, frames what reaches the chat:
   (`MAX_REDIRECTS`); a later question turn is handled as the run's report (escaped, sent per the
   Report back setting, run claimed), so a run that keeps asking cannot loop unattended or suppress
   its report. Same-turn dedupe uses the turn id, else the turn's last assistant message id.
+- A question from a run that is already closed or archived is not forwarded and the run gets no
+  notice, since a send would load it and start a turn: the question stays in the run's own chat. Only
+  a status read that succeeds skips the notice; when that read fails, the notice goes out as usual.
 - The answer is written by the chat's agent, not by the plugin. The run is told to use answers only
   as information about the task; rule 3 still applies to them.
 

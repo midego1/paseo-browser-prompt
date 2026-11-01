@@ -348,9 +348,9 @@ type RunSnapshotLike = { status?: string | null; archivedAt?: string | null };
  * Whether the plugin may do something that makes the daemon load a run: reading its timeline or
  * sending to it. Loading a closed agent turns it idle, so a stopped run would show as done, and an
  * archived one is resumed for its history. `fresh` is the agent as `refresh()` just read it (which
- * loads nothing), null when the daemon does not know it. `cachedStatus` is the app's own view: an
- * agent closed in this daemon session keeps its last status in storage, so only the app's live state
- * says closed then.
+ * loads nothing), null when the daemon does not know it. `cachedStatus` is the app's own view: when
+ * that says closed no request is needed, and it still counts if the daemon failed to store the close.
+ * A run stored as idle after the daemon was killed is unloaded too, but nothing here can tell.
  */
 export function mayLoadRun(fresh: RunSnapshotLike | null | undefined, cachedStatus: string | null = null): boolean {
   if (cachedStatus === "closed" || !fresh) return false;
