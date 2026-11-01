@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.0 (unreleased)
+
+- The server hooks (report back, questions, the mode guard) register through `addLifecycleHook`
+  (`server/hooks.ts`): `server.addHook` with the new names (`agent.turn.after`, `agent.turn.before`,
+  `agent.permission.before`) when the daemon has it, else the deprecated `server.on` names, which
+  Paseo removes after 2027-04-30. Daemons up to 0.14.0 have only `on`. Behaviour is
+  unchanged: the handlers return at once, report back runs in the background, and unloading the
+  plugin removes the hooks. The demo stand-in model does the same.
+- The `@getpaseo/plugin` devDependency is now 0.14.0. It only provides types for development; the
+  runtime floor stays Paseo 0.11.4 (`requirements.paseo` `>=0.11.4`), since every SDK export the
+  plugin uses at runtime exists in 0.11.4 and `addHook` is detected, not required.
+
 ## 0.11.0 (unreleased)
 
 - New setting **Close tabs after a successful run** (on by default, also for existing settings;
