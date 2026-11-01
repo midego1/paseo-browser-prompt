@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.1 (unreleased)
+
+- Repeated blocks are full cards again: a later copy of a block that is not done has all its
+  buttons and a note, "Also shown earlier in this chat", and shares the first's done mark and run.
+  A copy of a done block collapses to "✓ Already done · Show"; Show opens it in place, with Undo
+  done. The one-line "↑ Same step as above", the scroll to the first card and its toast are gone
+  (scrolling failed in long chats).
+- Copies share the newest run of their content in the chat (run records now carry the content key);
+  a copy can start a run only while that run is not going, so no duplicate runs.
+- The setting is now "Collapse repeated blocks that are done" (same stored value, on by default);
+  off shows every copy as a plain full card.
+
 ## 0.10.0 (unreleased)
 
 - Self-update needs explicit consent. Auto-update is off by default; the settings screen names the

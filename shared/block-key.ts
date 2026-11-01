@@ -1,4 +1,4 @@
-// The content key of a browser-prompt block, for "Merge repeated blocks" and done marks. Pure, and
+// The content key of a browser-prompt block, for repeated blocks, shared runs and done marks. Pure, and
 // imported by both the transformer (shared/browser-prompt.ts) and the chat index (shared/repeats.ts).
 /** Keys of this shape start with this prefix; older card ids (8 hex digits) never do. */
 export const KEY_PREFIX = "k1-";

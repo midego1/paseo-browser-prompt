@@ -170,16 +170,17 @@ listener is not started (never 0.0.0.0) and `trampoline.stash` returns
 on this host". `trampolinePort` defaults to 5299; EADDRINUSE reports `port-in-use`. Host or port
 changes restart the listener. The client only uses the URL the server returns.
 
-## Merge repeated blocks
+## Repeated blocks
 
-Agents often repeat a block they wrote earlier in the same chat. With **Merge repeated blocks** (on
-by default, in the first settings card) only the first is a full card; later ones show one line,
-"↑ Same step as above", or "✓ Already done" once the first is marked done. Off: every block gets its
-own card, as before 0.9.0.
+Agents often repeat a block they wrote earlier in the same chat, for example when asked for the
+steps again. Every copy is a full card with working buttons; a later copy says "Also shown earlier
+in this chat" and shares the first's done mark and run. Once the block is done, later copies
+collapse to "✓ Already done · Show", and Show opens the card right there (with Undo done). Nothing
+scrolls the chat: in a long chat the first card may not even be rendered.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Merge repeated blocks | on | A block with the same title and steps as an earlier one in the chat shows as one line pointing to the first card. |
+| Collapse repeated blocks that are done | on | Later copies of a block get the hint, and collapse once the block is done. Off: every copy is a plain full card. (Stored as `mergeRepeats`.) |
 
 - **Same block** (`blockKey` in `shared/repeats.ts`): title and steps NFKC-normalized, line endings
   unified, whitespace collapsed, blank lines dropped, and step numbers written as `N. ` (`1.Open`,
@@ -196,20 +197,21 @@ own card, as before 0.9.0.
   of the same message is marked by the transformer (`sameAs`) and shows as a repeat at once, also
   before the read and for providers without message ids; other blocks of providers that give no
   message id keep a full card. A failed whole-chat read is retried after 2, 8 and 30 seconds.
-- **Pressing a repeat**: the plugin API has no way to scroll the chat to another item. In the web
-  and desktop app the line scrolls to the first card through its DOM id (react-native-web `nativeID`)
-  when the list has rendered it, and the first card flashes; otherwise (phones, or a first card the
-  list has not rendered) a toast says "Scroll up to the first card".
+- **Views** (`repeatView`): the first block is a plain full card; a later copy of a block that is not
+  done is a full card with the hint; a later copy of a done block is one line until Show. 0.9.x
+  showed every later copy as one line pointing up ("↑ Same step as above") and scrolled to the first
+  card, which fails in long, virtualized chats; that is gone.
 - **Done marks** are per block in a chat: `<agentId>:<key>` in the `done` setting, so marking the
   first card done covers its repeats. Marks from before 0.9.0 were `<agentId>:<cardId>` (a hash of
   the raw text, which cannot be turned into the new key without the text); they still count, and a
   card that finds its old mark moves it to the new form. **Clear** in settings empties the list.
 - **Runs** stay keyed by the card's own id (`<agentId>:<cardId>`, which the server checks against
-  the run's card label). Identical blocks share that id, so the run record also names the block it
-  was started from (`item:<messageId>:<index>`, after the server's `most-recent` marker). Repeat
-  lines have no buttons, so they never start a run, and a run started from the first card keeps its
-  repeats merged; only a repeat whose record names that very block (started while merging was off)
-  keeps its full card. Records from before 0.9.1 belong to the first card.
+  the run's card label), and the record also carries `key:<content key>` (after the server's
+  `most-recent` marker). Every copy shows the newest run of its content in the chat
+  (`sharedRunRecord`: its own id, else the content marker), so all copies show the same status. A
+  later copy can start a run only while that shared run is not going (starting, running, needing you
+  or waiting for the chat); then its Run button is disabled and the shared status shows. The first
+  card keeps its usual Run again.
 - Item ids name their message (`card-<messageId>-<n>`; without a message id, a hash of the message
   text up to its first block). Before 0.9.0 every message used `card-0`, `card-1`…, and Paseo keeps
   plugin items by id within a chat, so two messages with blocks showed the later message's cards

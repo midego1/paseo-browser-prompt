@@ -11,7 +11,7 @@ When an assistant message contains a fenced code block whose info string is `bro
 
 A card appears only after the block's closing fence has streamed in. Blocks nested inside another code block are ignored. The README describes the block convention for agents.
 
-When an agent repeats a block it already wrote earlier in the same chat (the same title and steps, ignoring spacing, line endings and how the steps are numbered), only the first one is a full card. Later copies show one line, **↑ Same step as above**, or **✓ Already done** once the first is marked done; pressing it brings you to the first card (in the desktop and web app it scrolls there; on a phone it says to scroll up). Done marks belong to the steps, so marking the first card done covers every copy. Repeats have no buttons, so they never start a second agent. Turn off **Merge repeated blocks** to give every block its own card.
+When an agent repeats a block it already wrote earlier in the same chat (the same title and steps, ignoring spacing, line endings and how the steps are numbered), the copy is a full card with all its buttons and a note, "Also shown earlier in this chat". Copies share the done mark and the agent run: marking one done marks them all, and while a run of those steps is going, a copy shows its status instead of starting a second one. Once the steps are done, later copies collapse to **✓ Already done · Show**; Show opens the card in place. Turn off **Collapse repeated blocks that are done** to show every copy as a plain card.
 
 ## Setup
 
@@ -68,7 +68,7 @@ With auto-update on, the plugin checks the branch it was installed from when a c
 ## Settings
 
 - Start in ChatGPT on desktop (ChatGPT app, ChatGPT web, or copy only) and on iOS and Android (copy only or ChatGPT web).
-- ChatGPT app deep link template (default `codex://new?prompt={prompt}`), merge repeated blocks (on by default), and clearing done marks.
+- ChatGPT app deep link template (default `codex://new?prompt={prompt}`), collapse repeated blocks that are done (on by default), and clearing done marks.
 - Run with Paseo agent: confirm before starting, open the agent when started, show step progress, show live screenshot, thumbnails (all steps or latest only), report back to chat (Auto, Always, Off), talk to the chat, max questions to the chat per run, provider, model, permission mode, thinking level, and clearing card-to-agent links.
 - ChatGPT launcher: status, bind address (empty means the detected Tailscale address) and port (default 5299).
 - Updates (Git installs): the repository updates come from, enable auto-update or not now, installed and latest commit, last check, Check now, Update now, and an optional branch to follow.

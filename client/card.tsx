@@ -6,7 +6,15 @@ import { Platform, Pressable, Text, View } from "react-native";
 import { z } from "zod";
 import { agentTitle, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, resolveAgentConfig, usesClassifierMode } from "../shared/agent-prompt";
 import { MOST_RECENT_FALLBACK } from "../shared/report-back";
-import { blockFingerprint, migrateDoneMark, ownsRun, repeatView, runItemMarker, withinMessage } from "../shared/repeats";
+import {
+  blockFingerprint,
+  canStartRun,
+  migrateDoneMark,
+  repeatView,
+  runKeyMarker,
+  sharedRunRecord,
+  withinMessage,
+} from "../shared/repeats";
 import { MAX_DONE, MAX_RUNS, preferences } from "../shared/settings";
 import { stashPrompt } from "../shared/trampoline";
 import {
@@ -27,7 +35,7 @@ import { ScreenshotStrip } from "./screenshot-thumb";
 import { StepProgressRow, useStepProgress } from "./step-progress";
 import { countSteps } from "../shared/steps";
 import { useUpdateOnUse } from "./update";
-import { flashFirst, useFirstOf, useFlashTarget } from "./chat-index";
+import { useFirstOf } from "./chat-index";
 
 const DESKTOP_HINT = "Your Paseo desktop app must be open: the agent drives the browser tabs there.";
 
@@ -88,7 +96,9 @@ export function BrowserPromptCard({
   const mobileStartMode =
     settings.status === "ready" ? settings.values.mobileStartMode : DEFAULT_MODES.mobileStartMode;
 
-  const runRecord = settings.status === "ready" ? (settings.values.runs.find(([entry]) => entry === runKey) ?? null) : null;
+  // Copies of a block in this chat share its run: the newest one started from this card's id or for
+  // the same content.
+  const runRecord = settings.status === "ready" ? sharedRunRecord(settings.values.runs, agentId, runKey, key) : null;
   const storedRun = runRecord?.[1] ?? null;
   const runAgentId = localRun ?? storedRun;
   // Started in this card session: an idle snapshot before its first turn means "starting".
@@ -135,15 +145,14 @@ export function BrowserPromptCard({
     }
   }, [settings]);
 
-  // Merge repeated blocks: a later block with the same content as an earlier one in this chat shows
-  // as one line pointing up, unless it has a run of its own (recorded before merging existed).
-  const merge = settings.status === "ready" ? settings.values.mergeRepeats : true;
-  const first = withinMessage(useFirstOf(paseo, agentId, fingerprint, messageId, index, merge), merge ? sameAs : undefined, messageId);
-  // Identical blocks share a run key: only a run started from this very block keeps a repeat's card.
-  const ownRun = localRun !== null || ownsRun(runRecord, messageId, index);
-  const view = repeatView({ merge, first, done, ownRun });
-  const isFirst = first.state !== "repeat";
-  const flashing = useFlashTarget(doneMark, view === "full" && isFirst);
+  // A later copy of a block in this chat is a full card with a hint (its buttons share the first's
+  // done mark and run), and with "Collapse repeated blocks that are done" a done copy is one line
+  // until the owner taps Show. Which block is first comes from the chat's index (client/chat-index).
+  const collapse = settings.status === "ready" ? settings.values.mergeRepeats : true;
+  const first = withinMessage(useFirstOf(paseo, agentId, fingerprint, messageId, index, true), sameAs, messageId);
+  const isRepeat = first.state === "repeat";
+  const [expanded, setExpanded] = useState(false);
+  const view = repeatView({ collapse, first, done, expanded });
 
   // Moves a done mark from before 0.9.0 (the run key) to this block's content key.
   const savedRevision = settings.status === "ready" ? settings.revision : null;
@@ -169,8 +178,8 @@ export function BrowserPromptCard({
     const pad = layout.compact ? 10 : 14;
     return {
       card: {
-        borderColor: flashing ? theme.colors.accent : done ? theme.colors.statusSuccess : theme.colors.border,
-        borderWidth: flashing ? 2 : 1,
+        borderColor: done ? theme.colors.statusSuccess : theme.colors.border,
+        borderWidth: 1,
         backgroundColor: theme.colors.surface1,
         borderRadius: 10,
         padding: pad,
@@ -219,7 +228,7 @@ export function BrowserPromptCard({
       modalText: { color: theme.colors.foreground, fontSize: 14, lineHeight: 20 },
       modalActions: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 8, justifyContent: "flex-end" as const },
     };
-  }, [theme, layout.compact, done, flashing]);
+  }, [theme, layout.compact, done]);
 
   function report(result: ActionResult) {
     if (result.ok) toast.show(result.message, { variant: "success", durationMs: 3500 });
@@ -255,13 +264,12 @@ export function BrowserPromptCard({
    */
   async function rememberRun(startedAgentId: string, fallback: boolean) {
     setLocalRun(startedAgentId);
-    // Position 2 stays the fallback marker the server reads; the block's own marker comes after it.
-    const marker = runItemMarker(messageId, index);
+    // Position 2 stays the fallback marker the server reads; the content marker comes after it.
     const entry: [string, string, ...string[]] = [
       runKey,
       startedAgentId,
       ...(fallback ? [MOST_RECENT_FALLBACK] : []),
-      ...(marker ? [marker] : []),
+      runKeyMarker(key),
     ];
     for (let attempt = 0; attempt < 4; attempt++) {
       const current = latestSettings.current;
@@ -314,8 +322,11 @@ export function BrowserPromptCard({
     }
   }
 
+  // A copy of a block does not start a second run while the shared one is still going.
+  const runBlocked = !canStartRun({ repeat: isRepeat, runState: runAgentId ? shownState : null });
+
   function onRunPress() {
-    if (busy) return;
+    if (busy || runBlocked) return;
     updates.onUse();
     if (confirmLaunch) setConfirmOpen(true);
     else void launchAgent();
@@ -323,19 +334,12 @@ export function BrowserPromptCard({
 
   const runVisuals = shownState === "asking" ? { icon: "CircleAlert", color: theme.colors.statusWarning } : runVisual(runState, theme);
 
-  /** A repeat: show the first card. Paseo has no plugin API to scroll the chat to another item. */
-  function showFirst() {
-    const scrolled = scrollToFirst(anchorId(agentId, key));
-    flashFirst(doneMark);
-    if (!scrolled) toast.show("Scroll up to the first card", { durationMs: 3000 });
-  }
-
-  if (view !== "full") {
-    return <RepeatLine done={view === "done"} title={displayTitle} theme={theme} onPress={showFirst} />;
+  if (view === "collapsed") {
+    return <CollapsedDone title={displayTitle} theme={theme} onShow={() => setExpanded(true)} />;
   }
 
   return (
-    <View style={styles.card} nativeID={isFirst ? anchorId(agentId, key) : undefined}>
+    <View style={styles.card}>
       <View style={styles.header}>
         <Icon name={done ? "CircleCheck" : "Globe"} size={16} color={done ? theme.colors.statusSuccess : theme.colors.foregroundMuted} />
         <Text style={styles.title} selectable numberOfLines={2}>
@@ -343,6 +347,19 @@ export function BrowserPromptCard({
         </Text>
         <Text style={styles.label}>{done ? "Done" : "Browser prompt"}</Text>
       </View>
+      {view === "repeat" ? (
+        <View style={styles.runRow}>
+          <Text style={styles.hint}>Also shown earlier in this chat</Text>
+          {expanded && done ? (
+            <>
+              <Text style={styles.hint}>·</Text>
+              <Pressable accessibilityRole="button" accessibilityLabel={`Collapse ${displayTitle}`} onPress={() => setExpanded(false)}>
+                <Text style={styles.link}>Hide</Text>
+              </Pressable>
+            </>
+          ) : null}
+        </View>
+      ) : null}
       <View style={styles.promptBox}>
         <Text selectable style={styles.prompt}>
           {text}
@@ -382,9 +399,11 @@ export function BrowserPromptCard({
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={`Run ${displayTitle} with a Paseo agent`}
-          disabled={busy}
+          accessibilityHint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
+          accessibilityState={{ disabled: busy || runBlocked }}
+          disabled={busy || runBlocked}
           onPress={onRunPress}
-          style={styles.secondary}
+          style={[styles.secondary, runBlocked ? { opacity: 0.5 } : null]}
         >
           <Icon name="Bot" size={14} color={theme.colors.foreground} />
           <Text style={styles.secondaryText}>{runAgentId ? "Run again with Paseo agent" : "Run with Paseo agent"}</Text>
@@ -495,43 +514,10 @@ export function BrowserPromptCard({
   );
 }
 
-/** The DOM id of a block's first card (react-native-web turns `nativeID` into `id`). */
-function anchorId(agentId: string, key: string): string {
-  return `browser-prompt-first-${agentId}-${key}`.replace(/[^A-Za-z0-9_-]/g, "_");
-}
-
-/**
- * Scrolls the chat to a block's first card where that is possible: in the web and desktop app, when
- * the card is rendered. False on phones (no DOM) and when the list has not rendered the card.
- */
-function scrollToFirst(id: string): boolean {
-  const doc = (globalThis as { document?: { getElementById(id: string): { scrollIntoView(options?: object): void } | null } })
-    .document;
-  if (Platform.OS !== "web" || !doc) return false;
-  const element = doc.getElementById(id);
-  if (!element) return false;
-  element.scrollIntoView({ behavior: "smooth", block: "center" });
-  return true;
-}
-
-/** A repeated block: one line that points to the first card ("Already done" when that one is done). */
-function RepeatLine({
-  done,
-  title,
-  theme,
-  onPress,
-}: {
-  done: boolean;
-  title: string;
-  theme: PluginTimelineItemProps["theme"];
-  onPress: () => void;
-}) {
+/** A later copy of a block that is done: one line, and Show expands the full card right here. */
+function CollapsedDone({ title, theme, onShow }: { title: string; theme: PluginTimelineItemProps["theme"]; onShow: () => void }) {
   return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={done ? `Already done: ${title}` : `Same step as above: ${title}`}
-      accessibilityHint="Shows the first card with these steps"
-      onPress={onPress}
+    <View
       style={{
         flexDirection: "row",
         alignItems: "center",
@@ -542,16 +528,17 @@ function RepeatLine({
         paddingHorizontal: 10,
         borderRadius: 8,
         borderWidth: 1,
-        borderColor: done ? theme.colors.statusSuccess : theme.colors.border,
+        borderColor: theme.colors.statusSuccess,
         backgroundColor: theme.colors.surface1,
       }}
     >
-      <Text style={{ color: done ? theme.colors.statusSuccess : theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>
-        {done ? "✓ Already done" : "↑ Same step as above"}
-      </Text>
+      <Text style={{ color: theme.colors.statusSuccess, fontSize: 13, fontWeight: "600" }}>✓ Already done</Text>
       <Text numberOfLines={1} style={{ flexShrink: 1, color: theme.colors.foregroundMuted, fontSize: 13 }}>
-        · {title}
+        · {title} ·
       </Text>
-    </Pressable>
+      <Pressable accessibilityRole="button" accessibilityLabel={`Show ${title}`} accessibilityHint="Shows the card here" onPress={onShow}>
+        <Text style={{ color: theme.colors.accent, fontSize: 13, fontWeight: "600" }}>Show</Text>
+      </Pressable>
+    </View>
   );
 }

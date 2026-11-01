@@ -9,8 +9,9 @@ import {
   blockKey,
   createChatIndex,
   markRepeatsInMessage,
-  ownsRun,
-  runItemMarker,
+  canStartRun,
+  runKeyMarker,
+  sharedRunRecord,
   sameBlock,
   withinMessage,
   KEY_PREFIX,
@@ -79,13 +80,13 @@ test("a card whose message is not known yet (new, streaming, or no message id) i
   assert.equal(index.addMessage("msg-new", 8, [{ fingerprint: fp, index: 0 }]), true);
   assert.equal(index.addMessage("msg-new", 8, [{ fingerprint: fp, index: 0 }]), false, "a second read adds nothing");
   assert.deepEqual(index.firstOf(fp, "msg-new", 0), { state: "repeat", first: { messageId: "msg-a", index: 0 } });
-  assert.equal(repeatView({ merge: true, first: { state: "unknown" }, done: true, ownRun: false }), "full");
+  assert.equal(repeatView({ collapse: true, first: { state: "unknown" }, done: true, expanded: false }), "full");
 });
 
 test("cards are placed by message id: Paseo gives every card of a chat the same timestamp", () => {
   const card = read("client/card.tsx");
   assert.doesNotMatch(card.slice(card.indexOf("const first = ")), /timestamp\.getTime\(\), index \}/);
-  assert.match(card, /useFirstOf\(paseo, agentId, fingerprint, messageId, index, merge\)/);
+  assert.match(card, /useFirstOf\(paseo, agentId, fingerprint, messageId, index, true\)/, "always placed: the run guard needs it even with collapsing off");
   assert.match(read("index.client.tsx"), /explodeMessage\(item\.text, phase, messageId\)/);
   const [, card1] = explodeMessage("```browser-prompt T\n1. x\n```", "complete", "msg-1");
   assert.equal(card1.data.messageId, "msg-1");
@@ -107,13 +108,15 @@ test("messages in a timeline page: assistant messages with an id, their closed b
   assert.deepEqual(found[0].blocks.map((block) => block.index), cards.map((c) => c.data.index), "same positions as the cards");
 });
 
-test("full card, repeat line or Already done", () => {
+test("a later copy is a full card with a hint; a done copy collapses until Show; setting off: plain full cards", () => {
   const first = { state: "repeat", first: { messageId: "m", index: 0 } };
-  assert.equal(repeatView({ merge: true, first: { state: "first" }, done: false, ownRun: false }), "full", "the first");
-  assert.equal(repeatView({ merge: true, first, done: false, ownRun: false }), "repeat");
-  assert.equal(repeatView({ merge: true, first, done: true, ownRun: false }), "done");
-  assert.equal(repeatView({ merge: false, first, done: true, ownRun: false }), "full", "setting off: every block is a card");
-  assert.equal(repeatView({ merge: true, first, done: false, ownRun: true }), "full", "a repeat with its own run keeps its card");
+  const view = (over) => repeatView({ collapse: true, first, done: false, expanded: false, ...over });
+  assert.equal(view({ first: { state: "first" } }), "full", "the first block");
+  assert.equal(view({}), "repeat", "not done: a full card with “Also shown earlier in this chat”");
+  assert.equal(view({ done: true }), "collapsed", "done: “✓ Already done · Show”");
+  assert.equal(view({ done: true, expanded: true }), "repeat", "Show expands it inline, with Undo done");
+  assert.equal(view({ collapse: false }), "full", "setting off: no hint");
+  assert.equal(view({ collapse: false, done: true }), "full", "setting off: done copies stay full");
 });
 
 test("done marks per key: an old mark moves to the content key; Clear still empties the list", () => {
@@ -140,30 +143,43 @@ test("settings v12: Merge repeated blocks defaults on; the migration keeps done 
   assert.equal("mergeRepeats" in migratePreferences(v11, 11), false, "the schema default applies");
 });
 
-test("repeats never start runs, and runs stay keyed by the card's own id", () => {
-  const card = read("client/card.tsx");
-  const line = card.slice(card.indexOf("function RepeatLine("));
-  assert.doesNotMatch(line, /launchAgent|onRunPress|startBrowserAgent|Run with Paseo agent/, "no Run on the repeat line");
-  assert.match(card, /if \(view !== "full"\) \{\n\s+return <RepeatLine/);
-  assert.match(card, /const runKey = `\$\{agentId\}:\$\{cardId\}`;/);
-  assert.match(card, /runKey,\n\s+startedAgentId,\n\s+\.\.\.\(fallback \? \[MOST_RECENT_FALLBACK\] : \[\]\),\n\s+\.\.\.\(marker \? \[marker\] : \[\]\),/);
-  assert.match(card, /runs\.find\(\(\[entry\]\) => entry === runKey\)/);
+test("copies share the run: by the card's own id or by the content marker, newest first", () => {
+  const key = blockKey("Check", steps);
+  const runs = [
+    ["agent:aaaaaaaa", "run-old"],
+    ["other:bbbbbbbb", "run-elsewhere", runKeyMarker(key)],
+    ["agent:cccccccc", "run-copy", "most-recent", runKeyMarker(key)],
+    ["agent:dddddddd", "run-unrelated", runKeyMarker(blockKey("Other", steps))],
+  ];
+  assert.equal(sharedRunRecord(runs, "agent", "agent:aaaaaaaa", key)[1], "run-copy", "the newest record for this content");
+  assert.equal(sharedRunRecord(runs.slice(0, 2), "agent", "agent:aaaaaaaa", key)[1], "run-old", "its own id (records from before 0.10.1)");
+  assert.equal(sharedRunRecord(runs.slice(1, 2), "agent", "agent:aaaaaaaa", key), null, "another chat's run is not shared");
+  assert.equal(sharedRunRecord([], "agent", "agent:aaaaaaaa", key), null);
 });
 
-test("a run started from the first card is not a repeat's own run: repeats stay merged", () => {
-  // Identical blocks share a card id and so a run key; the record names the block it was started from.
-  const firstsRun = ["agent:0badf00d", "run-1", runItemMarker("msg-a", 0)];
-  assert.equal(ownsRun(firstsRun, "msg-a", 0), true);
-  assert.equal(ownsRun(firstsRun, "msg-b", 0), false, "the repeat does not own the first card's run");
-  assert.equal(ownsRun(["agent:0badf00d", "run-1", "most-recent", runItemMarker("msg-b", 1)], "msg-b", 1), true, "after the fallback marker");
-  assert.equal(ownsRun(["agent:0badf00d", "run-1"], "msg-b", 0), false, "a record from before 0.9.1 belongs to the first card");
-  assert.equal(ownsRun(["agent:0badf00d", "run-1", "item:msg-b:0"], undefined, 0), false, "no message id: never owned");
-  assert.equal(ownsRun(null, "msg-b", 0), false);
-  const repeat = { state: "repeat", first: { messageId: "msg-a", index: 0 } };
-  assert.equal(repeatView({ merge: true, first: repeat, done: false, ownRun: ownsRun(firstsRun, "msg-b", 0) }), "repeat");
+test("a repeat starts its own run only while the shared run is not going; the first card is unchanged", () => {
+  for (const state of ["starting", "running", "needs-input", "asking"]) {
+    assert.equal(canStartRun({ repeat: true, runState: state }), false, state);
+    assert.equal(canStartRun({ repeat: false, runState: state }), true, `the first card: ${state}`);
+  }
+  for (const state of [null, "done", "failed", "stopped", "unknown"]) assert.equal(canStartRun({ repeat: true, runState: state }), true, String(state));
   const card = read("client/card.tsx");
-  assert.match(card, /const ownRun = localRun !== null \|\| ownsRun\(runRecord, messageId, index\);/);
-  assert.doesNotMatch(card, /ownRun: runAgentId !== null/);
+  assert.match(card, /const runBlocked = !canStartRun\(\{ repeat: isRepeat, runState: runAgentId \? shownState : null \}\);/);
+  assert.match(card, /if \(busy \|\| runBlocked\) return;/);
+  assert.match(card, /disabled=\{busy \|\| runBlocked\}/);
+  assert.match(card, /const runKey = `\$\{agentId\}:\$\{cardId\}`;/, "runs stay keyed by the card's own id (the server checks it)");
+  assert.match(card, /runKey,\n\s+startedAgentId,\n\s+\.\.\.\(fallback \? \[MOST_RECENT_FALLBACK\] : \[\]\),\n\s+runKeyMarker\(key\),/);
+});
+
+test("no scrolling to the first card, no toast; a collapsed copy expands in place", () => {
+  const card = read("client/card.tsx");
+  assert.doesNotMatch(card, /scrollIntoView|scrollToFirst|nativeID|Scroll up to the first card|Same step as above|flashFirst/);
+  assert.match(card, /Also shown earlier in this chat/);
+  assert.match(card, /✓ Already done/);
+  assert.match(card, /onShow=\{\(\) => setExpanded\(true\)\}/);
+  assert.match(card, /setExpanded\(false\)\}>\n\s+<Text style=\{styles\.link\}>Hide<\/Text>/);
+  assert.doesNotMatch(read("client/chat-index.ts"), /flash/i);
+  assert.match(read("client/settings-screen.tsx"), /label="Collapse repeated blocks that are done"/);
 });
 
 test("the run record keeps the server's fallback marker at position 2", () => {
@@ -200,10 +216,9 @@ test("repeats within one message show as repeats before the chat's index is read
   assert.match(read("client/card.tsx"), /withinMessage\(useFirstOf\(/);
 });
 
-test("a failed whole-chat read is retried with backoff; empty flash-listener sets are removed", () => {
+test("a failed whole-chat read is retried with backoff", () => {
   const index = read("client/chat-index.ts");
   assert.match(index, /READ_RETRY_DELAYS_MS = \[2000, 8000, 30000\]/);
   assert.match(index, /if \(result\.error\) throw new Error\(result\.error\);/);
   assert.match(index, /const delay = READ_RETRY_DELAYS_MS\[attempt\];\n\s+if \(delay === undefined\) return;/);
-  assert.match(index, /if \(set\.size === 0 && flashListeners\.get\(chatKey\) === set\) flashListeners\.delete\(chatKey\);/);
 });

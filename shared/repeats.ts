@@ -1,4 +1,4 @@
-// Pure logic behind "Merge repeated blocks": a content key per browser-prompt block, and which
+// Pure logic behind repeated blocks: a content key per browser-prompt block, and which
 // block of a chat comes first for a key. Imports only pure shared modules so tests can load it with
 // `node --experimental-strip-types`.
 import { blockFingerprint, sameBlock, type BlockFingerprint } from "./block-key.ts";
@@ -112,30 +112,48 @@ export function withinMessage(first: FirstResult, sameAs: number | undefined, me
   return { state: "repeat", first: { messageId: messageId ?? "", index: sameAs } };
 }
 
-/** The marker a run record carries for the block it was started from. */
-export function runItemMarker(messageId: string | undefined, index: number): string | null {
-  return messageId ? `item:${messageId}:${index}` : null;
+/** The marker a run record carries for the content it was started for (see `sharedRunRecord`). */
+export function runKeyMarker(key: string): string {
+  return `key:${key}`;
 }
 
 /**
- * Whether a recorded run (`[runKey, agentId, ...extras]`) was started from this very block. Identical
- * blocks share a run key, so a run started from the first card is not a repeat's own. A record
- * without a marker (from before 0.9.1) belongs to the first card.
+ * The run a card shows: the newest record of this chat that was started from this card's own id
+ * (identical text) or for the same content (the `key:` marker, also from a repeat whose text differs
+ * only in spacing). Records are kept oldest first.
  */
-export function ownsRun(record: readonly string[] | null | undefined, messageId: string | undefined, index: number): boolean {
-  const marker = runItemMarker(messageId, index);
-  return !!record && !!marker && record.slice(2).includes(marker);
+export function sharedRunRecord<Entry extends readonly string[]>(
+  runs: readonly Entry[],
+  agentId: string,
+  runKey: string,
+  key: string,
+): Entry | null {
+  const marker = runKeyMarker(key);
+  for (let i = runs.length - 1; i >= 0; i--) {
+    const entry = runs[i]!;
+    if (entry[0] === runKey) return entry;
+    if (entry[0]?.startsWith(`${agentId}:`) && entry.slice(2).includes(marker)) return entry;
+  }
+  return null;
+}
+
+/** Run states during which a run is still going (a repeat does not start a second one then). */
+const ACTIVE_RUN_STATES = new Set(["starting", "running", "needs-input", "asking"]);
+
+/** A repeat may start a run only while the shared run (if any) is not going. */
+export function canStartRun(input: { repeat: boolean; runState: string | null }): boolean {
+  return !input.repeat || input.runState === null || !ACTIVE_RUN_STATES.has(input.runState);
 }
 
 /**
- * How a card shows: "repeat" for a later block with the same content as an earlier one, "done" for
- * such a block whose first is marked done, and "full" otherwise: the first block, merging off, a
- * repeat with a run started from that very block (`ownsRun`), or a card whose message is not known
- * yet.
+ * How a card shows. "full": the first block, or "Collapse repeated blocks that are done" off.
+ * "repeat": a later copy of a block that is not done, as a full card with a hint that it was shown
+ * earlier. "collapsed": a later copy of a done block, one line until the owner taps Show
+ * (`expanded`), then a full card again.
  */
-export function repeatView(input: { merge: boolean; first: FirstResult; done: boolean; ownRun: boolean }): "full" | "repeat" | "done" {
-  if (!input.merge || input.first.state !== "repeat" || input.ownRun) return "full";
-  return input.done ? "done" : "repeat";
+export function repeatView(input: { collapse: boolean; first: FirstResult; done: boolean; expanded: boolean }): "full" | "repeat" | "collapsed" {
+  if (!input.collapse || input.first.state !== "repeat") return "full";
+  return input.done && !input.expanded ? "collapsed" : "repeat";
 }
 
 /**

@@ -1,6 +1,6 @@
-// Which browser-prompt blocks a chat contains, for "Merge repeated blocks". Timeline renderers get
-// only their own item (no position, and a timestamp Paseo gives every card of a chat alike), and the
-// plugin API has no way to scroll to another item. So each card carries its message's id (added by
+// Which browser-prompt blocks a chat contains, so a later copy of a block knows it was shown earlier.
+// Timeline renderers get only their own item (no position, and a timestamp Paseo gives every card of
+// a chat alike). So each card carries its message's id (added by
 // the transformer), and each chat gets one index in memory, filled by reading the chat's timeline:
 // - once per app session, page by page from the newest, for the whole chat (up to a cap),
 // - again from the tail when a card's message is not in the index yet (a new message), throttled.
@@ -137,38 +137,4 @@ export function useFirstOf(
     if (enabled && messageId && !known && state.fullRead) readTail(paseo, agentId, state);
   }, [enabled, messageId, known, state.version, paseo, agentId, state]);
   return enabled ? state.index.firstOf(fingerprint, messageId, index) : { state: "first" };
-}
-
-/** Cards that show a block first, listening for "show me" from their repeats. */
-const flashListeners = new Map<string, Set<() => void>>();
-
-/** Lets the first card of `chatKey` (`<agentId>:<key>`) flash when a repeat is pressed. */
-export function useFlashTarget(chatKey: string, active: boolean): boolean {
-  const [flashing, setFlashing] = useState(false);
-  useEffect(() => {
-    if (!active) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const listener = () => {
-      setFlashing(true);
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => setFlashing(false), 1600);
-    };
-    const set = flashListeners.get(chatKey) ?? new Set();
-    set.add(listener);
-    flashListeners.set(chatKey, set);
-    return () => {
-      set.delete(listener);
-      if (set.size === 0 && flashListeners.get(chatKey) === set) flashListeners.delete(chatKey);
-      if (timer) clearTimeout(timer);
-    };
-  }, [chatKey, active]);
-  return flashing;
-}
-
-/** Flashes the first card; false when it is not rendered right now (scrolled out of the list). */
-export function flashFirst(chatKey: string): boolean {
-  const set = flashListeners.get(chatKey);
-  if (!set || set.size === 0) return false;
-  for (const listener of set) listener();
-  return true;
 }
