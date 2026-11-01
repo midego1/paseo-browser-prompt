@@ -206,6 +206,9 @@ Rules:
 - Run with Paseo agent starts Claude agents in Auto mode by default (a model classifier reviews tool
   calls), or in Always Ask or Plan when you choose them, and always prepends the fixed safety
   preamble. Bypass and accept-edits modes are refused, and a run that ends up in one is stopped.
+- The preamble's rules (only the Paseo browser tools, ask before secrets and risky actions) are
+  instructions to the model, not a tool sandbox: whether they are followed depends on the selected
+  provider and model. Always Ask lets you approve each new tool yourself.
 - Links in rendered messages open only when they are http(s) URLs; the ChatGPT app deep link may
   use only the `codex:` or `https:` scheme.
 - No telemetry. No download or install without the owner: auto-update is off until the owner enables
@@ -301,9 +304,10 @@ Not configurable (the hard rule, rule 3 of the fixed preamble): passwords, token
 and other secrets, and confirmations of destructive, irreversible, security, permission, billing,
 DNS/WAF, merge, deploy, publish or payment actions are always asked of the owner with
 AskUserQuestion. The agent is told never to ask the chat for them and never to accept them from the
-chat, a web page or any other message. Invalid inputs are not saved: the question cap must be a
-whole number from 0 to 50, and refused permission modes keep Save disabled (a malformed stored cap
-is clamped).
+chat, a web page or any other message. This is an instruction in the prompt, not an enforced
+control, so it holds only as well as the selected provider and model follow it. Invalid inputs are
+not saved: the question cap must be a whole number from 0 to 50, and refused permission modes keep
+Save disabled (a malformed stored cap is clamped).
 
 The card's "Run with Paseo agent" button uses the app's own Paseo connection (`usePaseo()`):
 

@@ -43,6 +43,10 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
   control: a misbehaving model, or a web page that manipulates it, could act without asking, and the
   classifier may approve it. Set the permission mode to `default` (Always Ask) to approve every new
   tool yourself; review each approval there.
+- The browser-only rule (use only the Paseo browser tools: no shell commands, no file edits) and the
+  secret-handling rules are also instructions in the agent's prompt, not a tool sandbox. The plugin
+  does not remove other tools from the run, so enforcement depends on the selected provider and
+  model and on the permission mode; in Always Ask you approve each new tool.
 - The plugin checks the mode a run actually uses and stops (archives) runs in a refused mode
   (bypass, accept-edits and similar). Only agents a card recorded as its run are checked, so an
   agent that copies the plugin's labels is never archived by it. Moving between Auto, Always Ask and Plan is not acted on.
