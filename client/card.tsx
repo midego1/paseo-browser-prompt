@@ -6,6 +6,7 @@ import { Platform, Pressable, Text, View } from "react-native";
 import { z } from "zod";
 import { agentTitle, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, resolveAgentConfig, usesClassifierMode } from "../shared/agent-prompt";
 import { MOST_RECENT_FALLBACK } from "../shared/report-back";
+import { blockKey, migrateDoneMark, repeatView } from "../shared/repeats";
 import { MAX_DONE, MAX_RUNS, preferences } from "../shared/settings";
 import { stashPrompt } from "../shared/trampoline";
 import {
@@ -26,6 +27,7 @@ import { ScreenshotStrip } from "./screenshot-thumb";
 import { StepProgressRow, useStepProgress } from "./step-progress";
 import { countSteps } from "../shared/steps";
 import { useUpdateOnUse } from "./update";
+import { flashFirst, useFirstOf, useFlashTarget } from "./chat-index";
 
 const DESKTOP_HINT = "Your Paseo desktop app must be open: the agent drives the browser tabs there.";
 
@@ -35,6 +37,7 @@ export const cardSchema = z.object({
   index: z.number().int().nonnegative(),
   title: z.string(),
   text: z.string(),
+  messageId: z.string().optional(),
 });
 
 export const markdownSchema = z.object({
@@ -55,8 +58,13 @@ export function BrowserPromptCard({
   theme,
   layout,
 }: PluginTimelineItemProps<z.output<typeof cardSchema>>) {
-  const { cardId, title, text, index } = item.data;
-  const doneKey = `${agentId}:${cardId}`;
+  const { cardId, title, text, index, messageId } = item.data;
+  // Runs stay keyed by this card's own id: the server checks a run's card label against this entry.
+  const runKey = `${agentId}:${cardId}`;
+  // Done marks are per content key in this chat, so every repeat of a block shares its first's mark.
+  // Before 0.9.0 a mark was the run key; a card that finds its old mark moves it (see below).
+  const key = useMemo(() => blockKey(title, text), [title, text]);
+  const doneMark = `${agentId}:${key}`;
   const settings = useSettings(preferences);
   const latestSettings = useRef(settings);
   latestSettings.current = settings;
@@ -70,7 +78,8 @@ export function BrowserPromptCard({
   const sourceWorkspaceId = useAgent(agentId, (agent) => agent.workspaceId);
   const updates = useUpdateOnUse();
 
-  const persistedDone = settings.status === "ready" ? settings.values.done.includes(doneKey) : false;
+  const persistedDone =
+    settings.status === "ready" ? settings.values.done.includes(doneMark) || settings.values.done.includes(runKey) : false;
   const done = localDone ?? persistedDone;
   const stash = useRpc(stashPrompt);
   const startMode = settings.status === "ready" ? settings.values.startMode : DEFAULT_MODES.startMode;
@@ -78,7 +87,7 @@ export function BrowserPromptCard({
     settings.status === "ready" ? settings.values.mobileStartMode : DEFAULT_MODES.mobileStartMode;
 
   const storedRun =
-    settings.status === "ready" ? (settings.values.runs.find(([key]) => key === doneKey)?.[1] ?? null) : null;
+    settings.status === "ready" ? (settings.values.runs.find(([entry]) => entry === runKey)?.[1] ?? null) : null;
   const runAgentId = localRun ?? storedRun;
   // Started in this card session: an idle snapshot before its first turn means "starting".
   const {
@@ -124,6 +133,22 @@ export function BrowserPromptCard({
     }
   }, [settings]);
 
+  // Merge repeated blocks: a later block with the same content as an earlier one in this chat shows
+  // as one line pointing up, unless it has a run of its own (recorded before merging existed).
+  const merge = settings.status === "ready" ? settings.values.mergeRepeats : true;
+  const first = useFirstOf(paseo, agentId, key, messageId, index, merge);
+  const view = repeatView({ merge, first, done, ownRun: runAgentId !== null });
+  const isFirst = first.state === "first";
+  const flashing = useFlashTarget(doneMark, view === "full" && isFirst);
+
+  // Moves a done mark from before 0.9.0 (the run key) to this block's content key.
+  const savedRevision = settings.status === "ready" ? settings.revision : null;
+  useEffect(() => {
+    if (settings.status !== "ready") return;
+    const next = migrateDoneMark(settings.values.done, runKey, doneMark);
+    if (next) void settings.save({ ...settings.values, done: next.slice(-MAX_DONE) }, settings.revision);
+  }, [savedRevision, runKey, doneMark]);
+
   useEffect(() => {
     updates.onFirstRender();
   }, [updates.onFirstRender]);
@@ -140,8 +165,8 @@ export function BrowserPromptCard({
     const pad = layout.compact ? 10 : 14;
     return {
       card: {
-        borderWidth: 1,
-        borderColor: done ? theme.colors.statusSuccess : theme.colors.border,
+        borderColor: flashing ? theme.colors.accent : done ? theme.colors.statusSuccess : theme.colors.border,
+        borderWidth: flashing ? 2 : 1,
         backgroundColor: theme.colors.surface1,
         borderRadius: 10,
         padding: pad,
@@ -190,7 +215,7 @@ export function BrowserPromptCard({
       modalText: { color: theme.colors.foreground, fontSize: 14, lineHeight: 20 },
       modalActions: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 8, justifyContent: "flex-end" as const },
     };
-  }, [theme, layout.compact, done]);
+  }, [theme, layout.compact, done, flashing]);
 
   function report(result: ActionResult) {
     if (result.ok) toast.show(result.message, { variant: "success", durationMs: 3500 });
@@ -212,8 +237,8 @@ export function BrowserPromptCard({
     const next = !done;
     setLocalDone(next);
     if (settings.status !== "ready") return; // stays in memory for this session
-    const without = settings.values.done.filter((key) => key !== doneKey);
-    const list = next ? [...without, doneKey].slice(-MAX_DONE) : without;
+    const without = settings.values.done.filter((mark) => mark !== doneMark && mark !== runKey);
+    const list = next ? [...without, doneMark].slice(-MAX_DONE) : without;
     const saved = await settings.save({ ...settings.values, done: list }, settings.revision);
     if (saved) setLocalDone(null);
   }
@@ -227,12 +252,12 @@ export function BrowserPromptCard({
   async function rememberRun(startedAgentId: string, fallback: boolean) {
     setLocalRun(startedAgentId);
     const entry: [string, string, ...string[]] = fallback
-      ? [doneKey, startedAgentId, MOST_RECENT_FALLBACK]
-      : [doneKey, startedAgentId];
+      ? [runKey, startedAgentId, MOST_RECENT_FALLBACK]
+      : [runKey, startedAgentId];
     for (let attempt = 0; attempt < 4; attempt++) {
       const current = latestSettings.current;
       if (current.status === "ready") {
-        const without = current.values.runs.filter(([key]) => key !== doneKey);
+        const without = current.values.runs.filter(([entry]) => entry !== runKey);
         const runs = [...without, entry].slice(-MAX_RUNS);
         if (await current.save({ ...current.values, runs }, current.revision)) return;
       }
@@ -289,8 +314,19 @@ export function BrowserPromptCard({
 
   const runVisuals = shownState === "asking" ? { icon: "CircleAlert", color: theme.colors.statusWarning } : runVisual(runState, theme);
 
+  /** A repeat: show the first card. Paseo has no plugin API to scroll the chat to another item. */
+  function showFirst() {
+    const scrolled = scrollToFirst(anchorId(agentId, key));
+    flashFirst(doneMark);
+    if (!scrolled) toast.show("Scroll up to the first card", { durationMs: 3000 });
+  }
+
+  if (view !== "full") {
+    return <RepeatLine done={view === "done"} title={displayTitle} theme={theme} onPress={showFirst} />;
+  }
+
   return (
-    <View style={styles.card}>
+    <View style={styles.card} nativeID={isFirst ? anchorId(agentId, key) : undefined}>
       <View style={styles.header}>
         <Icon name={done ? "CircleCheck" : "Globe"} size={16} color={done ? theme.colors.statusSuccess : theme.colors.foregroundMuted} />
         <Text style={styles.title} selectable numberOfLines={2}>
@@ -447,5 +483,66 @@ export function BrowserPromptCard({
         </Modal.Content>
       </Modal>
     </View>
+  );
+}
+
+/** The DOM id of a block's first card (react-native-web turns `nativeID` into `id`). */
+function anchorId(agentId: string, key: string): string {
+  return `browser-prompt-first-${agentId}-${key}`.replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
+/**
+ * Scrolls the chat to a block's first card where that is possible: in the web and desktop app, when
+ * the card is rendered. False on phones (no DOM) and when the list has not rendered the card.
+ */
+function scrollToFirst(id: string): boolean {
+  const doc = (globalThis as { document?: { getElementById(id: string): { scrollIntoView(options?: object): void } | null } })
+    .document;
+  if (Platform.OS !== "web" || !doc) return false;
+  const element = doc.getElementById(id);
+  if (!element) return false;
+  element.scrollIntoView({ behavior: "smooth", block: "center" });
+  return true;
+}
+
+/** A repeated block: one line that points to the first card ("Already done" when that one is done). */
+function RepeatLine({
+  done,
+  title,
+  theme,
+  onPress,
+}: {
+  done: boolean;
+  title: string;
+  theme: PluginTimelineItemProps["theme"];
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={done ? `Already done: ${title}` : `Same step as above: ${title}`}
+      accessibilityHint="Shows the first card with these steps"
+      onPress={onPress}
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        alignSelf: "flex-start",
+        maxWidth: "100%",
+        gap: 6,
+        paddingVertical: 6,
+        paddingHorizontal: 10,
+        borderRadius: 8,
+        borderWidth: 1,
+        borderColor: done ? theme.colors.statusSuccess : theme.colors.border,
+        backgroundColor: theme.colors.surface1,
+      }}
+    >
+      <Text style={{ color: done ? theme.colors.statusSuccess : theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>
+        {done ? "✓ Already done" : "↑ Same step as above"}
+      </Text>
+      <Text numberOfLines={1} style={{ flexShrink: 1, color: theme.colors.foregroundMuted, fontSize: 13 }}>
+        · {title}
+      </Text>
+    </Pressable>
   );
 }

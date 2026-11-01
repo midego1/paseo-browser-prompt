@@ -146,6 +146,12 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
               if (await settings.save({ ...values, appLinkTemplate: DEFAULT_APP_LINK_TEMPLATE }, revision)) setDraft(null);
             }}
           />
+          <SettingsSwitch
+            label="Merge repeated blocks"
+            hint="A block with the same title and steps as an earlier one in the chat shows as one line, “↑ Same step as above” (or “✓ Already done” once the first is done). Pressing it shows the first card. Off: every block gets its own card."
+            value={values.mergeRepeats}
+            onValueChange={(mergeRepeats) => void settings.save({ ...values, mergeRepeats }, revision)}
+          />
           <SettingsAction
             label="Done marks"
             hint={`${values.done.length} prompt(s) marked done on this host.`}
