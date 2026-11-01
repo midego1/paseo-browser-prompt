@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.13.0 (unreleased)
+
+- The card shows one small line for a "Run with Paseo agent" run under the step progress: the run
+  time and the run's tokens, e.g. "Running · 2m 14s · 18.4k in · 950 out" or "Took 3m 02s · 701k in
+  · 4.6k out". While the run starts or runs its icon spins (still with reduced motion) and the time
+  counts up once a second in that line only; once it ended the line shows the total. Start and end
+  come from the run agent (`createdAt`, the latest timeline entry, else `updatedAt`), so they
+  survive a reload. Tokens are the daemon's `lastUsage` from the timeline read the card already
+  does (input including cached input, and output); they appear when the run's turn completes and
+  are missing for runs from before a daemon restart. No cost is shown, no new setting.
+
 ## 0.11.0 (unreleased)
 
 - New setting **Close tabs after a successful run** (on by default, also for existing settings;

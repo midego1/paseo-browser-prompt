@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import { liveSubscription, type RunState } from "../shared/agent-prompt";
 import { createRunTracker, type RunTracker, type RunView } from "../shared/run-tracker";
+import type { UsageLike } from "../shared/run-stats";
 import { stepProgressView } from "../shared/step-view";
 import type { StepProgress } from "../shared/steps";
 
@@ -17,6 +18,17 @@ const EMPTY: RunView = {
   permissionPending: false,
   permissionEvents: 0,
 };
+
+/** Read along with the timeline: when the run's latest entry happened and its token usage. */
+export interface RunMeta {
+  lastEntryAt: string | null;
+  usage: UsageLike | null;
+}
+
+const NO_META: RunMeta = { lastEntryAt: null, usage: null };
+
+const usageKey = (usage: UsageLike | null) =>
+  usage ? `${usage.inputTokens}:${usage.cachedInputTokens}:${usage.outputTokens}` : "";
 
 const screenshotsKey = (view: RunView) => view.screenshots.map((shot) => `${shot.step}:${shot.source}`).join("|");
 
@@ -52,12 +64,13 @@ export function useStepProgress(
   status: string | null,
   showSteps: boolean,
   showScreenshots = false,
-): RunView {
+): RunView & { meta: RunMeta } {
   const paseo = usePaseo();
   const tracker = useRef<RunTracker | null>(null);
   const fetchedFor = useRef<string | null>(null);
   const wasLive = useRef(false);
   const [view, setView] = useState<RunView>(EMPTY);
+  const [meta, setMeta] = useState<RunMeta>(NO_META);
   const live = !!agentId && liveSubscription(status);
   const stopped = state === "stopped";
 
@@ -78,6 +91,13 @@ export function useStepProgress(
           if (cancelled || !tracker.current) return;
           tracker.current.history(page.entries.map(({ item }) => item));
           publish();
+          const lastEntryAt = page.entries.at(-1)?.timestamp ?? null;
+          const usage = page.agent?.lastUsage ?? null;
+          setMeta((current) =>
+            current.lastEntryAt === lastEntryAt && usageKey(current.usage) === usageKey(usage)
+              ? current
+              : { lastEntryAt, usage },
+          );
         },
         () => {
           settled = true;
@@ -98,6 +118,7 @@ export function useStepProgress(
     fetchedFor.current = null;
     wasLive.current = false;
     setView(EMPTY);
+    setMeta(NO_META);
   }, [agentId, total, showSteps, showScreenshots]);
 
   // One read when the card shows the run. A read cancelled by a dependency change is redone.
@@ -141,7 +162,7 @@ export function useStepProgress(
     return () => subscription();
   }, [agentId, live, total, showSteps, showScreenshots, paseo]);
 
-  return agentId ? view : EMPTY;
+  return agentId ? { ...view, meta } : { ...EMPTY, meta: NO_META };
 }
 
 /** "Step N of M · text" and a thin progress bar, colored by the run's state. */

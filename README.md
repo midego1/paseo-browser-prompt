@@ -40,6 +40,9 @@ confirmation, **Confirm before starting**).
 with an Open link (**Open the agent when started** opens it right away instead). "Step N of M" and
 the bar follow the agent's step lines (**Show step progress**), and a screenshot per step appears
 under it with its step number, the latest highlighted (**Show live screenshot**, **Thumbnails**).
+A small line under the progress shows the run time (counting up with a spinning icon while it runs,
+the total once it ended) and, once a turn has finished, its input and output tokens, for example
+"Took 3m 02s · 701k in · 4.6k out".
 
 ![Running: Step 3 of 4 with a progress bar and thumbnails for steps 1, 2 and 3](docs/screenshots/running.png)
 
@@ -446,6 +449,33 @@ ordinary assistant text, not a message to the chat, and does not end the turn.
 - Step markers never affect report back: question detection ignores leading marker lines (a
   question after them is still a question), and a final message that starts with a marker followed
   by anything else is the run's report.
+
+### Run time and tokens
+
+Under the step progress the card shows one line for the run, `RunStatsRow`
+(`client/run-stats-row.tsx`, formats and derivation in `shared/run-stats.ts`):
+"Running · 2m 14s · 18.4k in · 950 out" while it runs, "Took 3m 02s · …" (or "Failed after",
+"Stopped after") once it ended. No setting; it shows whenever the card shows a run.
+
+- Time comes from the run agent's own data, so it survives a reload: the start is the agent's
+  `createdAt` (`useAgent`), the end of a run that ended is the timestamp of the latest entry from
+  the card's existing tail read of the timeline, else the agent's `updatedAt` (which later changes,
+  such as archiving, also move). While the run starts, runs or waits for the owner the time counts
+  up: one 1-second interval in that row only (not the card), cleared when the run ends or the row
+  unmounts.
+- The icon spins (`LoaderCircle`, React Native `Animated`) only while the run is starting or
+  running, not while it needs the owner, is done, failed or stopped. With reduced motion
+  (`AccessibilityInfo.isReduceMotionEnabled`, prefers-reduced-motion on the web) it stays still.
+- Tokens are the daemon's `lastUsage` on the agent snapshot that the same tail read returns
+  (`timeline.refetch` includes the agent; `useAgent`'s snapshot has no usage). "in" is
+  `inputTokens + cachedInputTokens`, "out" is `outputTokens`. The daemon fills these when a turn
+  completes (while streaming it only keeps context-window fields), so tokens appear when the run's
+  turn ends; for a run with a follow-up turn they are that turn's. The daemon keeps `lastUsage` in
+  memory only: a run from before a daemon restart shows its time but no tokens. Cost
+  (`totalCostUsd`) is never shown.
+- The run screen (`client/run-screen.tsx`) only hands off to Paseo's agent view and has no agent
+  state on Paseo 0.11 (screen code must not use `useAgent`, see above), so the line is on the card
+  only.
 
 ### Live screenshot
 
