@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit review settings (https://docs.coderabbit.ai/reference/configuration).
+language: en-US
+reviews:
+  profile: chill
+  # Leave the PR description as written: no summary in it.
+  high_level_summary: false
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+  path_filters:
+    - "!package-lock.json"
+    - "!scripts/demo/**"
+    - "!docs/**/*.png"
+    - "!docs/**/*.gif"
+    - "!docs/**/*.mp4"
+    - "!docs/**/*.webm"
+chat:
+  auto_reply: false
