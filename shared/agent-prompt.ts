@@ -341,3 +341,38 @@ export function runStateFrom(
 export function liveSubscription(status: string | null | undefined): boolean {
   return status === "running" || status === "initializing";
 }
+
+type RunSnapshotLike = { status?: string | null; archivedAt?: string | null };
+
+/**
+ * Whether the plugin may do something that makes the daemon load a run: reading its timeline or
+ * sending to it. Loading a closed agent turns it idle, so a stopped run would show as done, and an
+ * archived one is resumed for its history. `fresh` is the agent as `refresh()` just read it (which
+ * loads nothing), null when the daemon does not know it. `cachedStatus` is the app's own view: when
+ * that says closed no request is needed, and it still counts if the daemon failed to store the close.
+ * A run stored as idle after the daemon was killed is unloaded too, but nothing here can tell.
+ */
+export function mayLoadRun(fresh: RunSnapshotLike | null | undefined, cachedStatus: string | null = null): boolean {
+  if (cachedStatus === "closed" || !fresh) return false;
+  return fresh.status !== "closed" && !fresh.archivedAt;
+}
+
+/**
+ * Tail of a run's timeline, or null without reading when the run may not be loaded (`mayLoadRun`)
+ * or the caller lost interest while its status was checked. The status is re-read right before the
+ * read; a run closed after that check is still read.
+ */
+export async function readRunTail<Page>(
+  run: {
+    refresh(): Promise<{ agent: RunSnapshotLike } | null>;
+    timeline: { refetch(options: { direction: "tail"; limit: number }): Promise<Page> };
+  },
+  limit: number,
+  cachedStatus: () => string | null,
+  cancelled: () => boolean,
+): Promise<Page | null> {
+  if (cachedStatus() === "closed" || cancelled()) return null;
+  const fresh = await run.refresh();
+  if (cancelled() || !mayLoadRun(fresh?.agent, cachedStatus())) return null;
+  return run.timeline.refetch({ direction: "tail", limit });
+}

@@ -219,5 +219,5 @@ test("the card wires the stats line; the row spins only with motion and clears i
   assert.match(progress, /if \(liveNow\.current\) return;/);
   assert.match(progress, /lastEntryAt: null, usage: null/);
   // A closed agent's timeline is not read: the read would load it again, idle.
-  assert.match(progress, /if \(!agentId \|\| stopped \|\| fetchedFor\.current === agentId\) return;/);
+  assert.match(progress, /if \(!agentId \|\| stopped\) \{/);
 });

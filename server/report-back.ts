@@ -1,5 +1,7 @@
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
+import { mayLoadRun } from "../shared/agent-prompt.ts";
 import {
+  buildClosedRunNotice,
   buildReportMessage,
   buildStatusNotice,
   finalAssistantText,
@@ -100,6 +102,8 @@ export type ReportResult =
   | "question-redirected"
   | "sent"
   | "sent-status"
+  | "sent-closed"
+  | "not-forwarded-closed"
   | "canceled"
   | "aborted"
   | "duplicate"
@@ -270,13 +274,19 @@ export function createReportBack(options: ReportBackOptions) {
     return next;
   }
 
-  /** The turn's final assistant text, and the id of its last assistant message when known. */
+  /**
+   * The turn's final assistant text, and the id of its last assistant message when known. Null when
+   * that takes reading the timeline of a run that is closed by now, which would load it again.
+   */
   async function readFinal(
     event: TurnEndedEvent,
     run: ReturnType<ReportBackPaseo["agents"]["ref"]>,
-  ): Promise<{ text: string; messageId: string | null }> {
+    runSnapshot: AgentSnapshotLike | null,
+  ): Promise<{ text: string; messageId: string | null } | null> {
     const fromEvent = event.timeline ?? [];
-    const items: readonly { type: string; text?: unknown; messageId?: unknown }[] = fromEvent.some((item) => item.type === "assistant_message")
+    const inEvent = fromEvent.some((item) => item.type === "assistant_message");
+    if (!inEvent && !mayLoadRun(runSnapshot)) return null;
+    const items: readonly { type: string; text?: unknown; messageId?: unknown }[] = inEvent
       ? fromEvent
       : (await run.timeline.refetch({ direction: "tail", limit: REPORT_TAIL_ITEMS })).entries.map((entry) => entry.item);
     let messageId: string | null = null;
@@ -294,13 +304,22 @@ export function createReportBack(options: ReportBackOptions) {
   /**
    * Tells the run its question did not reach the chat, so it asks the owner instead. Returns null,
    * sending nothing, once the run had MAX_REDIRECTS notices: the caller then treats the turn as the
-   * run's report.
+   * run's report. A run closed by now (the wait for a busy chat can take hours) gets no notice: a send
+   * would load it and start a turn.
    */
   async function redirect(run: ReturnType<ReportBackPaseo["agents"]["ref"]>, runId: string, reason: RedirectReason, max: number) {
     const count = redirectCounts.get(runId) ?? 0;
     if (count >= MAX_REDIRECTS) {
       log(`run ${runId} kept asking after ${count} redirects; handling its turn as the report`);
       return null;
+    }
+    const fresh = await run.refresh().catch(() => {
+      log(`could not read the status of run ${runId}; sending its redirect notice anyway`);
+      return null;
+    });
+    if (fresh && !mayLoadRun(fresh.agent)) {
+      log(`question of run ${runId} not forwarded; the run is closed or archived, so it is not told`);
+      return "not-forwarded-closed" as const;
     }
     redirectCounts.set(runId, count + 1);
     if (redirectCounts.size > 1000) redirectCounts.delete(redirectCounts.keys().next().value!);
@@ -414,7 +433,11 @@ export function createReportBack(options: ReportBackOptions) {
 
       // The final message decides: a question for the chat, or the run's final report. Read it now,
       // since the run's next turn would make a later read return the wrong message.
-      const final = event.outcome.kind === "completed" || event.outcome.kind === "failed" ? await readFinal(event, run) : null;
+      const ended = event.outcome.kind === "completed" || event.outcome.kind === "failed";
+      const final = ended ? await readFinal(event, run, runSnapshot) : null;
+      // Closed or archived by now: the chat still hears the outcome from the event, without a report.
+      const closedRun = ended && !final;
+      if (closedRun) log(`run ${runId} is closed or archived; its report is not read`);
       const finalText = final?.text ?? "";
       const question = event.outcome.kind === "completed" ? parseQuestion(finalText) : null;
       if (question !== null) {
@@ -472,7 +495,7 @@ export function createReportBack(options: ReportBackOptions) {
           ? { kind: "failed", message: event.outcome.error.message }
           : { kind: "completed" };
       let report: string | null = null;
-      if (mode === "full" || sourceAllowsFullReport(mode, sourceSnapshot.provider, sourceSnapshot.currentModeId)) {
+      if (!closedRun && (mode === "full" || sourceAllowsFullReport(mode, sourceSnapshot.provider, sourceSnapshot.currentModeId))) {
         report = finalText;
       }
 
@@ -486,16 +509,19 @@ export function createReportBack(options: ReportBackOptions) {
         if (typeof settled === "string") return settled;
         if (signal.aborted) throw new AbortedError();
         // The source's mode may have changed while waiting; decide on the snapshot just read.
-        const full = report !== null && sourceAllowsFullReport(mode, settled.provider, settled.currentModeId);
-        const message = full
-          ? buildReportMessage({ title: event.agent.title, browserAgentId: runId, outcome, report: report! })
-          : buildStatusNotice({ title: event.agent.title, browserAgentId: runId, outcome });
+        const allowed = sourceAllowsFullReport(mode, settled.provider, settled.currentModeId);
+        const full = report !== null && allowed;
+        const message = closedRun
+          ? buildClosedRunNotice({ title: event.agent.title, browserAgentId: runId, outcome, withError: allowed })
+          : full
+            ? buildReportMessage({ title: event.agent.title, browserAgentId: runId, outcome, report: report! })
+            : buildStatusNotice({ title: event.agent.title, browserAgentId: runId, outcome });
         // Every send clears (denies) pending permissions, which is why the source must be settled.
         // Steer: on an idle agent this starts a normal turn. If the owner starts a turn in the
         // moment since the last read, the report is steered into it (most providers, Claude
         // included) or replaces it, and a permission that turn just raised would be denied.
         await source.send(message, { activeTurnBehavior: "steer" });
-        return full ? ("sent" as const) : ("sent-status" as const);
+        return closedRun ? ("sent-closed" as const) : full ? ("sent" as const) : ("sent-status" as const);
       });
       if (delivered === "missing") {
         log(`source agent ${sourceId} of run ${runId} went away; not reporting`);
@@ -506,7 +532,7 @@ export function createReportBack(options: ReportBackOptions) {
         release(runId);
         return "busy-timeout";
       }
-      log(`reported run ${runId} to agent ${sourceId}${delivered === "sent" ? "" : " (status only)"}`);
+      log(`reported run ${runId} to agent ${sourceId}${delivered === "sent" ? "" : delivered === "sent-closed" ? " (run closed, status only)" : " (status only)"}`);
       return delivered;
     } catch (error) {
       if (error instanceof AbortedError || signal.aborted) {
