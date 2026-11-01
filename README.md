@@ -168,6 +168,45 @@ listener is not started (never 0.0.0.0) and `trampoline.stash` returns
 on this host". `trampolinePort` defaults to 5299; EADDRINUSE reports `port-in-use`. Host or port
 changes restart the listener. The client only uses the URL the server returns.
 
+## Merge repeated blocks
+
+Agents often repeat a block they wrote earlier in the same chat. With **Merge repeated blocks** (on
+by default, in the first settings card) only the first is a full card; later ones show one line,
+"↑ Same step as above", or "✓ Already done" once the first is marked done. Off: every block gets its
+own card, as before 0.9.0.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Merge repeated blocks | on | A block with the same title and steps as an earlier one in the chat shows as one line pointing to the first card. |
+
+- **Same block** (`blockKey` in `shared/repeats.ts`): title and steps NFKC-normalized, line endings
+  unified, whitespace collapsed, blank lines dropped, and step numbers written as `N. ` (`1.Open`,
+  `1.   Open` and `1) Open` match); case and everything else count. The key is `k1-` plus a 53-bit
+  hash (cyrb53) of that text.
+- **Which one is first**: a timeline renderer gets only its own item (no position, and every card
+  of a chat gets the same `timestamp` from Paseo), so the transformer puts the message's id
+  (`messageId`) in each card, and `client/chat-index.ts` reads the chat's timeline once per app
+  session (newest page first, up to 25 pages of 200 entries) to learn every message's place
+  (`seqStart`) and blocks. A card is placed by its own message, so the answer does not depend on
+  which cards a virtualized list renders first. A card whose message is not known yet (a new message)
+  shows in full and triggers a tail read (at most every 1.5 s). Providers that give no message id
+  keep a full card for every block.
+- **Pressing a repeat**: the plugin API has no way to scroll the chat to another item. In the web
+  and desktop app the line scrolls to the first card through its DOM id (react-native-web `nativeID`)
+  when the list has rendered it, and the first card flashes; otherwise (phones, or a first card the
+  list has not rendered) a toast says "Scroll up to the first card".
+- **Done marks** are per block in a chat: `<agentId>:<key>` in the `done` setting, so marking the
+  first card done covers its repeats. Marks from before 0.9.0 were `<agentId>:<cardId>` (a hash of
+  the raw text, which cannot be turned into the new key without the text); they still count, and a
+  card that finds its old mark moves it to the new form. **Clear** in settings empties the list.
+- **Runs** stay keyed by the card's own id (`<agentId>:<cardId>`, which the server checks against
+  the run's card label). Repeat lines have no buttons, so they never start a run; a repeat that
+  already has its own run (started before 0.9.0) keeps its full card.
+- Item ids name their message (`card-<messageId>-<n>`; without a message id, a hash of the message
+  text up to its first block). Before 0.9.0 every message used `card-0`, `card-1`…, and Paseo keeps
+  plugin items by id within a chat, so two messages with blocks showed the later message's cards
+  in both.
+
 ## Run with Paseo agent
 
 Settings (**Settings → Plugins → Browser prompts → Run with Paseo agent**):

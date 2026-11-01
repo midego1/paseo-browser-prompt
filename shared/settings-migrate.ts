@@ -36,5 +36,8 @@ export function migratePreferences(values: unknown, fromVersion: number): unknow
     next = { ...next };
     delete next.thumbnailMode;
   }
+  // v12 adds mergeRepeats (default on). Done marks keep their old form here: a mark is a hash of the
+  // block's raw text, and the new content key needs the text, so each card moves its own old mark
+  // when it renders (`migrateDoneMark` in shared/repeats.ts). Old marks keep working until then.
   return next;
 }

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.0 (unreleased)
+
+- Merge repeated blocks (new setting, on by default): a block with the same title and steps as an
+  earlier one in the same chat (NFKC, whitespace, line endings, blank lines and step-number spacing
+  ignored) shows as one line, "↑ Same step as above", or "✓ Already done" once the first is done.
+  Pressing it scrolls to the first card in the web and desktop app (and flashes it), or says to
+  scroll up. Repeats have no buttons and never start a run. Which block is first comes from the
+  chat's timeline (one read per chat per app session, plus tail reads for new messages), placed by
+  message id, so a virtualized list that renders newer cards first does not change the answer.
+- Done marks are per block content in a chat (`<agentId>:<key>`); old marks still count and move to
+  the new form when their card renders. Settings schema v12.
+- Fix: two messages with browser-prompt blocks no longer show the later message's cards in both.
+  Card and segment ids now name their message.
+
 ## 0.8.1 (unreleased)
 
 - Fix: "Paseo agent needs you" and the answer box now appear on Paseo 0.14. Paseo does not set a

@@ -152,6 +152,8 @@ export type CardItemData = {
   index: number;
   title: string;
   text: string;
+  /** The message's id from Paseo, when the provider gives one: places the card in its chat. */
+  messageId?: string;
 };
 
 export type ExplodedItem =
@@ -166,6 +168,7 @@ export type ExplodedItem =
 export function explodeMessage(
   text: string,
   phase: "streaming" | "complete",
+  messageId?: string,
 ): ExplodedItem[] | undefined {
   if (!text.includes(INFO_WORD)) return undefined;
   const closed = findBrowserPrompts(text).filter((block) => block.closed);
@@ -183,12 +186,16 @@ export function explodeMessage(
     });
   };
 
+  // Item ids name their message: Paseo keeps plugin items by id within a chat, so `card-0` in two
+  // messages showed the later message's card in both. Without a message id, the text up to the first
+  // closed block names it (it no longer changes while the message streams).
+  const scope = messageId ? `${messageId}-` : `h${hashText(text.slice(0, closed[0]!.end))}-`;
   let cursor = 0;
   for (const block of closed) {
-    pushText(text.slice(cursor, KEEP_BLOCK_IN_MESSAGE ? block.end : block.start), `md-${block.index}`, "complete");
+    pushText(text.slice(cursor, KEEP_BLOCK_IN_MESSAGE ? block.end : block.start), `md-${scope}${block.index}`, "complete");
     items.push({
       type: "plugin",
-      id: `card-${block.index}`,
+      id: `card-${scope}${block.index}`,
       kind: CARD_KIND,
       version: 1,
       data: {
@@ -196,11 +203,12 @@ export function explodeMessage(
         index: block.index,
         title: block.title,
         text: block.body,
+        ...(messageId ? { messageId } : {}),
       },
     });
     cursor = block.end;
   }
-  pushText(text.slice(cursor), `md-${closed.length}`, phase);
+  pushText(text.slice(cursor), `md-${scope}${closed.length}`, phase);
   return items;
 }
 

@@ -16,7 +16,7 @@ export const MAX_RUNS = 200;
 export const preferences = defineSettings({
   id: "preferences",
   scope: "host",
-  version: 11,
+  version: 12,
   schema: z.object({
     /**
      * Desktop and web clients.
@@ -29,8 +29,14 @@ export const preferences = defineSettings({
     mobileStartMode: z.enum(["copy-only", "web-agent"]).default("copy-only"),
     /** Desktop app deep link; `{prompt}` is replaced by the URI-encoded prompt. */
     appLinkTemplate: z.string().default(DEFAULT_APP_LINK_TEMPLATE),
-    /** Card keys (`<agentId>:<cardId>`) the owner marked done. */
+    /**
+     * Blocks the owner marked done: `<agentId>:<content key>` (see shared/repeats.ts), so every repeat
+     * of a block in that chat shares the mark. Marks from before 0.9.0 are `<agentId>:<cardId>`; a
+     * card that finds its old mark moves it to the new form.
+     */
     done: z.array(z.string()).default([]),
+    /** Show a later block with the same steps as an earlier one in the chat as one line pointing up. */
+    mergeRepeats: z.boolean().default(true),
     /** "Run with Paseo agent": provider id, model id, thinking option and permission mode. */
     agentProvider: z.string().default(DEFAULT_AGENT_SETTINGS.agentProvider),
     agentModel: z.string().default(DEFAULT_AGENT_SETTINGS.agentModel),
