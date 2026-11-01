@@ -196,6 +196,12 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
             onValueChange={(thumbnailMode) => void settings.save({ ...values, thumbnailMode: thumbnailMode === "latest" ? "latest" : "all" }, revision)}
           />
           <SettingsSwitch
+            label="Close tabs after a successful run"
+            hint="When every step succeeded, the agent closes the browser tabs it opened itself for the run, as its last action before its report, and names them in the report. Tabs that were already open stay open, and a run that fails, stops or still needs you leaves every tab open so you can see where it stopped. In Always Ask mode you approve the close like any other new tool."
+            value={values.closeTabsOnSuccess}
+            onValueChange={(closeTabsOnSuccess) => void settings.save({ ...values, closeTabsOnSuccess }, revision)}
+          />
+          <SettingsSwitch
             label="Talk to the chat"
             hint="The agent may ask the chat that showed the card about the task (which button, which value, how to go on when the page differs). The plugin forwards each question marked as untrusted text. Not configurable: passwords, tokens, 2FA codes and approvals of destructive, security, billing, merge or publish actions are always asked of you, never of the chat."
             value={values.talkToChat}

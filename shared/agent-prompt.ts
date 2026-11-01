@@ -25,6 +25,8 @@ export const DEFAULT_AGENT_SETTINGS = {
   showLiveScreenshot: true,
   /** Thumbnails on the card: one per step ("all") or only the newest ("latest"). */
   thumbnailMode: "all",
+  /** After a fully successful run, the agent closes the browser tabs it opened itself. */
+  closeTabsOnSuccess: true,
 } as const;
 
 /** Rule asking the run for one viewport screenshot after each step, never of a page with secrets. */
@@ -33,6 +35,18 @@ export const SCREENSHOT_RULE =
   "If a screenshot fails because the tab \"has not painted\" (the owner's Paseo app is not showing that tab), do not retry it, do not ask the owner and do not try to bring the tab to the front for it: take no more screenshots in this run and add \"(screenshots off: tab not visible)\" to your next step line. For screenshots this replaces rule 2's handling of an unpainted tab. " +
   "Never take a screenshot while the page shows a password, token, API key, 2FA or recovery code or any other secret: skip it and say \"screenshot skipped\" in your next step line or your report. " +
   "The screenshots are only for the owner's card: do not describe them in questions for the chat.";
+
+/**
+ * Rule asking the run to close the tabs it opened itself, but only after a fully successful run.
+ * Tabs that were open before the run, and every tab after a run that fell short, stay open.
+ */
+export const CLOSE_TABS_RULE =
+  "11. Closing tabs: start the run with browser_list_tabs (before any browser_new_tab) and remember which tabs already exist; also remember each tab you open yourself with browser_new_tab. " +
+  "Only when the run is fully successful (every numbered step done, none failed, skipped or blocked, no question left unanswered, nothing left for the owner to do), then as your very last action, after the last step's screenshot and right before your final report, close with browser_close_tab each tab you opened yourself with browser_new_tab, and only those. " +
+  "Never close a tab that already existed when the run started, even if you used it, and never a tab a page opened by itself. " +
+  "Closing is cleanup, not a numbered step: write no step marker and take no screenshot for it; it is not a destructive action under rule 3. If a close fails, leave that tab open and go on to your report. " +
+  "If the run is anything less than fully successful, close no tab, so the owner can see where it stopped. " +
+  "In your report, say which tabs you closed (by page title, never a secret) or that you left them open and why.";
 
 /** Start of a step marker line: `[browser-prompt step N/M] what the run is doing`. */
 export const STEP_MARKER_PREFIX = "[browser-prompt step";
@@ -227,7 +241,8 @@ export function usesClassifierMode(config: { provider: string; modeId: string } 
 
 /**
  * The agent's initial prompt: fixed safety preamble, plus the Auto mode rule when the agent runs in
- * a classifier-reviewed mode and the chat rule when it may ask the chat, then the card's steps.
+ * a classifier-reviewed mode, the chat rule when it may ask the chat, the progress, screenshot and
+ * close-tabs rules when their settings are on, then the card's steps.
  */
 export function buildAgentPrompt(
   cardTitle: string,
@@ -236,12 +251,14 @@ export function buildAgentPrompt(
   chat?: { sourceAgentId: string; maxQuestions: number },
   progress?: { totalSteps: number },
   screenshots?: boolean,
+  closeTabs?: boolean,
 ): string {
   const task = cardTitle.trim() ? `Task: ${cardTitle.trim()}\n\n` : "";
   let rules = usesClassifierMode(config) ? `${AGENT_SAFETY_PREAMBLE}\n${CLASSIFIER_MODE_RULE}` : AGENT_SAFETY_PREAMBLE;
   if (chat && chat.sourceAgentId && chat.maxQuestions > 0) rules += `\n${chatQuestionRule(chat.sourceAgentId, chat.maxQuestions)}`;
   if (progress && progress.totalSteps > 0) rules += `\n${stepProgressRule(progress.totalSteps)}`;
   if (screenshots) rules += `\n${SCREENSHOT_RULE}`;
+  if (closeTabs) rules += `\n${CLOSE_TABS_RULE}`;
   return (
     `${rules}\n\n` +
     `${task}Steps (from the owner's browser-prompt card, verbatim):\n` +
@@ -257,6 +274,7 @@ export interface AgentSettingsInput {
   openAgentOnStart?: boolean;
   showStepProgress?: boolean;
   showLiveScreenshot?: boolean;
+  closeTabsOnSuccess?: boolean;
   agentThinking?: string;
   agentMode?: string;
 }

@@ -39,5 +39,11 @@ export function migratePreferences(values: unknown, fromVersion: number): unknow
   // v12 adds mergeRepeats (default on). Done marks keep their old form here: a mark is a hash of the
   // block's raw text, and the new content key needs the text, so each card moves its own old mark
   // when it renders (`migrateDoneMark` in shared/repeats.ts). Old marks keep working until then.
+  // v13 adds closeTabsOnSuccess (default on, also for existing settings). A stored value that is not
+  // a boolean would make the document invalid: drop it so the default applies.
+  if (fromVersion < 13 && "closeTabsOnSuccess" in next && typeof next.closeTabsOnSuccess !== "boolean") {
+    next = { ...next };
+    delete next.closeTabsOnSuccess;
+  }
   return next;
 }

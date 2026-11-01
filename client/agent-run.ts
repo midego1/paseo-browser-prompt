@@ -103,6 +103,7 @@ export async function startBrowserAgent(
     },
     input.settings.showStepProgress === false ? undefined : { totalSteps: countSteps(input.steps) },
     input.settings.showLiveScreenshot !== false,
+    input.settings.closeTabsOnSuccess !== false,
     ),
     labels: runLabels(input.sourceAgentId, input.cardId),
   });

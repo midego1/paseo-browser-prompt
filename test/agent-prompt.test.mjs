@@ -86,6 +86,7 @@ test("settings defaults: Anthropic Claude Sonnet 5.5, thinking high, Auto mode, 
     showStepProgress: true,
     showLiveScreenshot: true,
     thumbnailMode: "all",
+    closeTabsOnSuccess: true,
   });
   assert.deepEqual(resolveAgentConfig(DEFAULT_AGENT_SETTINGS), {
     provider: "claude/claude-sonnet-5-5",

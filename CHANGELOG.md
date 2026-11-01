@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.0 (unreleased)
+
+- New setting **Close tabs after a successful run** (on by default, also for existing settings;
+  settings schema v13). When every numbered step succeeded with no failed, skipped or blocked step
+  and nothing left for the owner, the agent closes the browser tabs it opened itself with
+  `browser_new_tab`, as its very last action after the last step's screenshot and before its
+  report, and names them in the report. Tabs that were open when the run started (it lists them
+  first) stay open, also when the run used them; any run that falls short leaves every tab open so
+  the owner can see where it stopped. Closing is not a step: no step marker, no screenshot, so step
+  progress and thumbnails are unchanged. Off: the prompt has no close rule, as before.
+
 ## 0.10.3 (unreleased)
 
 - Docs: README, OVERVIEW and SECURITY say plainly that the browser-only rule and the secret rules
