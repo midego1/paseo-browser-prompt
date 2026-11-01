@@ -25,7 +25,7 @@ Do not include real secrets, tokens or private prompts in a report; describe the
 | Ids of runs that already reported | `reported-runs.json` in the state directory below | Report back to chat |
 | Settings, done marks, card-to-agent links | Paseo host settings on your daemon | Always |
 | Updater state, log, commit-only Git history | `~/.local/state/paseo-plugin-browser-prompt/` on the daemon host | Git installs |
-| `git ls-remote` / `git fetch` | The `https://` remote the plugin was installed from | Git installs with auto-update on |
+| `git ls-remote` / `git fetch` | The `https://` remote the plugin was installed from | Git installs: automatically only after the owner enabled auto-update for that remote; otherwise only when the owner presses Check now or Update now |
 
 The plugin does not read the clipboard, does not log prompt text, and sends no telemetry.
 
@@ -91,6 +91,9 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
   or normalized, no unknown fields such as `dangerouslyDisableSandbox`), and Allow needs a second
   "Confirm allow" tap. Otherwise only Deny. Values typed into a page are masked until you tap Show. The question text, options and details come from the agent and can echo a page; read them
   before you click.
-- Self-update installs only fast-forward commits from the `https://` remote the plugin was installed
-  from. Installing a plugin means trusting its repository: the server part runs unsandboxed with the
-  daemon user's access.
+- Self-update is off until you enable it in settings, where the plugin names the `https://` remote it
+  was installed from and says that newer code from it will be downloaded and installed. Declining, or
+  never deciding, leaves everything as installed, including when cards are shown and when settings
+  cannot be read. Consent applies to that remote only. It installs only fast-forward commits.
+  **Update now** installs the one commit it names, only when pressed. Installing a plugin means
+  trusting its repository: the server part runs unsandboxed with the daemon user's access.

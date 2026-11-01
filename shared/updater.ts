@@ -134,7 +134,10 @@ export function isThrottled(lastCheckAt: number, now: number, force: boolean): b
 }
 
 export interface UpdateState {
+  /** The owner enabled auto-update (after being told which repository supplies the updates). */
   autoUpdate: boolean;
+  /** The Git remote the owner consented to; consent counts only while the install uses this remote. */
+  consentRemote: string;
   trackRefOverride: string;
   lastCheckAt: number;
   /** "up-to-date" | "updating" | "update-available" | "not-fast-forward" | "local" | "failed: ..." */
@@ -145,7 +148,8 @@ export interface UpdateState {
 }
 
 export const DEFAULT_UPDATE_STATE: UpdateState = {
-  autoUpdate: true,
+  autoUpdate: false,
+  consentRemote: "",
   trackRefOverride: "",
   lastCheckAt: 0,
   lastResult: "",
@@ -155,6 +159,10 @@ export const DEFAULT_UPDATE_STATE: UpdateState = {
 };
 
 export type CheckStatus =
+  /** Automatic check skipped: auto-update is not enabled for the install's remote. No network. */
+  | "not-consented"
+  /** "Update now" refused: the remote or the newest commit is not the one the owner was shown. */
+  | "changed"
   | "throttled"
   | "local"
   | "unsupported"
@@ -196,13 +204,45 @@ export interface UpdaterDeps {
   log(message: string): void;
 }
 
-/** One updater per plugin process. Concurrent checks share the in-flight one. */
+/**
+ * Auto-update counts only when the owner enabled it for exactly this remote. A changed install
+ * remote voids it.
+ */
+export function hasConsent(state: Pick<UpdateState, "autoUpdate" | "consentRemote">, remote: string | undefined): boolean {
+  return state.autoUpdate === true && !!remote && state.consentRemote === remote;
+}
+
+/** What the owner was shown when they pressed "Update now": install only this. */
+export interface ManualUpdate {
+  remote: string;
+  revision: string;
+}
+
+export interface CheckOptions {
+  /** "Check now": skip the 30-minute limit. A check reads the remote but installs only with consent. */
+  force?: boolean;
+  /** "Update now": install this commit from this remote, if it is still the newest fast-forward. */
+  install?: ManualUpdate;
+}
+
+/**
+ * One updater per plugin process. Concurrent checks share the in-flight one.
+ *
+ * Nothing is downloaded or installed without the owner: an automatic check (a card shown or used)
+ * returns at once, without reading the install or the network, unless auto-update is enabled, and
+ * contacts the remote only when that consent was given for the install's current remote. "Check
+ * now" and "Update now" are the owner's own clicks; "Update now" installs only the commit and remote
+ * the owner was shown.
+ */
 export function createUpdater(deps: UpdaterDeps) {
   let inFlight: Promise<CheckResult> | null = null;
   let memoryLastCheckAt = 0;
   let updating = false;
 
-  async function run(force: boolean): Promise<CheckResult> {
+  async function run(options: CheckOptions): Promise<CheckResult> {
+    const manual = options.install ?? null;
+    const force = options.force === true || manual !== null;
+    // Unreadable state reads as "no consent".
     const state = await deps.loadState().catch(() => DEFAULT_UPDATE_STATE);
     const now = deps.now();
     const lastCheckAt = Math.max(memoryLastCheckAt, state.lastCheckAt);
@@ -212,6 +252,9 @@ export function createUpdater(deps: UpdaterDeps) {
       trackedRef: state.trackedRef,
       lastCheckAt,
     };
+    if (!force && state.autoUpdate !== true) {
+      return { ...base, status: "not-consented", applied: false, message: "Auto-update is off." };
+    }
     if (updating) return { ...base, status: "busy", applied: false, message: "An update is already running." };
     if (isThrottled(lastCheckAt, now, force)) {
       return { ...base, status: "throttled", applied: false, message: "Checked recently." };
@@ -243,6 +286,21 @@ export function createUpdater(deps: UpdaterDeps) {
         message: "Only installs from an https:// Git remote update themselves.",
         lastCheckAt: now,
       };
+    }
+
+    const consent = hasConsent(state, install.remote);
+    if (!force && !consent) {
+      // Enabled for another remote (the install moved): ask again, and do not contact either one.
+      return {
+        ...base,
+        installedRevision: install.revision,
+        status: "not-consented",
+        applied: false,
+        message: "Auto-update was enabled for another repository; enable it again for this one.",
+      };
+    }
+    if (manual && manual.remote !== install.remote) {
+      return { ...base, installedRevision: install.revision, status: "changed", applied: false, message: "The plugin now installs from another repository; check again." };
     }
 
     let refs: RemoteRefs;
@@ -286,7 +344,11 @@ export function createUpdater(deps: UpdaterDeps) {
         message: `${branchName(trackedRef)} is not a fast-forward of the installed commit; update manually.`,
       };
     }
-    if (!state.autoUpdate) {
+    if (manual && manual.revision !== latest) {
+      await deps.saveState({ ...result, lastResult: "update-available" });
+      return { ...result, status: "changed", applied: false, message: `A newer commit (${shortSha(latest)}) appeared; check it and update again.` };
+    }
+    if (!manual && !consent) {
       await deps.saveState({ ...result, lastResult: "update-available" });
       return {
         ...result,
@@ -333,9 +395,9 @@ export function createUpdater(deps: UpdaterDeps) {
   }
 
   return {
-    check(options: { force?: boolean } = {}): Promise<CheckResult> {
+    check(options: CheckOptions = {}): Promise<CheckResult> {
       if (inFlight) return inFlight;
-      inFlight = run(options.force === true).finally(() => {
+      inFlight = run(options).finally(() => {
         inFlight = null;
       });
       return inFlight;
@@ -345,4 +407,20 @@ export function createUpdater(deps: UpdaterDeps) {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Update settings from before version 2 (0.10.0) had auto-update on by default, without the owner
+ * being told which repository supplies the updates. Whatever was stored, it starts off and asks.
+ */
+export function migrateUpdateSettings(values: unknown, fromVersion: number): unknown {
+  const old = (values ?? {}) as { trackRefOverride?: unknown };
+  if (fromVersion < 2) {
+    return {
+      autoUpdate: false,
+      consentRemote: "",
+      ...(typeof old.trackRefOverride === "string" ? { trackRefOverride: old.trackRefOverride } : {}),
+    };
+  }
+  return values;
 }

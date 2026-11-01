@@ -1,10 +1,13 @@
 // Run: npm test. Self-update core with mocked `paseo plugin ls`, `git ls-remote` and spawn.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   CHECK_INTERVAL_MS,
   createUpdater,
   DEFAULT_UPDATE_STATE,
+  hasConsent,
+  migrateUpdateSettings,
   inferTrackedRef,
   isHttpsRemote,
   isThrottled,
@@ -32,21 +35,27 @@ const lsJson = (revision = A) => [
 const lsRemote = (heads, head = "refs/heads/main") =>
   [`ref: ${head}\tHEAD`, `${heads[head] ?? C}\tHEAD`, ...Object.entries(heads).map(([ref, sha]) => `${sha}\t${ref}`)].join("\n");
 
-function harness({ install = { kind: "git", remote: REMOTE, revision: A }, remote, state = {}, lock = true, spawnError, fastForward = true, saveError } = {}) {
-  const calls = { lsRemote: 0, spawn: [], logs: [], lock: 0, release: 0, ff: [] };
+// The owner enabled auto-update for REMOTE, unless a test says otherwise.
+const CONSENTED = { autoUpdate: true, consentRemote: REMOTE };
+
+function harness({ install = { kind: "git", remote: REMOTE, revision: A }, remote, state = {}, lock = true, spawnError, fastForward = true, saveError, loadError, consent = CONSENTED } = {}) {
+  const calls = { lsRemote: 0, spawn: [], logs: [], lock: 0, release: 0, ff: [], listInstall: 0 };
   let now = 1_000_000_000;
-  let stored = { ...DEFAULT_UPDATE_STATE, ...state };
+  let stored = { ...DEFAULT_UPDATE_STATE, ...consent, ...state };
   const updater = createUpdater({
     now: () => now,
-    listInstall: async () => install,
+    listInstall: async () => {
+      calls.listInstall++;
+      return install;
+    },
     lsRemote: async (url) => {
       calls.lsRemote++;
-      assert.equal(url, REMOTE);
+      assert.equal(url, install.remote);
       if (remote instanceof Error) throw remote;
       return remote;
     },
     isFastForward: async (url, ref, installed, latest) => {
-      assert.equal(url, REMOTE);
+      assert.equal(url, install.remote);
       calls.ff.push([ref, installed, latest]);
       if (fastForward instanceof Error) throw fastForward;
       return fastForward;
@@ -62,7 +71,10 @@ function harness({ install = { kind: "git", remote: REMOTE, revision: A }, remot
       if (spawnError) throw spawnError;
       calls.spawn.push(rev);
     },
-    loadState: async () => stored,
+    loadState: async () => {
+      if (loadError) throw loadError;
+      return stored;
+    },
     saveState: async (patch) => {
       if (saveError && patch.lastResult === "updating") throw saveError;
       stored = { ...stored, ...patch };
@@ -271,4 +283,111 @@ test("a failed spawn resets the in-process flag so a later check can retry", asy
   assert.equal((await h.updater.check({ force: true })).status, "failed", "not stuck on busy");
   assert.equal(h.calls.lock, 2);
   assert.equal(h.calls.release, 2);
+});
+
+const NO_CONSENT = { autoUpdate: false, consentRemote: "" };
+
+test("auto-update is off by default", () => {
+  assert.equal(DEFAULT_UPDATE_STATE.autoUpdate, false);
+  assert.equal(DEFAULT_UPDATE_STATE.consentRemote, "");
+  assert.match(readFileSync(new URL("../shared/update.ts", import.meta.url), "utf8"), /autoUpdate: z\.boolean\(\)\.default\(DEFAULT_UPDATE_STATE\.autoUpdate\)/);
+});
+
+test("without consent an automatic check (a card shown or used) touches nothing: no install read, no network, no update", async () => {
+  const h = harness({ remote: lsRemote({ "refs/heads/main": B }), consent: NO_CONSENT });
+  const result = await h.updater.check();
+  assert.equal(result.status, "not-consented");
+  assert.equal(result.applied, false);
+  assert.deepEqual([h.calls.listInstall, h.calls.lsRemote, h.calls.ff.length, h.calls.lock, h.calls.spawn.length], [0, 0, 0, 0, 0]);
+  assert.equal(h.stored.lastCheckAt, 0, "nothing recorded either");
+});
+
+test("unreadable settings or state never install", async () => {
+  const h = harness({ remote: lsRemote({ "refs/heads/main": B }), loadError: new Error("settings invalid") });
+  assert.equal((await h.updater.check()).status, "not-consented", "reads as no consent");
+  const forced = await h.updater.check({ force: true });
+  assert.equal(forced.status, "update-available", "Check now still only reports");
+  assert.equal(h.calls.spawn.length, 0);
+  const server = readFileSync(new URL("../server/updater.ts", import.meta.url), "utf8");
+  assert.match(server, /const prefs = current\?\.status === "ready" \? current\.values : DEFAULT_UPDATE_STATE;/);
+  assert.match(server, /await settings\.read\(\)\.catch\(\(\) => null\)/);
+});
+
+test("consent is tied to the remote it was given for", async () => {
+  assert.equal(hasConsent({ autoUpdate: true, consentRemote: REMOTE }, REMOTE), true);
+  assert.equal(hasConsent({ autoUpdate: true, consentRemote: REMOTE }, "https://github.com/other/fork.git"), false);
+  assert.equal(hasConsent({ autoUpdate: true, consentRemote: "" }, REMOTE), false);
+  assert.equal(hasConsent({ autoUpdate: false, consentRemote: REMOTE }, REMOTE), false);
+  assert.equal(hasConsent({ autoUpdate: true, consentRemote: REMOTE }, undefined), false);
+  const moved = harness({
+    install: { kind: "git", remote: "https://github.com/other/fork.git", revision: A },
+    remote: lsRemote({ "refs/heads/main": B }),
+  });
+  const auto = await moved.updater.check();
+  assert.equal(auto.status, "not-consented", "the install moved to another remote: consent is void");
+  assert.equal(moved.calls.lsRemote, 0, "neither remote is contacted");
+  const forced = await moved.updater.check({ force: true });
+  assert.equal(forced.status, "update-available", "Check now reports but does not install");
+  assert.equal(moved.calls.spawn.length, 0);
+});
+
+test("Check now without consent reads the remote but installs nothing", async () => {
+  const h = harness({ remote: lsRemote({ "refs/heads/main": B }), consent: NO_CONSENT });
+  const result = await h.updater.check({ force: true });
+  assert.equal(result.status, "update-available");
+  assert.equal(result.latestRevision, B);
+  assert.equal(h.calls.lsRemote, 1);
+  assert.equal(h.calls.spawn.length, 0);
+});
+
+test("Update now installs only the commit and remote the owner was shown, only on that click", async () => {
+  const h = harness({ remote: lsRemote({ "refs/heads/main": B }), consent: NO_CONSENT });
+  const result = await h.updater.check({ install: { remote: REMOTE, revision: B } });
+  assert.equal(result.status, "updating");
+  assert.equal(result.applied, true);
+  assert.deepEqual(h.calls.spawn, [B]);
+
+  const newer = harness({ remote: lsRemote({ "refs/heads/main": C }), consent: NO_CONSENT });
+  const moved = await newer.updater.check({ install: { remote: REMOTE, revision: B } });
+  assert.equal(moved.status, "changed", "a newer commit than the one shown");
+  assert.equal(newer.calls.spawn.length, 0);
+
+  const other = harness({ remote: lsRemote({ "refs/heads/main": B }), consent: NO_CONSENT });
+  const elsewhere = await other.updater.check({ install: { remote: "https://github.com/other/fork.git", revision: B } });
+  assert.equal(elsewhere.status, "changed", "the install's remote is not the one shown");
+  assert.equal(other.calls.lsRemote, 0);
+  assert.equal(other.calls.spawn.length, 0);
+
+  const sideways = harness({ remote: lsRemote({ "refs/heads/main": B }), consent: NO_CONSENT, fastForward: false });
+  assert.equal((await sideways.updater.check({ install: { remote: REMOTE, revision: B } })).status, "not-fast-forward");
+  assert.equal(sideways.calls.spawn.length, 0);
+});
+
+test("settings migration: auto-update stored before 0.10.0 starts off and asks", () => {
+  assert.deepEqual(migrateUpdateSettings({ autoUpdate: true, trackRefOverride: "main" }, 1), { autoUpdate: false, consentRemote: "", trackRefOverride: "main" });
+  assert.deepEqual(migrateUpdateSettings({ autoUpdate: false }, 1), { autoUpdate: false, consentRemote: "" });
+  assert.deepEqual(migrateUpdateSettings(null, 1), { autoUpdate: false, consentRemote: "" });
+  const current = { autoUpdate: true, consentRemote: REMOTE, trackRefOverride: "" };
+  assert.equal(migrateUpdateSettings(current, 2), current, "a consent given in 0.10.0 or later stays");
+  const settings = readFileSync(new URL("../shared/update.ts", import.meta.url), "utf8");
+  assert.match(settings, /version: 2,/);
+  assert.match(settings, /migrate: migrateUpdateSettings,/);
+});
+
+test("the card's first render and use never check or install without consent", () => {
+  const client = readFileSync(new URL("../client/update.ts", import.meta.url), "utf8");
+  assert.match(client, /const enabled = settings\.status === "ready" && settings\.values\.autoUpdate === true && settings\.values\.consentRemote !== "";/);
+  assert.match(client, /if \(checkedThisSession \|\| !enabled\) return;/);
+  assert.match(client, /if \(!enabled\) return;/);
+});
+
+test("the consent text names the repository and says code will be installed", () => {
+  const ui = readFileSync(new URL("../client/update-settings.tsx", import.meta.url), "utf8");
+  assert.match(ui, /newer plugin code from \$\{remote\} will be downloaded and installed automatically/);
+  assert.match(ui, /Nothing is downloaded or installed until you enable it\./);
+  assert.match(ui, /consentRemote: remote \}, revision\)/, "consent stores the remote it was given for");
+  assert.match(ui, /actionLabel="Enable auto-update"/);
+  assert.match(ui, /actionLabel="Not now"/);
+  assert.match(ui, /Downloads commit \$\{shortSha\(revision\)\} from \$\{remote\} and installs it as this plugin/);
+  assert.match(ui, /install\(\{ remote, revision \}\)/, "Update now sends what was shown");
 });
