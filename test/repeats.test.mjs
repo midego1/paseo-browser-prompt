@@ -136,7 +136,7 @@ test("done marks per key: an old mark moves to the content key; Clear still empt
 
 test("settings v12: Merge repeated blocks defaults on; the migration keeps done marks", () => {
   const settings = read("shared/settings.ts");
-  assert.match(settings, /version: 12,/);
+  assert.ok(Number(/version: (\d+),/.exec(settings)?.[1]) >= 12, "v12 or later");
   assert.match(settings, /mergeRepeats: z\.boolean\(\)\.default\(true\)/);
   const v11 = { done: ["a:0badf00d"], thumbnailMode: "all" };
   assert.deepEqual(migratePreferences(v11, 11), v11);
