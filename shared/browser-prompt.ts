@@ -154,6 +154,8 @@ export type CardItemData = {
   text: string;
   /** The message's id from Paseo, when the provider gives one: places the card in its chat. */
   messageId?: string;
+  /** Set by the client transformer: the index of an earlier, identical block in the same message. */
+  sameAs?: number;
 };
 
 export type ExplodedItem =

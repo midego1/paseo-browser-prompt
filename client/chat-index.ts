@@ -8,7 +8,7 @@
 // virtualized list renders or in which order. Until its message is known, a card shows in full.
 import type { usePaseo } from "@getpaseo/plugin/client";
 import { useEffect, useState } from "react";
-import { createChatIndex, messagesInTimeline, type ChatIndex, type FirstResult } from "../shared/repeats";
+import { createChatIndex, messagesInTimeline, type BlockFingerprint, type ChatIndex, type FirstResult } from "../shared/repeats";
 
 type PaseoApi = ReturnType<typeof usePaseo>;
 type Timeline = ReturnType<PaseoApi["agents"]["ref"]>["timeline"];
@@ -17,6 +17,8 @@ type Page = Awaited<ReturnType<Timeline["refetch"]>>;
 /** Timeline entries per page, and pages at most for the whole-chat read. */
 const PAGE_SIZE = 200;
 const MAX_PAGES = 25;
+/** Waits before retrying a failed whole-chat read; after the last one, merging waits for the next app session. */
+export const READ_RETRY_DELAYS_MS = [2000, 8000, 30000];
 /** A tail read for new messages at most this often per chat. */
 const TAIL_INTERVAL_MS = 1500;
 const TAIL_SIZE = 50;
@@ -52,24 +54,39 @@ function addPage(state: ChatState, page: Page) {
   }
 }
 
-/** The whole chat, newest page first, once per app session. */
+async function readAllPages(paseo: PaseoApi, agentId: string, state: ChatState): Promise<void> {
+  const timeline = paseo.agents.ref(agentId).timeline;
+  let cursor: Page["startCursor"] = null;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const result: Page = await timeline.refetch(
+      cursor
+        ? { direction: "before", cursor, limit: PAGE_SIZE, projection: "projected" }
+        : { direction: "tail", limit: PAGE_SIZE, projection: "projected" },
+    );
+    if (result.error) throw new Error(result.error);
+    addPage(state, result);
+    if (!result.hasOlder || !result.startCursor) return;
+    cursor = result.startCursor;
+  }
+}
+
+/**
+ * The whole chat, newest page first, once per app session. A failed read is retried after 2, 8 and
+ * 30 seconds (pages already read stay in the index); until it succeeds, unknown cards show in full.
+ */
 function readChat(paseo: PaseoApi, agentId: string, state: ChatState): Promise<void> {
   state.fullRead ??= (async () => {
-    const timeline = paseo.agents.ref(agentId).timeline;
-    let cursor: Page["startCursor"] = null;
-    for (let page = 0; page < MAX_PAGES; page++) {
-      const result: Page = await timeline.refetch(
-        cursor
-          ? { direction: "before", cursor, limit: PAGE_SIZE, projection: "projected" }
-          : { direction: "tail", limit: PAGE_SIZE, projection: "projected" },
-      );
-      addPage(state, result);
-      if (!result.hasOlder || !result.startCursor) return;
-      cursor = result.startCursor;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await readAllPages(paseo, agentId, state);
+        return;
+      } catch {
+        const delay = READ_RETRY_DELAYS_MS[attempt];
+        if (delay === undefined) return;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
     }
-  })().catch(() => {
-    // Without the read, every card shows in full.
-  });
+  })();
   return state.fullRead;
 }
 
@@ -95,7 +112,7 @@ function readTail(paseo: PaseoApi, agentId: string, state: ChatState) {
 export function useFirstOf(
   paseo: PaseoApi,
   agentId: string,
-  key: string,
+  fingerprint: BlockFingerprint,
   messageId: string | undefined,
   index: number,
   enabled: boolean,
@@ -119,7 +136,7 @@ export function useFirstOf(
   useEffect(() => {
     if (enabled && messageId && !known && state.fullRead) readTail(paseo, agentId, state);
   }, [enabled, messageId, known, state.version, paseo, agentId, state]);
-  return enabled ? state.index.firstOf(key, messageId, index) : { state: "first" };
+  return enabled ? state.index.firstOf(fingerprint, messageId, index) : { state: "first" };
 }
 
 /** Cards that show a block first, listening for "show me" from their repeats. */
@@ -141,6 +158,7 @@ export function useFlashTarget(chatKey: string, active: boolean): boolean {
     flashListeners.set(chatKey, set);
     return () => {
       set.delete(listener);
+      if (set.size === 0 && flashListeners.get(chatKey) === set) flashListeners.delete(chatKey);
       if (timer) clearTimeout(timer);
     };
   }, [chatKey, active]);

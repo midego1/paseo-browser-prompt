@@ -6,7 +6,7 @@ import { Platform, Pressable, Text, View } from "react-native";
 import { z } from "zod";
 import { agentTitle, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, resolveAgentConfig, usesClassifierMode } from "../shared/agent-prompt";
 import { MOST_RECENT_FALLBACK } from "../shared/report-back";
-import { blockKey, migrateDoneMark, repeatView } from "../shared/repeats";
+import { blockFingerprint, migrateDoneMark, ownsRun, repeatView, runItemMarker, withinMessage } from "../shared/repeats";
 import { MAX_DONE, MAX_RUNS, preferences } from "../shared/settings";
 import { stashPrompt } from "../shared/trampoline";
 import {
@@ -38,6 +38,7 @@ export const cardSchema = z.object({
   title: z.string(),
   text: z.string(),
   messageId: z.string().optional(),
+  sameAs: z.number().int().nonnegative().optional(),
 });
 
 export const markdownSchema = z.object({
@@ -58,12 +59,13 @@ export function BrowserPromptCard({
   theme,
   layout,
 }: PluginTimelineItemProps<z.output<typeof cardSchema>>) {
-  const { cardId, title, text, index, messageId } = item.data;
+  const { cardId, title, text, index, messageId, sameAs } = item.data;
   // Runs stay keyed by this card's own id: the server checks a run's card label against this entry.
   const runKey = `${agentId}:${cardId}`;
   // Done marks are per content key in this chat, so every repeat of a block shares its first's mark.
   // Before 0.9.0 a mark was the run key; a card that finds its old mark moves it (see below).
-  const key = useMemo(() => blockKey(title, text), [title, text]);
+  const fingerprint = useMemo(() => blockFingerprint(title, text), [title, text]);
+  const key = fingerprint.key;
   const doneMark = `${agentId}:${key}`;
   const settings = useSettings(preferences);
   const latestSettings = useRef(settings);
@@ -86,8 +88,8 @@ export function BrowserPromptCard({
   const mobileStartMode =
     settings.status === "ready" ? settings.values.mobileStartMode : DEFAULT_MODES.mobileStartMode;
 
-  const storedRun =
-    settings.status === "ready" ? (settings.values.runs.find(([entry]) => entry === runKey)?.[1] ?? null) : null;
+  const runRecord = settings.status === "ready" ? (settings.values.runs.find(([entry]) => entry === runKey) ?? null) : null;
+  const storedRun = runRecord?.[1] ?? null;
   const runAgentId = localRun ?? storedRun;
   // Started in this card session: an idle snapshot before its first turn means "starting".
   const {
@@ -136,9 +138,11 @@ export function BrowserPromptCard({
   // Merge repeated blocks: a later block with the same content as an earlier one in this chat shows
   // as one line pointing up, unless it has a run of its own (recorded before merging existed).
   const merge = settings.status === "ready" ? settings.values.mergeRepeats : true;
-  const first = useFirstOf(paseo, agentId, key, messageId, index, merge);
-  const view = repeatView({ merge, first, done, ownRun: runAgentId !== null });
-  const isFirst = first.state === "first";
+  const first = withinMessage(useFirstOf(paseo, agentId, fingerprint, messageId, index, merge), merge ? sameAs : undefined, messageId);
+  // Identical blocks share a run key: only a run started from this very block keeps a repeat's card.
+  const ownRun = localRun !== null || ownsRun(runRecord, messageId, index);
+  const view = repeatView({ merge, first, done, ownRun });
+  const isFirst = first.state !== "repeat";
   const flashing = useFlashTarget(doneMark, view === "full" && isFirst);
 
   // Moves a done mark from before 0.9.0 (the run key) to this block's content key.
@@ -251,9 +255,14 @@ export function BrowserPromptCard({
    */
   async function rememberRun(startedAgentId: string, fallback: boolean) {
     setLocalRun(startedAgentId);
-    const entry: [string, string, ...string[]] = fallback
-      ? [runKey, startedAgentId, MOST_RECENT_FALLBACK]
-      : [runKey, startedAgentId];
+    // Position 2 stays the fallback marker the server reads; the block's own marker comes after it.
+    const marker = runItemMarker(messageId, index);
+    const entry: [string, string, ...string[]] = [
+      runKey,
+      startedAgentId,
+      ...(fallback ? [MOST_RECENT_FALLBACK] : []),
+      ...(marker ? [marker] : []),
+    ];
     for (let attempt = 0; attempt < 4; attempt++) {
       const current = latestSettings.current;
       if (current.status === "ready") {

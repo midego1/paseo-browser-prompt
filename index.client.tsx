@@ -5,6 +5,7 @@ import { effectiveMode, getLastSeenPrompt, getRememberedModes, startInChatGpt } 
 import { AgentRunScreen } from "./client/run-screen";
 import { SettingsScreen } from "./client/settings-screen";
 import { CARD_KIND, explodeMessage, MARKDOWN_KIND } from "./shared/browser-prompt";
+import { markRepeatsInMessage } from "./shared/repeats";
 import { stashPrompt } from "./shared/trampoline";
 
 export default function contribute(client: PluginClientContext) {
@@ -20,7 +21,7 @@ export default function contribute(client: PluginClientContext) {
     transform({ item, phase }) {
       const messageId = typeof item.messageId === "string" && item.messageId ? item.messageId : undefined;
       const items = explodeMessage(item.text, phase, messageId);
-      return items ? { items } : undefined;
+      return items ? { items: markRepeatsInMessage(items) } : undefined;
     },
   });
   client.addTimelineRenderer({
