@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.10.3 (unreleased)
+
+- Docs: README, OVERVIEW and SECURITY say plainly that the browser-only rule and the secret rules
+  are instructions in the agent's prompt, not a tool sandbox, so how well they hold depends on the
+  selected provider and model; the permission mode and the mode guard are what the plugin enforces.
+- Fix: without "Confirm before starting", two copies of the same block pressed within the second
+  before the run record arrives could both start a run. The daemon now keeps an in-flight lock per
+  chat and block: only the first press starts a run, a second copy shows that run (or says it is
+  starting). A failed start frees the lock at once; a start that never reports back frees it after
+  60 seconds, and a started run is named in it for 10 seconds.
+- Auto-update re-reads the consent and the install's remote right before it installs, so turning
+  auto-update off (or the install moving to another repository) while a check runs installs
+  nothing. Update now is unchanged.
+- `.coderabbit.yaml` for CodeRabbit reviews (chill profile, no PR description summary, lockfile,
+  demo scripts and docs media skipped).
+
 ## 0.10.2 (unreleased)
 
 - Docs only. README, OVERVIEW and SECURITY describe 0.10.1 as it is: a complete Settings section in
