@@ -15,6 +15,7 @@ import {
   sharedRunRecord,
   withinMessage,
 } from "../shared/repeats";
+import { acquireRunLock, finishRunLock } from "../shared/run-lock-rpc";
 import { MAX_DONE, MAX_RUNS, preferences } from "../shared/settings";
 import { stashPrompt } from "../shared/trampoline";
 import {
@@ -92,6 +93,8 @@ export function BrowserPromptCard({
     settings.status === "ready" ? settings.values.done.includes(doneMark) || settings.values.done.includes(runKey) : false;
   const done = localDone ?? persistedDone;
   const stash = useRpc(stashPrompt);
+  const lockRun = useRpc(acquireRunLock);
+  const unlockRun = useRpc(finishRunLock);
   const startMode = settings.status === "ready" ? settings.values.startMode : DEFAULT_MODES.startMode;
   const mobileStartMode =
     settings.status === "ready" ? settings.values.mobileStartMode : DEFAULT_MODES.mobileStartMode;
@@ -284,11 +287,44 @@ export function BrowserPromptCard({
     toast.error("Could not record the agent on this card; it will not report back to this chat.");
   }
 
+  /**
+   * The daemon's in-flight lock for this block's run: null when this card may start it. When another
+   * copy is starting or just started the run, this card shows that run (or waits for its record).
+   * A daemon that cannot be asked does not block the start (the shared run record still applies).
+   */
+  async function takeRunLock(): Promise<{ token: string | null } | null> {
+    const lockInput = { sourceAgentId: agentId, ...fingerprint };
+    let result: Awaited<ReturnType<typeof lockRun>>;
+    try {
+      result = await lockRun(lockInput);
+    } catch {
+      return { token: null };
+    }
+    if (result.ok) return { token: result.token };
+    if (result.agentId) setLocalRun(result.agentId);
+    toast.show(
+      result.agentId
+        ? "A run of these steps was just started; this card shows it."
+        : "A run of these steps is already starting; this card shows it once it has started.",
+      { durationMs: 4000 },
+    );
+    return null;
+  }
+
+  function finishLock(token: string | null, startedAgentId?: string) {
+    if (!token) return;
+    void unlockRun({ sourceAgentId: agentId, ...fingerprint, token, agentId: startedAgentId }).catch(() => undefined);
+  }
+
   async function launchAgent() {
     setConfirmOpen(false);
     if (busy) return;
     setBusy(true);
+    let lockToken: string | null = null;
     try {
+      const lock = await takeRunLock();
+      if (!lock) return;
+      lockToken = lock.token;
       const values = settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS;
       const started = await startBrowserAgent(paseo, {
         sourceAgentId: agentId,
@@ -299,6 +335,9 @@ export function BrowserPromptCard({
         steps: text,
         settings: values,
       });
+      // The lock now names the run, so a copy pressed before the record arrives shows this run.
+      finishLock(lockToken, started.agentId);
+      lockToken = null;
       await rememberRun(started.agentId, started.workspaceSource === "most-recent");
       if (!started.modeCheck.ok) {
         // The run left its permission mode and was stopped (or could not be): keep it on the card.
@@ -318,6 +357,8 @@ export function BrowserPromptCard({
       setRunError(message);
       toast.error(message);
     } finally {
+      // A start that failed frees the lock at once.
+      finishLock(lockToken);
       setBusy(false);
     }
   }

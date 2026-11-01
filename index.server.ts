@@ -5,6 +5,8 @@ import { registerReportBack } from "./server/report-back-hook";
 import { fileReportedStore } from "./server/reported-store";
 import { createServerUpdater, currentUpdateStatus } from "./server/updater";
 import { DEFAULT_APP_LINK_TEMPLATE } from "./shared/browser-prompt";
+import { createRunLocks, runLockKey } from "./shared/run-lock";
+import { acquireRunLock, finishRunLock } from "./shared/run-lock-rpc";
 import { preferences } from "./shared/settings";
 import { getLauncherStatus, stashPrompt } from "./shared/trampoline";
 import { DEFAULT_TRAMPOLINE_PORT } from "./shared/trampoline-host";
@@ -38,6 +40,16 @@ export default function contribute(server: PluginServerContext) {
     return launcher.stash(prompt, template);
   });
   server.handle(getLauncherStatus, () => launcher.status());
+
+  // In-flight run lock: copies of a block in one chat start one run, also before its record is saved.
+  const runLocks = createRunLocks();
+  server.handle(acquireRunLock, ({ sourceAgentId, key, length, check }) =>
+    runLocks.acquire(runLockKey(sourceAgentId, { key, length, check })),
+  );
+  server.handle(finishRunLock, ({ sourceAgentId, key, length, check, token, agentId }) => {
+    const lockKey = runLockKey(sourceAgentId, { key, length, check });
+    return { ok: agentId ? runLocks.started(lockKey, token, agentId) : runLocks.release(lockKey, token) };
+  });
 
   // Report back to chat: a finished browser run reports to the agent whose card started it.
   const reportBack = registerReportBack(server, settings, { store: fileReportedStore() });
