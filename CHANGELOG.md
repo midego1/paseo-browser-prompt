@@ -12,6 +12,17 @@
 - The setting is now "Collapse repeated blocks that are done" (same stored value, on by default);
   off shows every copy as a plain full card.
 
+## 0.10.0 (unreleased)
+
+- Self-update needs explicit consent. Auto-update is off by default; the settings screen names the
+  Git repository the plugin was installed from and says that newer plugin code from it will be
+  downloaded and installed automatically, with **Enable auto-update** and **Not now**. Consent is
+  stored with that remote and is void when the install's remote changes. Without consent nothing is
+  checked or installed automatically (also on a card's first render, and when settings cannot be
+  read); **Check now** only reads the remote, and the new **Update now** installs the commit it names
+  only when pressed. Update settings version 2: an `autoUpdate` stored before 0.10.0 (on by default
+  then) is turned off and asks again.
+
 ## 0.9.1 (unreleased)
 
 - Fix: after the first card started a run, its repeats turned back into full cards (identical blocks

@@ -1,6 +1,6 @@
 import { defineRpc, defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
-import { DEFAULT_UPDATE_STATE } from "./updater";
+import { DEFAULT_UPDATE_STATE, migrateUpdateSettings } from "./updater";
 
 /**
  * Owner choices for self-update, kept apart from `preferences`. The daemon can only read host
@@ -10,13 +10,20 @@ import { DEFAULT_UPDATE_STATE } from "./updater";
 export const updateSettings = defineSettings({
   id: "updates",
   scope: "host",
-  version: 1,
+  version: 2,
   schema: z.object({
-    /** Check for a newer commit when the plugin is used, and install it. */
+    /**
+     * Off until the owner enables it after being told which repository supplies the updates and that
+     * newer plugin code will be downloaded and installed. Then: check for a newer commit when the
+     * plugin is used, and install it.
+     */
     autoUpdate: z.boolean().default(DEFAULT_UPDATE_STATE.autoUpdate),
+    /** The Git remote shown when the owner enabled auto-update; a different install remote voids it. */
+    consentRemote: z.string().default(DEFAULT_UPDATE_STATE.consentRemote),
     /** Branch to follow instead of the inferred one; empty = infer from the install. */
     trackRefOverride: z.string().default(DEFAULT_UPDATE_STATE.trackRefOverride),
   }),
+  migrate: migrateUpdateSettings,
 });
 
 const updateInfo = z.object({
@@ -29,7 +36,13 @@ const updateInfo = z.object({
 export const getUpdateStatus = defineRpc({
   name: "update.status",
   input: z.object({}),
-  output: updateInfo.extend({ lastResult: z.string() }),
+  output: updateInfo.extend({
+    lastResult: z.string(),
+    /** How the plugin is installed (read locally from `paseo plugin ls`, no network). */
+    installKind: z.enum(["git", "local", "other"]),
+    /** The Git remote updates would come from; empty for other installs. */
+    remote: z.string(),
+  }),
 });
 
 export const checkForUpdate = defineRpc({
@@ -40,6 +53,8 @@ export const checkForUpdate = defineRpc({
   }),
   output: updateInfo.extend({
     status: z.enum([
+      "not-consented",
+      "changed",
       "throttled",
       "local",
       "unsupported",
@@ -53,4 +68,14 @@ export const checkForUpdate = defineRpc({
     applied: z.boolean(),
     message: z.string(),
   }),
+});
+
+/**
+ * "Update now": installs `revision` from `remote`, both as shown to the owner, and only if the install
+ * still uses that remote and the commit is still the newest fast-forward of the followed branch.
+ */
+export const installUpdate = defineRpc({
+  name: "update.install",
+  input: z.object({ remote: z.string().min(1), revision: z.string().regex(/^[0-9a-f]{40}$/) }),
+  output: checkForUpdate.output,
 });

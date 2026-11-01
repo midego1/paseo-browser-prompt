@@ -8,7 +8,7 @@ import { DEFAULT_APP_LINK_TEMPLATE } from "./shared/browser-prompt";
 import { preferences } from "./shared/settings";
 import { getLauncherStatus, stashPrompt } from "./shared/trampoline";
 import { DEFAULT_TRAMPOLINE_PORT } from "./shared/trampoline-host";
-import { checkForUpdate, getUpdateStatus, updateSettings } from "./shared/update";
+import { checkForUpdate, getUpdateStatus, installUpdate, updateSettings } from "./shared/update";
 
 export default function contribute(server: PluginServerContext) {
   // Host-scoped persistence for start modes, the app deep link, launcher address, and done marks.
@@ -24,10 +24,12 @@ export default function contribute(server: PluginServerContext) {
   void settings.read().then(configureFrom, () => launcher.configure({ trampolineHost: "", trampolinePort: DEFAULT_TRAMPOLINE_PORT }));
   const unsubscribe = settings.subscribe((state) => configureFrom(state));
 
-  // Self-update on use: the client calls update.check when cards render or are used.
+  // Self-update: off until the owner enables it for the install's remote (see shared/updater.ts).
+  // The client calls update.check when cards render or are used; without consent it returns at once.
   const updater = createServerUpdater(server.registerSettings(updateSettings));
 
   server.handle(checkForUpdate, ({ force }) => updater.check({ force }));
+  server.handle(installUpdate, ({ remote, revision }) => updater.check({ install: { remote, revision } }));
   server.handle(getUpdateStatus, () => currentUpdateStatus());
 
   server.handle(stashPrompt, async ({ prompt }) => {

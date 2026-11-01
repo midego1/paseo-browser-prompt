@@ -9,19 +9,21 @@ let checkedThisSession = false;
 let toastShown = false;
 
 /**
- * Self-update on use. Returns a trigger the card calls on first render in a session and on
- * Start, Copy and Run. The daemon throttles remote checks to one per 30 minutes; failures stay
- * silent here and show up in the settings screen and plugin log.
+ * Self-update on use, only after the owner enabled it in settings. Returns a trigger the card calls
+ * on first render in a session and on Start, Copy and Run. Without consent (the default, or settings
+ * still loading or unreadable) it does nothing at all; the daemon checks the consent's remote again
+ * before contacting anything, throttles checks to one per 30 minutes, and keeps failures for the
+ * settings screen and plugin log.
  */
 export function useUpdateOnUse(): { onUse(): void; onFirstRender(): void } {
   const check = useRpc(checkForUpdate);
   const settings = useSettings(updateSettings);
   const toast = useToast();
-  const enabled = settings.status === "ready" ? settings.values.autoUpdate : null;
+  const enabled = settings.status === "ready" && settings.values.autoUpdate === true && settings.values.consentRemote !== "";
 
   const onUse = useCallback(() => {
-    // Wait for the toggle to load; an explicit "off" means no automatic checks at all.
-    if (enabled !== true) return;
+    // No consent (or not loaded): no automatic check at all.
+    if (!enabled) return;
     check({ force: false })
       .then((result) => {
         if (result.applied && !toastShown) {
@@ -33,7 +35,7 @@ export function useUpdateOnUse(): { onUse(): void; onFirstRender(): void } {
   }, [check, enabled, toast]);
 
   const onFirstRender = useCallback(() => {
-    if (checkedThisSession || enabled !== true) return;
+    if (checkedThisSession || !enabled) return;
     checkedThisSession = true;
     onUse();
   }, [enabled, onUse]);

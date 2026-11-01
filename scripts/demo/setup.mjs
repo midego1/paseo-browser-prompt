@@ -29,7 +29,6 @@ export async function openDemo({ viewport, overlay = true }) {
     }
   };
   await setSwitch("Show live screenshot", true);
-  await setSwitch("Auto-update on use", false);
   await page.getByRole("textbox", { name: "Provider" }).fill("claude-demo");
   await page.getByRole("textbox", { name: "Model" }).fill("stand-in");
   await page
