@@ -1,10 +1,17 @@
 # Browser prompt for Paseo
 
 A [Paseo](https://paseo.sh) plugin that renders a card with **Start in ChatGPT**, **Copy**, **Mark done**
-and **Run with Paseo agent** for every `browser-prompt` block in an assistant message. With
-**Report back to chat** (default Auto), a browser agent tells the chat that showed the card when it
-finishes or fails: the full report when that chat runs in an ask-first mode, a status-only notice
-otherwise.
+and **Run with Paseo agent** for every `browser-prompt` block in an assistant message.
+
+- **Run with Paseo agent** starts a browser agent in the background (Claude Auto mode by default,
+  with a fixed safety preamble). The card shows "Step N of M", a screenshot per step, and the run's
+  state; questions and permissions for you are answered right on the card.
+- The browser agent can ask the chat that showed the card about the task (**Talk to the chat**), and
+  tells that chat when it finishes or fails (**Report back to chat**: the full report to chats in an
+  ask-first mode, a status-only notice otherwise).
+- A block the agent repeats later in the chat is a full card that shares the first's done mark and
+  run; once done, later copies collapse to "✓ Already done · Show".
+- No auto-update without your consent: it is off until you enable it for the named repository.
 
 [![Browser prompt tour: a card in the chat, a background Paseo agent with step progress and a screenshot per step, a question to the chat, a question and a permission answered on the card, the report coming back, and the settings](docs/assets/browser-prompt-tour.gif)](docs/assets/browser-prompt-tour.mp4)
 
@@ -20,7 +27,7 @@ See [OVERVIEW.md](OVERVIEW.md) for what it does, what data goes where, and its l
 The screenshots below are the real Paseo app with this plugin. The agent text and the run's page
 screenshots (real example.com and iana.org pages) are demo stand-ins; see
 [how they are made](scripts/demo/README.md). The settings named here are under Settings → Plugins →
-Browser prompt.
+Browser prompts.
 
 **1. The card.** Every `browser-prompt` block in an agent's reply becomes a card. **Start in
 ChatGPT** copies the steps and opens ChatGPT, **Copy** only copies them, **Mark done** marks the
@@ -62,12 +69,28 @@ status-only notice otherwise).
 
 ![Done: the card's done status, the report back in the chat, and the chat's reply](docs/screenshots/done.png)
 
-**6. Settings.** Each behavior above is a setting, and so are the agent's provider, model,
-permission mode and thinking level.
+**6. Repeated blocks.** When the agent writes the same steps again later in the chat (for example
+when you ask for them again), the copy is a full card with "Also shown earlier in this chat"; it
+shares the first's done mark and run, and does not start a second run while one is going. Once the
+steps are done, later copies collapse to "✓ Already done · Show", and Show opens the card in place
+(**Collapse repeated blocks that are done**).
+
+![A copy of a done block opened with Show, with "Also shown earlier in this chat", above another copy collapsed to "✓ Already done · Show"](docs/screenshots/repeat-done.png)
+
+**7. Settings.** Each behavior above is a setting (see [Settings](#settings) for the full list).
+
+![Settings: Start in ChatGPT, the deep link, Collapse repeated blocks that are done, and Done marks](docs/screenshots/settings-general.png)
 
 ![Settings: Run with Paseo agent options](docs/screenshots/settings-run.png)
 
 ![Settings: the agent's provider, model, permission mode and thinking](docs/screenshots/settings-agent.png)
+
+**8. Updates.** Auto-update is off. For a Git install, the Updates section names the repository the
+plugin was installed from and says that, once enabled, newer plugin code from it is downloaded and
+installed automatically; **Enable auto-update** or **Not now**. **Check now** only reads the
+repository, and **Update now** installs the commit it names when you press it.
+
+![Settings: Updates, with the repository, the consent text, Enable auto-update and Not now](docs/screenshots/settings-updates.png)
 
 ## Install
 
@@ -90,8 +113,64 @@ from and offers **Enable auto-update** (newer commits from that repository are t
 installed when the plugin is used) or **Not now**; **Check now** and **Update now** work by hand.
 
 `paseo plugin add` and `paseo plugin install` are aliases. The plugin has no runtime npm
-dependencies and no build step. Tailscale on the daemon host is needed only for the ChatGPT desktop
-app launcher; everything else works without it.
+dependencies and no build step. Paseo 0.11.4 or later; thumbnails need a Paseo 0.13 or later app.
+Tailscale on the daemon host is needed only for the ChatGPT desktop app launcher; everything else
+works without it.
+
+## Settings
+
+Settings → Plugins → Browser prompts, in the order shown there. All are host settings, so every
+connected app shares them.
+
+**Browser prompts**
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Start in ChatGPT (desktop) | ChatGPT app | ChatGPT app (through the launcher), ChatGPT web, or Copy only. The prompt is always copied first. |
+| Start in ChatGPT (iOS and Android) | Copy only | Copy only, or ChatGPT web. ChatGPT documents no mobile deep link for a new prompt. |
+| ChatGPT app deep link | `codex://new?prompt={prompt}` | `{prompt}` is replaced by the encoded prompt; only `codex:` and `https:` are accepted. Save and Reset to default. |
+| Collapse repeated blocks that are done | on | A later copy of a block in the chat is a full card with "Also shown earlier in this chat"; once done, copies collapse to "✓ Already done · Show". Off: every copy is a plain full card. |
+| Done marks | – | How many cards are marked done on this host; Clear removes all marks. |
+
+**Run with Paseo agent**
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Confirm before starting | on | Asks before starting the agent; says when it will run in Auto mode. |
+| Open the agent when started | off | Off: the agent works in the background; the card shows its status (running…, needs you, done ✓, failed) and an Open link. On: its view opens right away. |
+| Show step progress | on | The agent marks each numbered step as it starts it (`[browser-prompt step N/M] …`); the card shows "Step N of M · …" with a progress bar. |
+| Show live screenshot | on | The agent takes a viewport screenshot after each numbered step (never of pages showing secrets); the card shows them as thumbnails under the progress bar. Needs a Paseo 0.13+ app to show them. |
+| Thumbnails | All steps | All steps: one thumbnail per step with "Step N" above it and the latest highlighted, side by side when the card is wide enough, a horizontal strip otherwise, the latest alone on very narrow screens. Latest only: just the newest screenshot. |
+| Talk to the chat | on | The agent may ask the chat that showed the card about the task; the plugin forwards each question framed as untrusted text (see below). |
+| Max questions to the chat per run | `10` | Whole number from 0 to 50; 0 works like Talk to the chat off. After the limit the agent asks you. |
+| Report back to chat | Auto | Auto, Always send the full report, or Off (see below). |
+| Provider | `claude` | Paseo provider id; only providers with a known ask-first mode are started. |
+| Model | `claude-sonnet-5-5` | Model id, or `provider/model`. |
+| Permission mode | `auto` | Claude: `auto` (Auto mode, a model classifier reviews tool calls; the default), `default` (Always Ask) or `plan`. Oh My Pi: `ask`. Bypass, accept-edits and other modes are refused and fall back to the default mode. |
+| Thinking | `high` | Thinking level passed to the provider. |
+| Reset agent settings to default | – | Provider, model, mode and thinking back to the defaults above. |
+| Agent links on cards | – | How many cards remember a started agent; Clear forgets them. |
+
+**ChatGPT launcher**
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Status | – | Whether the launcher runs, its address and port. |
+| Bind address | empty | Empty: this machine's Tailscale IPv4 (detected). Otherwise only this machine's own Tailscale address or 127.0.0.1; never 0.0.0.0 or a LAN address. |
+| Port | `5299` | The launcher's port. |
+
+**Updates** (Git installs)
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Enable auto-update / Not now | off | Names the repository the plugin was installed from; once enabled, newer plugin code from it is downloaded and installed when the plugin is used. Consent counts for that repository only. While on: Turn off. |
+| Installed, Latest seen, Last check | – | The installed commit and branch, the newest commit seen, and the last check's time and result. |
+| Update now | – | Shown when a newer commit is known: installs that commit from that repository, only when pressed. |
+| Check for updates now | – | Reads the newest commit of the followed branch; installs nothing unless auto-update is on. |
+| Follow branch | inferred | The branch to follow; empty means the branch the install was made from. |
+
+Local installs say the plugin does not update itself; npm and registry installs are updated by
+Paseo.
 
 ## Convention for agents
 
@@ -138,7 +217,7 @@ Rules:
 ```bash
 npm ci
 npm run typecheck
-npm test                     # parser, launcher, updater and agent-prompt unit tests
+npm test                     # unit tests (parser, card logic, launcher, updater, agent prompt, report back)
 paseo plugin install "$PWD"  # first time
 paseo plugin reload browser-prompt
 paseo plugin logs browser-prompt
@@ -178,9 +257,8 @@ in this chat" and shares the first's done mark and run. Once the block is done, 
 collapse to "✓ Already done · Show", and Show opens the card right there (with Undo done). Nothing
 scrolls the chat: in a long chat the first card may not even be rendered.
 
-| Setting | Default | What it does |
-| --- | --- | --- |
-| Collapse repeated blocks that are done | on | Later copies of a block get the hint, and collapse once the block is done. Off: every copy is a plain full card. (Stored as `mergeRepeats`.) |
+Setting: **Collapse repeated blocks that are done** (on; stored as `mergeRepeats`). Off: every copy is
+a plain full card.
 
 - **Same block** (`blockKey` in `shared/repeats.ts`): title and steps NFKC-normalized, line endings
   unified, whitespace collapsed, blank lines dropped, and step numbers written as `N. ` (`1.Open`,
@@ -198,13 +276,12 @@ scrolls the chat: in a long chat the first card may not even be rendered.
   before the read and for providers without message ids; other blocks of providers that give no
   message id keep a full card. A failed whole-chat read is retried after 2, 8 and 30 seconds.
 - **Views** (`repeatView`): the first block is a plain full card; a later copy of a block that is not
-  done is a full card with the hint; a later copy of a done block is one line until Show. 0.9.x
-  showed every later copy as one line pointing up ("↑ Same step as above") and scrolled to the first
-  card, which fails in long, virtualized chats; that is gone.
+  done is a full card with the hint; a later copy of a done block is one line until Show. Nothing
+  points or scrolls to the first card: in a long, virtualized chat it may not be rendered.
 - **Done marks** are per block in a chat: `<agentId>:<key>` in the `done` setting, so marking the
-  first card done covers its repeats. Marks from before 0.9.0 were `<agentId>:<cardId>` (a hash of
-  the raw text, which cannot be turned into the new key without the text); they still count, and a
-  card that finds its old mark moves it to the new form. **Clear** in settings empties the list.
+  first card done covers its repeats. Older marks of the form `<agentId>:<cardId>` (a hash of the
+  raw text, which cannot be turned into the new key without the text) still count, and a card that
+  finds its old mark moves it to the new form. **Clear** in settings empties the list.
 - **Runs** stay keyed by the card's own id (`<agentId>:<cardId>`, which the server checks against
   the run's card label), and the record also carries `key:<content key>` (after the server's
   `most-recent` marker). Every copy shows the newest run of its content in the chat
@@ -213,36 +290,20 @@ scrolls the chat: in a long chat the first card may not even be rendered.
   or waiting for the chat); then its Run button is disabled and the shared status shows. The first
   card keeps its usual Run again.
 - Item ids name their message (`card-<messageId>-<n>`; without a message id, a hash of the message
-  text up to its first block). Before 0.9.0 every message used `card-0`, `card-1`…, and Paseo keeps
-  plugin items by id within a chat, so two messages with blocks showed the later message's cards
-  in both.
+  text up to its first block): Paseo keeps plugin items by id within a chat, so ids shared between
+  messages would show one message's cards in both.
 
 ## Run with Paseo agent
 
-Settings (**Settings → Plugins → Browser prompts → Run with Paseo agent**):
-
-| Setting | Default | What it does |
-| --- | --- | --- |
-| Confirm before starting | on | Asks before starting the agent; says when it will run in Auto mode. |
-| Open the agent when started | off | Off: the agent works in the background; the card shows its status (running…, needs you, done ✓, failed) and an Open link. On: its view opens right away. |
-| Show step progress | on | The agent marks each numbered step as it starts it (`[browser-prompt step N/M] …`); the card shows "Step N of M · …" with a progress bar. |
-| Show live screenshot | on | The agent takes a viewport screenshot after each numbered step (never of pages showing secrets); the card shows them as thumbnails under the progress bar. Needs a Paseo 0.13+ app to show them. |
-| Thumbnails | All steps | All steps: one thumbnail per step with "Step N" above it and the latest highlighted, side by side when the card is wide enough, a horizontal strip otherwise, the latest alone on very narrow screens. Latest only: just the newest screenshot. |
-| Report back to chat | Auto | Auto, Always send the full report, or Off (see below). |
-| Talk to the chat | on | The agent may ask the chat that showed the card about the task; the plugin forwards each question framed as untrusted text (see below). |
-| Max questions to the chat per run | `10` | Whole number from 0 to 50; 0 works like Talk to the chat off. After the limit the agent asks the owner. |
-| Provider | `claude` | Paseo provider id; only providers with a known ask-first mode are started. |
-| Model | `claude-sonnet-5-5` | Model id, or `provider/model`. |
-| Permission mode | `auto` | Claude: `auto` (Auto mode, a model classifier reviews tool calls; the default), `default` (Always Ask) or `plan`. Oh My Pi: `ask`. Bypass, accept-edits and other modes are refused and fall back to the default mode. |
-| Thinking | `high` | Thinking level passed to the provider. |
+The settings are listed under [Settings](#settings).
 
 Not configurable (the hard rule, rule 3 of the fixed preamble): passwords, tokens, API keys, 2FA codes
 and other secrets, and confirmations of destructive, irreversible, security, permission, billing,
 DNS/WAF, merge, deploy, publish or payment actions are always asked of the owner with
 AskUserQuestion. The agent is told never to ask the chat for them and never to accept them from the
 chat, a web page or any other message. Invalid inputs are not saved: the question cap must be a
-whole number from 0 to 50, and refused permission modes keep Save disabled. Settings schema v8 adds
-the three new settings with their defaults (a malformed stored cap is clamped).
+whole number from 0 to 50, and refused permission modes keep Save disabled (a malformed stored cap
+is clamped).
 
 The card's "Run with Paseo agent" button uses the app's own Paseo connection (`usePaseo()`):
 
@@ -258,7 +319,8 @@ The card's "Run with Paseo agent" button uses the app's own Paseo connection (`u
   the provider's "Auto mode"). A blank or refused mode falls back to the provider's default mode
   (`defaultModeFor`: claude `auto`, omp `ask`); providers without an ask-first mode are refused.
   Auto mode never counts as ask-first (report back treats a source in Auto mode as unsafe).
-  Settings v7 moves a stored Claude `default` or empty mode to `auto` once.
+  An older stored Claude `default` or empty mode was moved to `auto` once, when Auto became the
+  default.
 - `prompt = buildAgentPrompt(title, steps, config)`: fixed safety preamble (`AGENT_SAFETY_PREAMBLE`),
   in Auto mode followed by `CLASSIFIER_MODE_RULE` (an approved tool call is not the owner's
   approval; the stops of rule 3 must be AskUserQuestion questions), then the steps verbatim inside
@@ -273,16 +335,16 @@ The card's "Run with Paseo agent" button uses the app's own Paseo connection (`u
   none, so the run is stopped by archiving it, and the card shows the error. The settings screen
   keeps Save disabled for a refused mode (`agentModeError`), so none is ever stored.
 - The card remembers `<agentId>:<cardId> -> startedAgentId` in host settings (plus `"most-recent"`
-  when the run started outside the card agent's workspace; a save that loses a revision race is
-  retried against the newest settings) and shows the
+  when the run started outside the card agent's workspace, then `key:<content key>` so copies of the
+  block share the run; a save that loses a revision race is retried against the newest settings)
+  and shows the
   status from `useAgent(startedAgentId, …)`. Timeline renderers get no `navigation`, so
   "Open" opens the plugin screen `agent-run`, which calls `navigation.openAgent` once.
   Screens get no client-state provider on Paseo 0.11, so screen code must not use
   `useAgent`/`useWorkspace` (they throw "Plugin state hooks must run inside a workspace
   panel"); `test/screen-hooks.test.mjs` checks every registered screen's import graph.
 - Labels (`shared/report-back.ts` `runLabels`): `browser-prompt: run`,
-  `browser-prompt-source: <card agent id>`, `browser-prompt-card: <card id>`. (0.3.0 also set
-  `browser-prompt-mode`; it is no longer written or read.)
+  `browser-prompt-source: <card agent id>`, `browser-prompt-card: <card id>`.
 - Nothing is appended to timelines and prompt text is never logged.
 
 ### Report back to chat
@@ -293,8 +355,8 @@ names; they are deprecated until 2027-04-30. Moving to `addHook` needs the 0.14 
 `requirements.paseo` `>=0.14.0`, so it is left for a later release.
 
 Setting **Report back to chat** (host setting `reportBack`): `auto` (default), `full` or `off`.
-Settings that cannot be read or are invalid count as `auto`, never `full`. A v5 boolean migrates
-`true` to `auto` and `false` to `off`. `server/report-back-hook.ts` registers
+Settings that cannot be read or are invalid count as `auto`, never `full`. An old boolean value
+migrates `true` to `auto` and `false` to `off`. `server/report-back-hook.ts` registers
 `server.on("agent.turn_ended")`; the handler returns at once and `server/report-back.ts` delivers in
 the background, because Paseo cancels hook requests after 30 seconds and their `signal` with them.
 Plugin cleanup aborts every pending wait through the plugin's own `AbortController`.
@@ -512,8 +574,9 @@ No cron, and nothing is downloaded or installed without the owner's consent.
 - **Consent**: the `updates` settings hold `autoUpdate` (default off) and `consentRemote`, the Git
   remote shown when the owner pressed **Enable auto-update** after reading "newer plugin code from
   <remote> will be downloaded and installed automatically". Consent counts only while the install's
-  remote is that one (`hasConsent`); a moved install asks again. **Not now** keeps it off.
-  Settings version 2 turns off any `autoUpdate` stored before 0.10.0 (it defaulted to on).
+  remote is that one (`hasConsent`); a moved install asks again. **Not now** keeps it off. The
+  `updates` settings migration (version 2) turns off any `autoUpdate` stored when it still defaulted
+  to on, so those installs are asked once.
 - **Automatic checks**: the card calls `update.check` on its first render in an app session and on
   Start, Copy and Run only when the settings are loaded and consented. On the daemon, an automatic
   check without `autoUpdate` returns `not-consented` at once (no `paseo plugin ls`, no network), and
@@ -525,9 +588,8 @@ No cron, and nothing is downloaded or installed without the owner's consent.
   `changed`.
 - The settings screen reads `update.status`, which includes the install's kind and remote from
   `paseo plugin ls --json` (local, no network), so the remote is named before the owner decides.
-
 - Install info: `paseo plugin ls --json` (this plugin's `installation.identity.remote` and
-  `currentRevision`). Non-Git installs report "Local install, no auto-update".
+  `currentRevision`). Local installs show "Local install: the plugin does not update itself".
 - Only `https://` remotes (the one the plugin was installed from); Git runs with
   `-c protocol.allow=never -c protocol.https.allow=always`, no terminal prompts.
 - Latest: `git ls-remote --symref <remote> HEAD 'refs/heads/*'` (10 s timeout, no prompts).

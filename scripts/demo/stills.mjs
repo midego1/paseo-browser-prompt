@@ -12,7 +12,7 @@ const VIEWPORT = { width: 1280, height: 1600 };
 const PAD = 16;
 mkdirSync(OUT, { recursive: true });
 
-const { browser, page, pause, settingsUrl } = await openDemo({ viewport: VIEWPORT, overlay: false });
+const { browser, page, pause, settingsUrl, workspacePage } = await openDemo({ viewport: VIEWPORT, overlay: false });
 const title = () => page.getByText("Check what example.com says", { exact: true }).first();
 /** The card: the nearest ancestor of its title that also holds its buttons. */
 const card = () => title().locator("xpath=ancestor::*[.//*[text()='Copy']][1]");
@@ -89,6 +89,21 @@ try {
   const doneLabel = page.getByText("Paseo agent done ✓").first();
   await still("done", [card(), notice, thanks], { scroll: doneLabel, top: doneLabel, topPad: 10 });
 
+  // 6. Repeated blocks: the same steps three times in another chat. Done on the first card; the
+  // second copy opened with Show (full card, "Also shown earlier in this chat"), the third collapsed.
+  if (process.env.DEMO_REPEAT_WORKSPACE_ID) {
+    await page.goto(workspacePage(process.env.DEMO_REPEAT_WORKSPACE_ID), { waitUntil: "networkidle" });
+    await page.getByText("Also shown earlier in this chat").nth(1).waitFor({ timeout: 60_000 });
+    await page.getByText("Mark done", { exact: true }).first().click();
+    await page.getByText("✓ Already done").nth(1).waitFor();
+    await page.getByText("Show", { exact: true }).first().click();
+    const hint = page.getByText("Also shown earlier in this chat").first();
+    await hint.waitFor();
+    const copy = hint.locator("xpath=ancestor::*[.//*[text()='Copy']][1]");
+    const collapsed = page.getByText("✓ Already done").first().locator("xpath=ancestor::*[.//*[text()='Show']][1]");
+    await still("repeat-done", [copy, collapsed]);
+  }
+
   // 6. The plugin's settings, at their defaults: the run options, then the agent's provider and mode.
   await openDefaultSettings(page, settingsUrl);
   const section = page.getByText("Run with Paseo agent", { exact: true }).first();
@@ -99,6 +114,15 @@ try {
   });
   const provider = page.getByText("Provider", { exact: true }).first();
   await still("settings-agent", [group("Provider")], { scroll: provider, top: provider, topPad: 20 });
+  const general = page.getByText("Browser prompts", { exact: true }).last();
+  const generalGroup = page.getByText("Done marks", { exact: true }).first().locator(
+    "xpath=ancestor::*[.//*[text()='Start in ChatGPT (desktop)']][1]",
+  );
+  await still("settings-general", [general, generalGroup], { scroll: general });
+  // A Git install (record.sh with DEMO_PLUGIN_GIT) shows its repository and the consent text.
+  const updates = page.getByText("Updates", { exact: true }).last();
+  const updatesGroup = page.getByText("Follow branch", { exact: true }).first().locator("xpath=ancestor::*[.//*[text()='Save branch']][1]");
+  await still("settings-updates", [updates, updatesGroup], { scroll: updates });
 } finally {
   await browser.close();
 }

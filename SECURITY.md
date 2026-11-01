@@ -24,7 +24,8 @@ Do not include real secrets, tokens or private prompts in a report; describe the
 | A browser agent's question for the chat (up to 1,500 characters), escaped and framed as untrusted text by the plugin | The agent whose chat showed the card, and that agent's model provider, in any permission mode | Talk to the chat (on by default, at most 10 per run by default) |
 | Ids of runs that already reported | `reported-runs.json` in the state directory below | Report back to chat |
 | Settings, done marks, card-to-agent links | Paseo host settings on your daemon | Always |
-| Updater state, log, commit-only Git history | `~/.local/state/paseo-plugin-browser-prompt/` on the daemon host | Git installs |
+| Updater state, log, commit-only Git history | `~/.local/state/paseo-plugin-browser-prompt/` on the daemon host | Git installs, once a check or update ran |
+| The chat's own timeline (assistant messages and their ids) | Read by the card in your Paseo app, kept in memory to recognize repeated blocks; not sent anywhere | A chat with browser-prompt cards |
 | `git ls-remote` / `git fetch` | The `https://` remote the plugin was installed from | Git installs: automatically only after the owner enabled auto-update for that remote; otherwise only when the owner presses Check now or Update now |
 
 The plugin does not read the clipboard, does not log prompt text, and sends no telemetry.
@@ -89,8 +90,11 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
   after you select and press Send, and a permission offers Allow only when the card shows everything
   it would allow: every input field in full and exactly as sent (nothing cut, no characters removed
   or normalized, no unknown fields such as `dangerouslyDisableSandbox`), and Allow needs a second
-  "Confirm allow" tap. Otherwise only Deny. Values typed into a page are masked until you tap Show. The question text, options and details come from the agent and can echo a page; read them
-  before you click.
+  "Confirm allow" tap. Otherwise only Deny. Values typed into a page are masked until you tap Show.
+  The question text, options and details come from the agent and can echo a page; read them before
+  you click.
+- A block repeated later in a chat shares the first's done mark and run. A copy cannot start a
+  second run while that run is going, so asking for the steps again does not start parallel agents.
 - Self-update is off until you enable it in settings, where the plugin names the `https://` remote it
   was installed from and says that newer code from it will be downloaded and installed. Declining, or
   never deciding, leaves everything as installed, including when cards are shown and when settings
