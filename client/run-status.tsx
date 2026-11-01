@@ -10,10 +10,11 @@ import { runStateFrom, type RunState } from "../shared/agent-prompt";
 export function useRunState(
   agentId: string | null,
   startedHere = false,
-): { state: RunState; status: string | null; updatedAt: string | null } {
+): { state: RunState; status: string | null; createdAt: string | null; updatedAt: string | null } {
   const snapshot = useAgent(agentId ?? "", (agent) => ({
     status: agent.status,
     attentionReason: agent.attentionReason,
+    createdAt: agent.createdAt,
     updatedAt: agent.updatedAt,
   }));
   const [seenRunning, setSeenRunning] = useState(false);
@@ -23,10 +24,11 @@ export function useRunState(
   useEffect(() => {
     if (snapshot?.status === "running") setSeenRunning(true);
   }, [snapshot?.status]);
-  if (!agentId) return { state: "unknown", status: null, updatedAt: null };
+  if (!agentId) return { state: "unknown", status: null, createdAt: null, updatedAt: null };
   return {
     state: runStateFrom(snapshot, seenRunning, startedHere),
     status: snapshot?.status ?? null,
+    createdAt: snapshot?.createdAt ?? null,
     updatedAt: snapshot?.updatedAt ?? null,
   };
 }

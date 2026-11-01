@@ -34,6 +34,7 @@ import { OwnerPromptBox, useOwnerPrompts } from "./owner-prompt";
 import { RUN_LABELS, runVisual, useRunState } from "./run-status";
 import { SCREENSHOT_BLOCKED_HINT } from "../shared/screenshot";
 import { ScreenshotStrip } from "./screenshot-thumb";
+import { RunStatsRow } from "./run-stats-row";
 import { StepProgressRow, useStepProgress } from "./step-progress";
 import { countSteps } from "../shared/steps";
 import { useUpdateOnUse } from "./update";
@@ -112,6 +113,7 @@ export function BrowserPromptCard({
   const {
     state: observedState,
     status: runStatus,
+    createdAt: runCreatedAt,
     updatedAt: runUpdatedAt,
   } = useRunState(runAgentId, localRun !== null && localRun === runAgentId);
   const totalSteps = useMemo(() => countSteps(text), [text]);
@@ -130,6 +132,7 @@ export function BrowserPromptCard({
     screenshotsBlocked,
     permissionPending,
     permissionEvents,
+    meta: runMeta,
   } = useStepProgress(runAgentId, totalSteps, observedState, runStatus, showSteps, showScreenshot);
   // The run's pending question or permission, answered here only by the owner's click. Paseo does
   // not mark a running agent that waits for a permission, so the card reads the run's snapshot when
@@ -493,6 +496,18 @@ export function BrowserPromptCard({
       ) : null}
       {runAgentId && showSteps ? (
         <StepProgressRow progress={stepProgress} total={totalSteps} state={shownState} theme={theme} compact={layout.compact} />
+      ) : null}
+      {runAgentId ? (
+        <RunStatsRow
+          state={shownState}
+          createdAt={runCreatedAt}
+          updatedAt={runUpdatedAt}
+          lastEntryAt={runMeta.lastEntryAt}
+          usage={runMeta.usage}
+          streamSkewMs={runMeta.skewMs}
+          theme={theme}
+          compact={layout.compact}
+        />
       ) : null}
       {runAgentId && runState === "needs-input" ? (
         <OwnerPromptBox
