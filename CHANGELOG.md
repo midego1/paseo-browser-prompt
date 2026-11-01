@@ -2,14 +2,17 @@
 
 ## 0.13.0 (unreleased)
 
-- The card shows one small line for a "Run with Paseo agent" run under the step progress: the run
-  time and the run's tokens, e.g. "Running · 2m 14s · 18.4k in · 950 out" or "Took 3m 02s · 701k in
-  · 4.6k out". While the run starts or runs its icon spins (still with reduced motion) and the time
-  counts up once a second in that line only; once it ended the line shows the total. Start and end
-  come from the run agent (`createdAt`, the latest timeline entry, else `updatedAt`), so they
-  survive a reload. Tokens are the daemon's `lastUsage` from the timeline read the card already
-  does (input including cached input, and output); they appear when the run's turn completes and
-  are missing for runs from before a daemon restart. No cost is shown, no new setting.
+- The card shows one small line for a "Run with Paseo agent" run under the step progress: the time
+  since the run started (including time it waited for the owner) and the last turn's tokens, e.g.
+  "Running · 2m 14s" or "Took 3m 02s · last turn: 36 in · 701k cached · 4.6k out". While the run
+  starts or runs its icon spins (still with reduced motion) and the time counts up once a second in
+  that line only, corrected for a client clock ahead of or behind the daemon's; once it ended the
+  line shows the total. Start and end come from the run agent (`createdAt` and the latest timeline
+  entry), so they survive a reload; an ended run whose end is unknown (a stopped run, a failed
+  read) shows just its state, without a time. Tokens are the daemon's `lastUsage` from the
+  timeline read the card already does, shown as reported (input, cached input when non-zero,
+  output; never added up); they appear when a turn completes, are cleared while a follow-up turn
+  runs, and are missing for runs from before a daemon restart. No cost is shown, no new setting.
 
 ## 0.12.0 (unreleased)
 

@@ -504,6 +504,7 @@ export function BrowserPromptCard({
           updatedAt={runUpdatedAt}
           lastEntryAt={runMeta.lastEntryAt}
           usage={runMeta.usage}
+          streamSkewMs={runMeta.skewMs}
           theme={theme}
           compact={layout.compact}
         />

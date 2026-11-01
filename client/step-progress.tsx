@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import { liveSubscription, type RunState } from "../shared/agent-prompt";
 import { createRunTracker, type RunTracker, type RunView } from "../shared/run-tracker";
-import type { UsageLike } from "../shared/run-stats";
+import { observeSkew, type UsageLike } from "../shared/run-stats";
 import { stepProgressView } from "../shared/step-view";
 import type { StepProgress } from "../shared/steps";
 
@@ -19,13 +19,21 @@ const EMPTY: RunView = {
   permissionEvents: 0,
 };
 
-/** Read along with the timeline: when the run's latest entry happened and its token usage. */
+/**
+ * Read along with the timeline: when the run's latest entry happened and its last turn's token usage
+ * (both only from a read while the run is not live, cleared when it goes live again), and the client
+ * clock's estimated lead over the daemon's from live stream timestamps.
+ */
 export interface RunMeta {
   lastEntryAt: string | null;
   usage: UsageLike | null;
+  skewMs: number | null;
 }
 
-const NO_META: RunMeta = { lastEntryAt: null, usage: null };
+const NO_META: RunMeta = { lastEntryAt: null, usage: null, skewMs: null };
+
+/** A smaller skew estimate re-renders the card only when it improves by at least this much. */
+const SKEW_STEP_MS = 200;
 
 const usageKey = (usage: UsageLike | null) =>
   usage ? `${usage.inputTokens}:${usage.cachedInputTokens}:${usage.outputTokens}` : "";
@@ -52,7 +60,8 @@ function sameView(a: RunView, b: RunView): boolean {
  * still waiting for the chat. `useAgent` (the status source) has no message text, so markers come
  * from the run's timeline, without polling:
  * - one tail read when the card shows the run (also for finished runs, to tell a waiting question
- *   from a report; skipped for stopped runs, redone if a dependency change cancels it),
+ *   from a report; skipped for stopped runs, because reading a closed agent's timeline makes the
+ *   daemon load it again, idle; redone if a dependency change cancels it),
  * - the live timeline stream only while the agent's own status is running or initializing,
  * - one more tail read when a live run settles, since its idle status can arrive before the stream's
  *   turn_completed.
@@ -72,6 +81,8 @@ export function useStepProgress(
   const [view, setView] = useState<RunView>(EMPTY);
   const [meta, setMeta] = useState<RunMeta>(NO_META);
   const live = !!agentId && liveSubscription(status);
+  const liveNow = useRef(live);
+  liveNow.current = live;
   const stopped = state === "stopped";
 
   const publish = () => {
@@ -91,12 +102,14 @@ export function useStepProgress(
           if (cancelled || !tracker.current) return;
           tracker.current.history(page.entries.map(({ item }) => item));
           publish();
+          // A live run's latest entry is not its end, and its usage is the previous turn's.
+          if (liveNow.current) return;
           const lastEntryAt = page.entries.at(-1)?.timestamp ?? null;
           const usage = page.agent?.lastUsage ?? null;
           setMeta((current) =>
             current.lastEntryAt === lastEntryAt && usageKey(current.usage) === usageKey(usage)
               ? current
-              : { lastEntryAt, usage },
+              : { ...current, lastEntryAt, usage },
           );
         },
         () => {
@@ -139,6 +152,7 @@ export function useStepProgress(
     if (live) {
       tracker.current?.resumed();
       publish();
+      setMeta((current) => (current.lastEntryAt || current.usage ? { ...current, lastEntryAt: null, usage: null } : current));
       return;
     }
     if (!settledNow || !agentId) return;
@@ -157,6 +171,15 @@ export function useStepProgress(
       }
       tracker.current?.event(event);
       publish();
+      const timestamp = (message as { timestamp?: unknown }).timestamp;
+      if (typeof timestamp === "string") {
+        setMeta((current) => {
+          const next = observeSkew(current.skewMs, Date.now(), timestamp);
+          return next !== null && (current.skewMs === null || next <= current.skewMs - SKEW_STEP_MS)
+            ? { ...current, skewMs: next }
+            : current;
+        });
+      }
     });
     void subscription.ready?.catch(() => undefined);
     return () => subscription();

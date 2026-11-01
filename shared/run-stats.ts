@@ -1,13 +1,14 @@
 // Run time and tokens of a "Run with Paseo agent" run, for the small stats line on the card. Pure,
-// so the derivation (start, end, live or not) and the formats are tested without React.
+// so the derivation (start, end, live or not, clock skew) and the formats are tested without React.
 //
 // Sources, all from the daemon so the line survives a reload:
-// - start: the run agent's createdAt (the card creates the agent when the run starts),
-// - end of a run that has ended: the timestamp of its latest timeline entry, else its updatedAt
-//   (which later changes such as archiving also move),
-// - tokens: the agent snapshot's lastUsage, which the daemon fills when a turn completes (for a
-//   one-turn run that is the run's total; after a follow-up turn it is that turn's). The daemon keeps
-//   it in memory only, so a run from before a daemon restart shows no tokens.
+// - start: the run agent's createdAt (the card creates the agent when the run starts); the time is
+//   since the run started, including any time it waited for the owner or the chat,
+// - end of a run that has ended: the timestamp of its latest timeline entry. Without one (the read
+//   failed or has not answered yet) the line shows the state without a time, never a guess,
+// - tokens: the agent snapshot's lastUsage, which the daemon fills when a turn completes, so they
+//   are the last turn's (for a one-turn run, the run's). The daemon keeps it in memory only, so a
+//   run from before a daemon restart shows no tokens.
 
 type RunStateLike = "starting" | "running" | "needs-input" | "asking" | "done" | "failed" | "stopped" | "unknown";
 
@@ -18,16 +19,18 @@ export interface UsageLike {
   outputTokens?: number;
 }
 
+/** Token counts as the provider reports them; null where it reports none. Never summed. */
 export interface TokenCounts {
-  /** Input tokens including cached input. */
-  input: number;
-  cached: number;
-  output: number;
+  input: number | null;
+  cached: number | null;
+  output: number | null;
 }
 
 export interface RunTiming {
   startMs: number;
-  /** Null while the run is going: the elapsed time counts up to now. */
+  /** Whether the run has ended; a going run counts up to now. */
+  ended: boolean;
+  /** End of an ended run; null when its end is not known (then no time is shown). */
   endMs: number | null;
 }
 
@@ -36,9 +39,16 @@ export interface RunStatsView {
   spinning: boolean;
   /** The time still counts up, so the line re-renders once a second. */
   live: boolean;
-  text: string;
-  accessibilityLabel: string;
+  /** "Running · 2m 14s", "Took 3m 02s", or the bare state when an ended run's end is unknown. */
+  timeText: string;
+  timeLabel: string;
+  /** "last turn: 36 in · 701k cached · 4.6k out", or null when the run reports no tokens. */
+  tokenText: string | null;
+  tokenLabel: string | null;
 }
+
+/** Counts above this are a provider's bug, not tokens; they read as missing. */
+const MAX_TOKENS = 1e12;
 
 const LIVE_STATES = new Set<RunStateLike>(["starting", "running", "needs-input"]);
 const ENDED_STATES = new Set<RunStateLike>(["done", "failed", "stopped", "asking"]);
@@ -50,7 +60,7 @@ function parseTime(value: string | null | undefined): number | null {
 }
 
 function count(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= MAX_TOKENS ? value : null;
 }
 
 /** "45s", "2m 04s", "1h 02m"; negative or invalid durations read as 0s. */
@@ -77,79 +87,123 @@ export function formatTokens(n: number): string {
   return scaled(value / 1_000_000, "M");
 }
 
-/** Input (with cached input) and output tokens, or null when the usage has no token counts yet. */
+/**
+ * Input, cached input and output tokens as reported, or null when the usage has no non-zero count.
+ * They are never added up: Claude reports cached input apart from input, Codex-style providers as a
+ * part of it, and the card cannot tell which.
+ */
 export function tokenCounts(usage: UsageLike | null | undefined): TokenCounts | null {
   if (!usage) return null;
-  const input = count(usage.inputTokens);
-  const cached = count(usage.cachedInputTokens);
-  const output = count(usage.outputTokens);
-  if (input === null && output === null) return null;
-  const counts = { input: (input ?? 0) + (cached ?? 0), cached: cached ?? 0, output: output ?? 0 };
-  return counts.input + counts.output > 0 ? counts : null;
+  const counts = { input: count(usage.inputTokens), cached: count(usage.cachedInputTokens), output: count(usage.outputTokens) };
+  if (counts.input === null && counts.output === null) return null;
+  if (!counts.input && !counts.cached && !counts.output) return null;
+  return counts;
 }
 
 /**
  * Start and end of the run from the agent's data. A going run (starting, running, waiting for the
- * owner) has no end yet; a run that ended stops at its latest timeline entry, else its updatedAt.
+ * owner) has no end yet; a run that ended stops at its latest timeline entry, or has no known end.
  * Null when the state is unknown or the start is missing.
  */
 export function runTiming(input: {
   state: RunStateLike;
   createdAt: string | null | undefined;
-  updatedAt: string | null | undefined;
   lastEntryAt?: string | null;
 }): RunTiming | null {
   const startMs = parseTime(input.createdAt);
   if (startMs === null) return null;
-  if (LIVE_STATES.has(input.state)) return { startMs, endMs: null };
+  if (LIVE_STATES.has(input.state)) return { startMs, ended: false, endMs: null };
   if (!ENDED_STATES.has(input.state)) return null;
   const entry = parseTime(input.lastEntryAt);
-  const updated = parseTime(input.updatedAt);
-  const end = entry !== null && entry >= startMs ? entry : updated;
-  return { startMs, endMs: end !== null && end >= startMs ? end : startMs };
+  return { startMs, ended: true, endMs: entry !== null && entry >= startMs ? entry : null };
 }
 
-/** The elapsed run time at `nowMs`: up to now while going, start to end once it ended. */
-export function elapsedMs(timing: RunTiming, nowMs: number): number {
-  return Math.max(0, (timing.endMs ?? nowMs) - timing.startMs);
+/**
+ * The client clock's lead over the daemon's, from a daemon timestamp seen at `clientNowMs`. Each
+ * observation is the skew plus the time the timestamp took to arrive, so the smallest one is the
+ * best estimate; only timestamps that are fresh when seen (live stream events, an updatedAt that
+ * just changed) should be passed. Null observations keep the current estimate.
+ */
+export function observeSkew(current: number | null, clientNowMs: number, daemonTimestamp: string | null | undefined): number | null {
+  const daemonMs = parseTime(daemonTimestamp);
+  if (daemonMs === null || !Number.isFinite(clientNowMs)) return current;
+  const observed = clientNowMs - daemonMs;
+  return current === null ? observed : Math.min(current, observed);
 }
 
-const STATE_WORD: Record<RunStateLike, string> = {
+/**
+ * The elapsed run time at `nowMs` (client clock): for a going run up to now, corrected by the
+ * client's estimated lead `skewMs` and never below 0; for an ended run start to end, or null when
+ * its end is unknown.
+ */
+export function elapsedMs(timing: RunTiming, nowMs: number, skewMs: number | null = null): number | null {
+  if (timing.ended) return timing.endMs === null ? null : Math.max(0, timing.endMs - timing.startMs);
+  return Math.max(0, nowMs - (skewMs ?? 0) - timing.startMs);
+}
+
+const LIVE_WORD: Record<string, string> = {
   starting: "Starting",
   running: "Running",
   "needs-input": "Waiting for you",
+};
+
+const ENDED_WORD: Record<string, { timed: string; bare: string }> = {
+  done: { timed: "Took", bare: "Done" },
+  failed: { timed: "Failed after", bare: "Failed" },
+  stopped: { timed: "Stopped after", bare: "Stopped" },
   // The run row above already says it waits for the chat's answer; its own turn has ended.
-  asking: "Ran",
-  done: "Took",
-  failed: "Failed after",
-  stopped: "Stopped after",
-  unknown: "",
+  asking: { timed: "Ran", bare: "Waiting for the chat" },
 };
 
 /**
- * "Running · 2m 14s · 701k in · 4.6k out", "Took 3m 02s · …". Null when there is no timing (no
- * run, unknown state, or no start time); tokens are left out when the run reports none.
+ * "Running · 2m 14s", "Took 3m 02s" and "last turn: 36 in · 701k cached · 4.6k out". Null when
+ * there is no timing (no run, unknown state, or no start time); tokens are null when the run
+ * reports none.
  */
 export function runStatsView(input: {
   state: RunStateLike;
   timing: RunTiming | null;
   nowMs: number;
+  skewMs?: number | null;
   usage?: UsageLike | null;
 }): RunStatsView | null {
   if (!input.timing || input.state === "unknown") return null;
-  const live = input.timing.endMs === null;
-  const duration = formatDuration(elapsedMs(input.timing, input.nowMs));
-  const word = STATE_WORD[input.state];
-  const time = live ? `${word} · ${duration}` : `${word} ${duration}`;
+  const elapsed = elapsedMs(input.timing, input.nowMs, input.skewMs ?? null);
+  const duration = elapsed === null ? null : formatDuration(elapsed);
+  let timeText: string;
+  let timeLabel: string;
+  if (!input.timing.ended) {
+    const word = LIVE_WORD[input.state] ?? "Running";
+    timeText = `${word} · ${duration}`;
+    timeLabel = `${word}, ${duration} since the run started`;
+  } else {
+    const words = ENDED_WORD[input.state] ?? ENDED_WORD.done;
+    timeText = duration === null ? words.bare : `${words.timed} ${duration}`;
+    timeLabel = timeText;
+  }
   const tokens = tokenCounts(input.usage);
-  const tokenText = tokens ? `${formatTokens(tokens.input)} in · ${formatTokens(tokens.output)} out` : null;
-  const tokenLabel = tokens
-    ? `${tokens.input} input tokens${tokens.cached ? ` (${tokens.cached} cached)` : ""}, ${tokens.output} output tokens`
-    : null;
+  const parts: string[] = [];
+  const labels: string[] = [];
+  if (tokens) {
+    if (tokens.input !== null) {
+      parts.push(`${formatTokens(tokens.input)} in`);
+      labels.push(`${tokens.input} input`);
+    }
+    if (tokens.cached) {
+      parts.push(`${formatTokens(tokens.cached)} cached`);
+      labels.push(`${tokens.cached} cached input`);
+    }
+    if (tokens.output !== null) {
+      parts.push(`${formatTokens(tokens.output)} out`);
+      labels.push(`${tokens.output} output`);
+    }
+  }
   return {
     spinning: input.state === "starting" || input.state === "running",
-    live,
-    text: tokenText ? `${time} · ${tokenText}` : time,
-    accessibilityLabel: `${live ? `${word}, ${duration} so far` : `${word} ${duration}`}${tokenLabel ? `, ${tokenLabel}` : ""}`,
+    live: !input.timing.ended,
+    timeText,
+    timeLabel,
+    tokenText: parts.length ? `last turn: ${parts.join(" · ")}` : null,
+    tokenLabel: labels.length ? `Last turn's tokens: ${labels.join(", ")}` : null,
   };
 }

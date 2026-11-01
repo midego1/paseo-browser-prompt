@@ -3,7 +3,7 @@ import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useRef, useState } from "react";
 import { AccessibilityInfo, Animated, Easing, Platform, Text, View } from "react-native";
 import type { RunState } from "../shared/agent-prompt";
-import { runStatsView, runTiming, type UsageLike } from "../shared/run-stats";
+import { observeSkew, runStatsView, runTiming, type UsageLike } from "../shared/run-stats";
 
 /** Whether the owner asked for less motion (prefers-reduced-motion on the web). */
 function useReducedMotion(): boolean {
@@ -36,10 +36,28 @@ function useNow(live: boolean): number {
   return now;
 }
 
-function Spinner({ size, color, spinning }: { size: number; color: string; spinning: boolean }) {
+/**
+ * The client clock's estimated lead over the daemon's: the stream's estimate, improved by every
+ * updatedAt that changes while the row is shown (a changed value is fresh; the first one may be old).
+ */
+function useSkew(updatedAt: string | null, streamSkewMs: number | null): number | null {
+  const seen = useRef<string | null>(updatedAt);
+  const [skew, setSkew] = useState<number | null>(null);
+  useEffect(() => {
+    if (!updatedAt || updatedAt === seen.current) return;
+    seen.current = updatedAt;
+    setSkew((current) => observeSkew(current, Date.now(), updatedAt));
+  }, [updatedAt]);
+  if (skew === null) return streamSkewMs;
+  return streamSkewMs === null ? skew : Math.min(skew, streamSkewMs);
+}
+
+/** The run's icon: spins while the run works, unless the owner asked for reduced motion. */
+function Spinner({ size, color }: { size: number; color: string }) {
+  const reducedMotion = useReducedMotion();
   const rotation = useRef(new Animated.Value(0)).current;
   useEffect(() => {
-    if (!spinning) {
+    if (reducedMotion) {
       rotation.setValue(0);
       return;
     }
@@ -53,7 +71,7 @@ function Spinner({ size, color, spinning }: { size: number; color: string; spinn
     );
     loop.start();
     return () => loop.stop();
-  }, [spinning, rotation]);
+  }, [reducedMotion, rotation]);
   const rotate = rotation.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "360deg"] });
   return (
     <Animated.View style={{ transform: [{ rotate }] }}>
@@ -63,9 +81,9 @@ function Spinner({ size, color, spinning }: { size: number; color: string; spinn
 }
 
 /**
- * "⟳ Running · 2m 14s · 701k in · 4.6k out": the run's time from the agent's own timestamps and,
- * once a turn has completed, its tokens. Only this row re-renders each second, and only while the
- * run is going.
+ * "⟳ Running · 2m 14s", then "Took 3m 02s · last turn: 36 in · 701k cached · 4.6k out": the run's
+ * time from the agent's own timestamps and, once a turn has completed, that turn's tokens. Only
+ * this row re-renders each second, and only while the run is going.
  */
 export function RunStatsRow({
   state,
@@ -73,6 +91,7 @@ export function RunStatsRow({
   updatedAt,
   lastEntryAt,
   usage,
+  streamSkewMs,
   theme,
   compact,
 }: {
@@ -81,29 +100,32 @@ export function RunStatsRow({
   updatedAt: string | null;
   lastEntryAt: string | null;
   usage: UsageLike | null;
+  streamSkewMs: number | null;
   theme: PluginHostProps["theme"];
   compact: boolean;
 }) {
-  const timing = runTiming({ state, createdAt, updatedAt, lastEntryAt });
-  const now = useNow(timing?.endMs === null);
-  const reducedMotion = useReducedMotion();
-  const view = runStatsView({ state, timing, nowMs: now, usage });
+  const timing = runTiming({ state, createdAt, lastEntryAt });
+  const now = useNow(!!timing && !timing.ended);
+  const skewMs = useSkew(updatedAt, streamSkewMs);
+  const view = runStatsView({ state, timing, nowMs: now, skewMs, usage });
   if (!view) return null;
   const size = compact ? 12 : 13;
+  const text = { color: theme.colors.foregroundMuted, fontSize: size, fontVariant: ["tabular-nums" as const] };
   return (
-    <View
-      accessible
-      accessibilityLabel={view.accessibilityLabel}
-      style={{ flexDirection: "row", alignItems: "center", gap: 6 }}
-    >
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
       {view.spinning ? (
-        <Spinner size={size} color={theme.colors.accent} spinning={!reducedMotion} />
+        <Spinner size={size} color={theme.colors.accent} />
       ) : (
         <Icon name="Timer" size={size} color={theme.colors.foregroundMuted} />
       )}
-      <Text style={{ flexShrink: 1, color: theme.colors.foregroundMuted, fontSize: size, fontVariant: ["tabular-nums"] }} numberOfLines={1}>
-        {view.text}
+      <Text accessibilityRole="timer" accessibilityLabel={view.timeLabel} style={text} numberOfLines={1}>
+        {view.timeText}
       </Text>
+      {view.tokenText ? (
+        <Text accessibilityLabel={view.tokenLabel ?? undefined} style={[text, { flexShrink: 1 }]} numberOfLines={1}>
+          · {view.tokenText}
+        </Text>
+      ) : null}
     </View>
   );
 }

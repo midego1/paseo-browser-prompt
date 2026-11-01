@@ -40,9 +40,9 @@ confirmation, **Confirm before starting**).
 with an Open link (**Open the agent when started** opens it right away instead). "Step N of M" and
 the bar follow the agent's step lines (**Show step progress**), and a screenshot per step appears
 under it with its step number, the latest highlighted (**Show live screenshot**, **Thumbnails**).
-A small line under the progress shows the run time (counting up with a spinning icon while it runs,
-the total once it ended) and, once a turn has finished, its input and output tokens, for example
-"Took 3m 02s · 701k in · 4.6k out".
+A small line under the progress shows the run time since it started (counting up with a spinning
+icon while it runs, the total once it ended) and, once a turn has finished, that turn's tokens, for
+example "Took 3m 02s · last turn: 36 in · 701k cached · 4.6k out".
 
 ![Running: Step 3 of 4 with a progress bar and thumbnails for steps 1, 2 and 3](docs/screenshots/running.png)
 
@@ -457,25 +457,38 @@ ordinary assistant text, not a message to the chat, and does not end the turn.
 
 Under the step progress the card shows one line for the run, `RunStatsRow`
 (`client/run-stats-row.tsx`, formats and derivation in `shared/run-stats.ts`):
-"Running · 2m 14s · 18.4k in · 950 out" while it runs, "Took 3m 02s · …" (or "Failed after",
-"Stopped after") once it ended. No setting; it shows whenever the card shows a run.
+"Running · 2m 14s" while it runs, "Took 3m 02s · last turn: 36 in · 701k cached · 4.6k out" (or
+"Failed after", "Stopped after") once it ended. No setting; it shows whenever the card shows a run.
 
-- Time comes from the run agent's own data, so it survives a reload: the start is the agent's
-  `createdAt` (`useAgent`), the end of a run that ended is the timestamp of the latest entry from
-  the card's existing tail read of the timeline, else the agent's `updatedAt` (which later changes,
-  such as archiving, also move). While the run starts, runs or waits for the owner the time counts
-  up: one 1-second interval in that row only (not the card), cleared when the run ends or the row
-  unmounts.
+- The time is since the run started, including any time it waited for the owner or the chat. It
+  comes from the run agent's own data, so it survives a reload: the start is the agent's `createdAt`
+  (`useAgent`), the end of a run that ended is the timestamp of the latest entry from the card's
+  existing tail read of the timeline. Without that (a stopped run, a read that failed or has not
+  answered) the line shows just "Stopped", "Done" or "Failed", never a time from `updatedAt`, which
+  later changes such as archiving move. While the run starts, runs or waits for the owner the time
+  counts up: one 1-second interval in that row only (not the card), cleared when the run ends or
+  the row unmounts.
+- The live time corrects for a client clock that runs ahead of or behind the daemon's: every
+  daemon timestamp that is fresh when seen (the live stream's events, an `updatedAt` that changes
+  while the card shows the run) gives client now minus that timestamp, and the smallest of these is
+  the estimate (`observeSkew`), subtracted from the client's now. The time never goes below 0.
+- Stopped runs get no tail read: reading a closed agent's timeline makes the daemon load it again,
+  so it would turn idle and the card would show it as done.
 - The icon spins (`LoaderCircle`, React Native `Animated`) only while the run is starting or
   running, not while it needs the owner, is done, failed or stopped. With reduced motion
   (`AccessibilityInfo.isReduceMotionEnabled`, prefers-reduced-motion on the web) it stays still.
+  The time has `accessibilityRole="timer"`; the tokens have their own label with every count.
 - Tokens are the daemon's `lastUsage` on the agent snapshot that the same tail read returns
-  (`timeline.refetch` includes the agent; `useAgent`'s snapshot has no usage). "in" is
-  `inputTokens + cachedInputTokens`, "out" is `outputTokens`. The daemon fills these when a turn
-  completes (while streaming it only keeps context-window fields), so tokens appear when the run's
-  turn ends; for a run with a follow-up turn they are that turn's. The daemon keeps `lastUsage` in
-  memory only: a run from before a daemon restart shows its time but no tokens. Cost
-  (`totalCostUsd`) is never shown.
+  (`timeline.refetch` includes the agent; `useAgent`'s snapshot has no usage). They are the **last
+  turn's**: the daemon fills them when a turn completes (while streaming it only keeps
+  context-window fields). For a one-turn run that is the run's. The card shows `inputTokens`,
+  `cachedInputTokens` (when non-zero) and `outputTokens` as reported and never adds them up: Claude
+  reports cached input apart from input, Codex-style providers as a part of it. Counts that are not
+  finite numbers, negative or above 1e12 read as missing. A read while the run is live is not used
+  for the line, and the run going live again (a follow-up turn) clears the tokens and the end, so
+  an older turn's tokens never show while it runs. The daemon keeps `lastUsage` in memory only: a
+  run from before a daemon restart shows its time but no tokens. Cost (`totalCostUsd`) is never
+  shown.
 - The run screen (`client/run-screen.tsx`) only hands off to Paseo's agent view and has no agent
   state on Paseo 0.11 (screen code must not use `useAgent`, see above), so the line is on the card
   only.
