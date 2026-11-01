@@ -36,6 +36,11 @@ export function consentText(remote: string): string {
   return `When you use the plugin, newer plugin code from ${remote} will be downloaded and installed automatically (only fast-forwards of the branch it follows, at most one check every 30 minutes). Nothing is downloaded or installed until you enable it.`;
 }
 
+/** The state the owner agreed to, while auto-update is on. */
+export function consentOnText(remote: string): string {
+  return `When you use the plugin, newer plugin code from ${remote} is downloaded and installed automatically (only fast-forwards of the branch it follows, at most one check every 30 minutes).`;
+}
+
 /** What "Update now" does, shown before the owner presses it. */
 export function updateNowText(remote: string, revision: string): string {
   return `Downloads commit ${shortSha(revision)} from ${remote} and installs it as this plugin. Reload Paseo afterwards.`;
@@ -115,7 +120,7 @@ export function UpdateSettings({ theme }: Pick<PluginSurfaceProps, "theme">) {
         {remote && consented ? (
           <SettingsAction
             label="Auto-update is on"
-            hint={consentText(remote)}
+            hint={consentOnText(remote)}
             actionLabel="Turn off"
             onPress={() => void settings.save({ ...values, autoUpdate: false, consentRemote: "" }, revision)}
           />
