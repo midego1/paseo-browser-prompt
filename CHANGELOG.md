@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.10.2 (unreleased)
+
+- Docs only. README, OVERVIEW and SECURITY describe 0.10.1 as it is: a complete Settings section in
+  the order of the settings screen, auto-update off until you consent for the named repository
+  (Check now, Update now), repeated blocks as full cards ("Also shown earlier in this chat") with
+  done copies collapsed behind Show, the answer-on-card details, and no stale version notes.
+- New screenshots: `repeat-done.png` (a done copy opened with Show above a collapsed one),
+  `settings-general.png` (with Collapse repeated blocks that are done) and `settings-updates.png`
+  (the consent text with Enable auto-update and Not now); `asking.png`, `done.png`,
+  `settings-run.png` and `settings-agent.png` re-captured.
+- `scripts/demo/record.sh --stills`: `DEMO_PLUGIN_GIT` / `DEMO_PLUGIN_REF` install the plugin over
+  Git so the Updates screenshot shows a real Git install, and a second demo chat asks for the same
+  steps three times for the repeat screenshot.
+
 ## 0.10.1 (unreleased)
 
 - Repeated blocks are full cards again: a later copy of a block that is not done has all its

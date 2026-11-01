@@ -66,7 +66,13 @@ docker exec "$DAEMON" mkdir -p /opt/browser-prompt
 docker exec "$DAEMON" chown -R paseo:paseo /opt/browser-prompt
 as_paseo paseo daemon config set pluginsEnabled true >/dev/null
 as_paseo paseo reload --json >/dev/null
-as_paseo paseo plugin install /opt/browser-prompt >/dev/null
+# DEMO_PLUGIN_GIT (owner/repo) and DEMO_PLUGIN_REF install the plugin over Git instead, so the Updates
+# settings show a real Git install (its repository and the consent text). The stills use that.
+if [ -n "${DEMO_PLUGIN_GIT:-}" ]; then
+  as_paseo paseo plugin install "git:$DEMO_PLUGIN_GIT" --ref "${DEMO_PLUGIN_REF:-main}" >/dev/null
+else
+  as_paseo paseo plugin install /opt/browser-prompt >/dev/null
+fi
 as_paseo paseo plugin install /opt/browser-prompt/scripts/demo/stand-in-model >/dev/null
 as_paseo paseo plugin ls
 
@@ -91,7 +97,26 @@ WORKSPACE_ID="$(as_paseo paseo agent run --provider claude-demo/stand-in --mode 
   grep -oE 'wks_[A-Za-z0-9]+' | head -1)"
 test -n "$WORKSPACE_ID"
 
+# The stills also show repeated blocks: a second chat, in its own workspace, asked for the steps
+# three times (the stand-in model answers each time with the same block).
+REPEAT_WORKSPACE_ID=""
+if [ "$MODE" = stills ]; then
+  as_paseo sh -c 'mkdir -p /tmp/demo-repeats && cd /tmp/demo-repeats && git init -q'
+  REPEAT_WORKSPACE_ID="$(as_paseo paseo agent run --provider claude-demo/stand-in --mode default --title "Steps again" \
+    --cwd /tmp/demo-repeats "Can you check what example.com says and the page its Learn more link opens?" 2>&1 |
+    grep -oE 'wks_[A-Za-z0-9]+' | head -1)"
+  test -n "$REPEAT_WORKSPACE_ID"
+  REPEAT_AGENT="$(as_paseo paseo ls --json | grep -B2 '"name": "Steps again"' | grep -oE '"id": "[^"]+"' | cut -d'"' -f4 | head -1)"
+  test -n "$REPEAT_AGENT"
+  for prompt in "Could you give me those steps again?" "Link me the steps here again, please."; do
+    as_paseo paseo wait "$REPEAT_AGENT" >/dev/null 2>&1 || true
+    as_paseo paseo send "$REPEAT_AGENT" "$prompt" >/dev/null
+  done
+  as_paseo paseo wait "$REPEAT_AGENT" >/dev/null 2>&1 || true
+fi
+
 RECORD=(docker run --rm "${RUN_AS[@]}" --network "container:$DAEMON" -e DEMO_WORKSPACE_ID="$WORKSPACE_ID"
+  -e DEMO_REPEAT_WORKSPACE_ID="$REPEAT_WORKSPACE_ID"
   -e HOME=/rec/.home -e npm_config_cache=/rec/.npm -v "$WORK:/rec" -w /rec "$TOOLS_IMAGE")
 
 if [ "$MODE" = stills ]; then

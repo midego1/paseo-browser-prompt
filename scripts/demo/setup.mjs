@@ -50,7 +50,9 @@ export async function openDemo({ viewport, overlay = true }) {
     .catch(() => {});
   await page.mouse.move(viewport.width - 100, viewport.height - 160);
   await pause(1500);
-  return { browser, page, pause, settingsUrl };
+  /** The app's page for another workspace of the demo daemon. */
+  const workspacePage = (id) => `${BASE}/h/${hostId}/workspace/${id}`;
+  return { browser, page, pause, settingsUrl, workspacePage };
 }
 
 /** The plugin's settings, reset to its defaults (not the stand-in provider this recording used). */
