@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { addLifecycleHook, HOOK_NAMES } from "../server/hooks.ts";
 import { readRecordedRun, readReportMode, registerReportBack } from "../server/report-back-hook.ts";
 import { createReportBack } from "../server/report-back.ts";
 import { fileReportedStore } from "../server/reported-store.ts";
@@ -640,7 +641,7 @@ test("run records come from the card's runs setting", async () => {
   assert.equal(await readRecordedRun(invalid, { sourceId: SOURCE, cardId: "card-1", runId: RUN }), null);
 });
 
-test("the hook returns at once, reports in the background, and cleanup stops it", async () => {
+test("on a Paseo 0.14 host (no addHook) the hook returns at once, reports in the background, and cleanup stops it", async () => {
   const capture = () => {
     const handlers = new Map();
     const state = { removed: false };
@@ -691,6 +692,54 @@ test("the hook returns at once, reports in the background, and cleanup stops it"
   await wiredA.dispose();
   await wiredB.dispose();
   assert.equal(a.state.removed, true);
+});
+
+test("hosts with addHook get the new hook name; Paseo 0.14 hosts get the deprecated on", async () => {
+  assert.deepEqual(HOOK_NAMES, {
+    "agent.turn_started": "agent.turn.before",
+    "agent.turn_ended": "agent.turn.after",
+    "agent.permission_requested": "agent.permission.before",
+  });
+  const handler = async () => {};
+  const calls = [];
+  const off = () => {};
+  // addHook is called as a method of the server (the host may rely on `this`), and wins over on.
+  const modern = {
+    addHook(name, h) {
+      assert.equal(this, modern);
+      calls.push(["addHook", name, h]);
+      return off;
+    },
+    on: () => assert.fail("on must not be used when addHook exists"),
+  };
+  assert.equal(addLifecycleHook(modern, "agent.turn_ended", handler), off);
+  const legacy = { on: (name, h) => (calls.push(["on", name, h]), off) };
+  assert.equal(addLifecycleHook(legacy, "agent.turn_ended", handler), off);
+  assert.deepEqual(calls, [["addHook", "agent.turn.after", handler], ["on", "agent.turn_ended", handler]]);
+});
+
+test("with addHook, report back registers agent.turn.after, returns at once and cleans up", async () => {
+  const handlers = new Map();
+  const state = { removed: false };
+  const server = {
+    addHook(name, handler) {
+      handlers.set(name, handler);
+      return () => (state.removed = true);
+    },
+    on: () => assert.fail("on must not be used when addHook exists"),
+  };
+  const busy = fakePaseo(world({ [SOURCE]: { labels: {}, status: "running" } }));
+  const recorded = { read: async () => ready({ runs: [[`${SOURCE}:card-1`, RUN]] }) };
+  const wired = registerReportBack(server, recorded, { log: () => {}, busyWaitMs: 60_000 });
+  assert.deepEqual([...handlers.keys()], ["agent.turn.after"]);
+  const started = Date.now();
+  await handlers.get("agent.turn.after")(turnEnded(), { paseo: busy.paseo, signal: new AbortController().signal });
+  assert.ok(Date.now() - started < 50, "handler returned without waiting for the busy source");
+  busy.setStatus(SOURCE, "idle");
+  await tick(30);
+  assert.equal(busy.sent.length, 1);
+  await wired.dispose();
+  assert.equal(state.removed, true);
 });
 
 test("index.server.ts wires report back with the file store and disposes it", () => {
