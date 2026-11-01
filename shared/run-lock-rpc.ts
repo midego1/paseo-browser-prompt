@@ -11,7 +11,8 @@ const lockInput = z.object({
 /** Takes the daemon's in-flight lock for a block's run (see shared/run-lock.ts) before starting it. */
 export const acquireRunLock = defineRpc({
   name: "run.lock",
-  input: lockInput,
+  /** `endedRunId`: the run this card shows has ended; a lock naming only that run does not hold. */
+  input: lockInput.extend({ endedRunId: z.string().min(1).max(200).optional() }),
   output: z.union([
     z.object({ ok: z.literal(true), token: z.string() }),
     z.object({ ok: z.literal(false), agentId: z.string().nullable() }),

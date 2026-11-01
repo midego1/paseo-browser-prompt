@@ -9,7 +9,9 @@
   before the run record arrives could both start a run. The daemon now keeps an in-flight lock per
   chat and block: only the first press starts a run, a second copy shows that run (or says it is
   starting). A failed start frees the lock at once; a start that never reports back frees it after
-  60 seconds, and a started run is named in it for 10 seconds.
+  3 minutes, and a started run is named in it for 10 seconds, unless that run has already ended
+  (Run again then starts a new one). If the daemon does not answer within 5 seconds, the card
+  starts without the lock and logs why.
 - Auto-update re-reads the consent and the install's remote right before it installs, so turning
   auto-update off (or the install moving to another repository) while a check runs installs
   nothing. Update now is unchanged.

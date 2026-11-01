@@ -5,12 +5,24 @@
 // Pure, so tests load it with `node --experimental-strip-types`.
 import type { BlockFingerprint } from "./block-key.ts";
 
-/** A start that never reports back (app closed, network gone) frees the lock after this. */
-export const RUN_LOCK_TTL_MS = 60_000;
+/**
+ * Safety net for a stale lock: a start that never reports back (app closed, network gone) frees it
+ * after this. Far longer than a slow start (workspace lookup, agent create, mode check), so it does
+ * not expire while a start is still going; a normal start or failure hands the lock back at once.
+ */
+export const RUN_LOCK_TTL_MS = 180_000;
 /** After a start the lock names the run until the run record has reached every copy. */
 export const RUN_LOCK_HOLD_MS = 10_000;
 /** Locks kept at most; expired ones go first, then the oldest. */
 const MAX_LOCKS = 500;
+
+/** Run states after which the run is over: pressing Run again starts a new one. */
+const ENDED_RUN_STATES = new Set(["done", "failed", "stopped"]);
+
+/** The run a card shows when it has ended, else null (passed to `acquire` as `endedRunId`). */
+export function endedRun(agentId: string | null, state: string): string | null {
+  return agentId && ENDED_RUN_STATES.has(state) ? agentId : null;
+}
 
 /** One lock per chat and block content, as the shared run: the source agent and the full fingerprint. */
 export function runLockKey(sourceAgentId: string, fingerprint: BlockFingerprint): string {
@@ -54,9 +66,13 @@ export function createRunLocks(options: { now?: () => number; token?: () => stri
   }
 
   return {
-    acquire(key: string): AcquireResult {
+    /**
+     * `endedRunId`: the run the pressing card shows has ended (failed, stopped by the mode guard,
+     * done). A lock that only names that run then no longer holds, so Run again starts a new one.
+     */
+    acquire(key: string, endedRunId?: string | null): AcquireResult {
       const held = live(key);
-      if (held) return { ok: false, agentId: held.agentId };
+      if (held && !(endedRunId && held.agentId === endedRunId)) return { ok: false, agentId: held.agentId };
       prune();
       const token = nextToken();
       locks.set(key, { token, expiresAt: now() + RUN_LOCK_TTL_MS, agentId: null });

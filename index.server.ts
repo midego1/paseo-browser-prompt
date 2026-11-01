@@ -43,8 +43,8 @@ export default function contribute(server: PluginServerContext) {
 
   // In-flight run lock: copies of a block in one chat start one run, also before its record is saved.
   const runLocks = createRunLocks();
-  server.handle(acquireRunLock, ({ sourceAgentId, key, length, check }) =>
-    runLocks.acquire(runLockKey(sourceAgentId, { key, length, check })),
+  server.handle(acquireRunLock, ({ sourceAgentId, key, length, check, endedRunId }) =>
+    runLocks.acquire(runLockKey(sourceAgentId, { key, length, check }), endedRunId),
   );
   server.handle(finishRunLock, ({ sourceAgentId, key, length, check, token, agentId }) => {
     const lockKey = runLockKey(sourceAgentId, { key, length, check });

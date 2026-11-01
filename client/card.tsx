@@ -15,6 +15,7 @@ import {
   sharedRunRecord,
   withinMessage,
 } from "../shared/repeats";
+import { endedRun } from "../shared/run-lock";
 import { acquireRunLock, finishRunLock } from "../shared/run-lock-rpc";
 import { MAX_DONE, MAX_RUNS, preferences } from "../shared/settings";
 import { stashPrompt } from "../shared/trampoline";
@@ -37,6 +38,9 @@ import { StepProgressRow, useStepProgress } from "./step-progress";
 import { countSteps } from "../shared/steps";
 import { useUpdateOnUse } from "./update";
 import { useFirstOf } from "./chat-index";
+
+/** How long the card waits for the daemon's run lock before starting without it. */
+const RUN_LOCK_RPC_TIMEOUT_MS = 5_000;
 
 const DESKTOP_HINT = "Your Paseo desktop app must be open: the agent drives the browser tabs there.";
 
@@ -290,15 +294,26 @@ export function BrowserPromptCard({
   /**
    * The daemon's in-flight lock for this block's run: null when this card may start it. When another
    * copy is starting or just started the run, this card shows that run (or waits for its record).
-   * A daemon that cannot be asked does not block the start (the shared run record still applies).
+   * A run this card shows that has ended does not hold it. A daemon that cannot be asked (error or
+   * no answer within RUN_LOCK_RPC_TIMEOUT_MS) does not block the start; the shared run record still
+   * applies.
    */
   async function takeRunLock(): Promise<{ token: string | null } | null> {
-    const lockInput = { sourceAgentId: agentId, ...fingerprint };
+    const lockInput = { sourceAgentId: agentId, ...fingerprint, endedRunId: endedRun(runAgentId, shownState) ?? undefined };
     let result: Awaited<ReturnType<typeof lockRun>>;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      result = await lockRun(lockInput);
-    } catch {
+      result = await Promise.race([
+        lockRun(lockInput),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("no answer from the daemon")), RUN_LOCK_RPC_TIMEOUT_MS);
+        }),
+      ]);
+    } catch (error) {
+      console.warn(`[browser-prompt] run lock unavailable, starting without it: ${error instanceof Error ? error.message : String(error)}`);
       return { token: null };
+    } finally {
+      clearTimeout(timer);
     }
     if (result.ok) return { token: result.token };
     if (result.agentId) setLocalRun(result.agentId);
@@ -313,7 +328,9 @@ export function BrowserPromptCard({
 
   function finishLock(token: string | null, startedAgentId?: string) {
     if (!token) return;
-    void unlockRun({ sourceAgentId: agentId, ...fingerprint, token, agentId: startedAgentId }).catch(() => undefined);
+    void unlockRun({ sourceAgentId: agentId, ...fingerprint, token, agentId: startedAgentId }).catch((error) => {
+      console.warn(`[browser-prompt] could not hand back the run lock: ${error instanceof Error ? error.message : String(error)}`);
+    });
   }
 
   async function launchAgent() {

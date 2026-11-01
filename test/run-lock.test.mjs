@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { blockFingerprint } from "../shared/block-key.ts";
-import { createRunLocks, RUN_LOCK_HOLD_MS, RUN_LOCK_TTL_MS, runLockKey } from "../shared/run-lock.ts";
+import { createRunLocks, endedRun, RUN_LOCK_HOLD_MS, RUN_LOCK_TTL_MS, runLockKey } from "../shared/run-lock.ts";
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const steps = "1. Open https://example.com\n2. Read the first paragraph.\n3. Report it.";
@@ -62,6 +62,25 @@ test("a start that never reports back frees the lock after the timeout; a starte
   assert.ok(RUN_LOCK_HOLD_MS < RUN_LOCK_TTL_MS);
 });
 
+test("Run again after the shown run ended (failed, stopped by the mode guard, done) is not held by the started window", () => {
+  const { locks } = clock();
+  const key = runLockKey("agent-1", blockFingerprint("Check", steps));
+  locks.acquire(key);
+  locks.started(key, "t1", "run-1");
+  for (const state of ["failed", "stopped", "done"]) assert.equal(endedRun("run-1", state), "run-1", state);
+  for (const state of ["starting", "running", "needs-input", "asking", "unknown"]) assert.equal(endedRun("run-1", state), null, state);
+  assert.equal(endedRun(null, "failed"), null);
+  assert.deepEqual(locks.acquire(key, endedRun("run-1", "running")), { ok: false, agentId: "run-1" }, "still going: shows it");
+  assert.deepEqual(locks.acquire(key, "run-other"), { ok: false, agentId: "run-1" }, "another ended run does not free a newer one");
+  const again = locks.acquire(key, endedRun("run-1", "stopped"));
+  assert.deepEqual(again, { ok: true, token: "t2" }, "the run ended: a new run may start");
+  assert.deepEqual(locks.acquire(key, "run-1"), { ok: false, agentId: null }, "a lock that is starting a new run still holds");
+});
+
+test("the stale-lock timeout is far longer than a slow start", () => {
+  assert.ok(RUN_LOCK_TTL_MS >= 180_000);
+});
+
 test("expired locks are dropped and the map stays bounded", () => {
   const { locks, advance } = clock();
   for (let i = 0; i < 50; i++) locks.acquire(`k${i}`);
@@ -81,7 +100,10 @@ test("the card takes the daemon's lock before starting and hands it back on star
   assert.match(launch, /finishLock\(lockToken, started\.agentId\)/, "a started run names itself in the lock");
   assert.match(launch, /finally \{\s*\/\/[^\n]*\n\s*finishLock\(lockToken\);/, "a failed start releases it");
   assert.match(card, /if \(result\.agentId\) setLocalRun\(result\.agentId\);/, "a refused copy shows the run");
+  assert.match(card, /endedRunId: endedRun\(runAgentId, shownState\)/, "an ended run does not hold Run again");
+  assert.match(card, /RUN_LOCK_RPC_TIMEOUT_MS\)/, "a daemon that does not answer cannot leave the card busy");
+  assert.match(card, /console\.warn\(`\[browser-prompt\] run lock unavailable/, "a lock failure is logged");
   const server = read("index.server.ts");
-  assert.match(server, /server\.handle\(acquireRunLock,/);
+  assert.match(server, /runLocks\.acquire\(runLockKey\(sourceAgentId, \{ key, length, check \}\), endedRunId\)/);
   assert.match(server, /server\.handle\(finishRunLock,/);
 });
