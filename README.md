@@ -182,15 +182,18 @@ own card, as before 0.9.0.
 - **Same block** (`blockKey` in `shared/repeats.ts`): title and steps NFKC-normalized, line endings
   unified, whitespace collapsed, blank lines dropped, and step numbers written as `N. ` (`1.Open`,
   `1.   Open` and `1) Open` match); case and everything else count. The key is `k1-` plus a 53-bit
-  hash (cyrb53) of that text.
+  hash (cyrb53) of that text (`shared/block-key.ts`). The chat index also keeps the normalized
+  length and a second, independent hash (FNV-1a 32), and two blocks match only when all three do.
 - **Which one is first**: a timeline renderer gets only its own item (no position, and every card
   of a chat gets the same `timestamp` from Paseo), so the transformer puts the message's id
   (`messageId`) in each card, and `client/chat-index.ts` reads the chat's timeline once per app
   session (newest page first, up to 25 pages of 200 entries) to learn every message's place
   (`seqStart`) and blocks. A card is placed by its own message, so the answer does not depend on
   which cards a virtualized list renders first. A card whose message is not known yet (a new message)
-  shows in full and triggers a tail read (at most every 1.5 s). Providers that give no message id
-  keep a full card for every block.
+  shows in full and triggers a tail read (at most every 1.5 s). A block that repeats an earlier block
+  of the same message is marked by the transformer (`sameAs`) and shows as a repeat at once, also
+  before the read and for providers without message ids; other blocks of providers that give no
+  message id keep a full card. A failed whole-chat read is retried after 2, 8 and 30 seconds.
 - **Pressing a repeat**: the plugin API has no way to scroll the chat to another item. In the web
   and desktop app the line scrolls to the first card through its DOM id (react-native-web `nativeID`)
   when the list has rendered it, and the first card flashes; otherwise (phones, or a first card the
@@ -200,8 +203,11 @@ own card, as before 0.9.0.
   the raw text, which cannot be turned into the new key without the text); they still count, and a
   card that finds its old mark moves it to the new form. **Clear** in settings empties the list.
 - **Runs** stay keyed by the card's own id (`<agentId>:<cardId>`, which the server checks against
-  the run's card label). Repeat lines have no buttons, so they never start a run; a repeat that
-  already has its own run (started before 0.9.0) keeps its full card.
+  the run's card label). Identical blocks share that id, so the run record also names the block it
+  was started from (`item:<messageId>:<index>`, after the server's `most-recent` marker). Repeat
+  lines have no buttons, so they never start a run, and a run started from the first card keeps its
+  repeats merged; only a repeat whose record names that very block (started while merging was off)
+  keeps its full card. Records from before 0.9.1 belong to the first card.
 - Item ids name their message (`card-<messageId>-<n>`; without a message id, a hash of the message
   text up to its first block). Before 0.9.0 every message used `card-0`, `card-1`…, and Paseo keeps
   plugin items by id within a chat, so two messages with blocks showed the later message's cards

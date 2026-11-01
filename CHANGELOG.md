@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.1 (unreleased)
+
+- Fix: after the first card started a run, its repeats turned back into full cards (identical blocks
+  share a run key). The run record now names the block it was started from, and only that block
+  counts the run as its own; records without the name belong to the first card.
+- Blocks match only when their key, normalized length and a second, independent hash all match.
+- A failed whole-chat read is retried after 2, 8 and 30 seconds instead of leaving every card full
+  for the session.
+- Less jumping while the chat is read: a block that repeats an earlier block of the same message
+  shows as a repeat at once (also for providers without message ids).
+- Flash listeners no longer leave empty entries behind.
+
 ## 0.9.0 (unreleased)
 
 - Merge repeated blocks (new setting, on by default): a block with the same title and steps as an
