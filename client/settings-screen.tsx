@@ -147,8 +147,8 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
             }}
           />
           <SettingsSwitch
-            label="Merge repeated blocks"
-            hint="A block with the same title and steps as an earlier one in the chat shows as one line, “↑ Same step as above” (or “✓ Already done” once the first is done). Pressing it shows the first card. Off: every block gets its own card."
+            label="Collapse repeated blocks that are done"
+            hint="A block with the same title and steps as an earlier one in the chat is a full card that shares its done mark and run, with “Also shown earlier in this chat”. Once it is done, later copies show “✓ Already done · Show”; Show opens the card in place. Off: every block is a full card without the hint."
             value={values.mergeRepeats}
             onValueChange={(mergeRepeats) => void settings.save({ ...values, mergeRepeats }, revision)}
           />
