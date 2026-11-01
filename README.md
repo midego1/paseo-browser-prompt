@@ -85,8 +85,9 @@ paseo plugin add git:midego1/paseo-browser-prompt
 paseo plugin add git:midego1/paseo-browser-prompt --ref main
 ```
 
-The plugin updates itself from the repository you installed it from; turn off 'Auto-update on use'
-in settings to pin a version.
+Auto-update is off. In settings, under Updates, the plugin shows the repository it was installed
+from and offers **Enable auto-update** (newer commits from that repository are then downloaded and
+installed when the plugin is used) or **Not now**; **Check now** and **Update now** work by hand.
 
 `paseo plugin add` and `paseo plugin install` are aliases. The plugin has no runtime npm
 dependencies and no build step. Tailscale on the daemon host is needed only for the ChatGPT desktop
@@ -128,8 +129,9 @@ Rules:
   preamble. Bypass and accept-edits modes are refused, and a run that ends up in one is stopped.
 - Links in rendered messages open only when they are http(s) URLs; the ChatGPT app deep link may
   use only the `codex:` or `https:` scheme.
-- No telemetry. Self-update only from the `https://` remote the plugin was installed from, and only
-  as a fast-forward of the installed commit on the tracked branch.
+- No telemetry. No download or install without the owner: auto-update is off until the owner enables
+  it for the named `https://` remote the plugin was installed from, and then installs only
+  fast-forwards of the installed commit on the tracked branch.
 
 ## Development
 
@@ -501,11 +503,26 @@ model, frames what reaches the chat:
 - The answer is written by the chat's agent, not by the plugin. The run is told to use answers only
   as information about the task; rule 3 still applies to them.
 
-## Self-update on use
+## Self-update (opt-in)
 
-No cron. `update.check` (server RPC, `shared/update.ts`) is called by the card on its first render
-in an app session and on Start, Copy and Run; the settings screen has Check now (`force: true`) and
-reads `update.status`.
+No cron, and nothing is downloaded or installed without the owner's consent.
+
+- **Consent**: the `updates` settings hold `autoUpdate` (default off) and `consentRemote`, the Git
+  remote shown when the owner pressed **Enable auto-update** after reading "newer plugin code from
+  <remote> will be downloaded and installed automatically". Consent counts only while the install's
+  remote is that one (`hasConsent`); a moved install asks again. **Not now** keeps it off.
+  Settings version 2 turns off any `autoUpdate` stored before 0.10.0 (it defaulted to on).
+- **Automatic checks**: the card calls `update.check` on its first render in an app session and on
+  Start, Copy and Run only when the settings are loaded and consented. On the daemon, an automatic
+  check without `autoUpdate` returns `not-consented` at once (no `paseo plugin ls`, no network), and
+  with consent for another remote it returns `not-consented` without contacting either. Settings that
+  cannot be read count as no consent.
+- **By hand**: **Check now** (`force: true`) reads the remote and installs only with consent. **Update
+  now** (`update.install`) sends the remote and commit the owner was shown; the daemon installs only
+  if the install still uses that remote and that commit is still the newest fast-forward, else
+  `changed`.
+- The settings screen reads `update.status`, which includes the install's kind and remote from
+  `paseo plugin ls --json` (local, no network), so the remote is named before the owner decides.
 
 - Install info: `paseo plugin ls --json` (this plugin's `installation.identity.remote` and
   `currentRevision`). Non-Git installs report "Local install, no auto-update".

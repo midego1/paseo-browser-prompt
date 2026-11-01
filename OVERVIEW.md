@@ -61,7 +61,9 @@ The report is escaped, fenced and marked as the browser agent's untrusted output
 
 ## Updates
 
-For Git installs, the plugin checks the branch it was installed from when a card is first shown in an app session and when you press a card button, at most once every 30 minutes (**Check now** skips that limit). It installs a newer commit only when the remote is `https://` and the commit is a fast-forward of the installed one; anything else is reported in settings and left for you. Auto-update can be turned off in settings. The daemon is never restarted.
+The plugin never downloads or installs new code on its own. Auto-update is off until you turn it on in settings, where the plugin first shows the Git repository it was installed from and tells you that, once enabled, newer plugin code from that repository will be downloaded and installed automatically when you use the plugin. If you choose **Not now**, or never decide, nothing is checked or installed, also when a card is shown. Consent applies to that repository only: if the plugin is later installed from another one, auto-update is off again until you enable it for the new one. Installs made before version 0.10.0 had auto-update on by default; it is turned off by this version and asks again.
+
+With auto-update on, the plugin checks the branch it was installed from when a card is first shown in an app session and when you press a card button, at most once every 30 minutes, and installs a newer commit only when the remote is `https://` and the commit is a fast-forward of the installed one; anything else is reported in settings and left for you. Without it you can still press **Check now**, which reads the newest commit from that repository and installs nothing, and **Update now**, which downloads and installs the commit it names only when you press it. npm and registry installs are updated by Paseo, not by the plugin. The daemon is never restarted.
 
 ## Settings
 
@@ -69,7 +71,7 @@ For Git installs, the plugin checks the branch it was installed from when a card
 - ChatGPT app deep link template (default `codex://new?prompt={prompt}`), merge repeated blocks (on by default), and clearing done marks.
 - Run with Paseo agent: confirm before starting, open the agent when started, show step progress, show live screenshot, thumbnails (all steps or latest only), report back to chat (Auto, Always, Off), talk to the chat, max questions to the chat per run, provider, model, permission mode, thinking level, and clearing card-to-agent links.
 - ChatGPT launcher: status, bind address (empty means the detected Tailscale address) and port (default 5299).
-- Updates: auto-update on use, installed and latest commit, last check, Check now, and an optional branch to follow.
+- Updates (Git installs): the repository updates come from, enable auto-update or not now, installed and latest commit, last check, Check now, Update now, and an optional branch to follow.
 
 The Command Center has **Open last browser prompt in ChatGPT**.
 

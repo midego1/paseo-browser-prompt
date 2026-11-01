@@ -165,10 +165,10 @@ async function spawnUpdate(revision: string): Promise<void> {
 
 const statePath = () => join(stateDir(), "state.json");
 
-type CheckState = Omit<UpdateState, "autoUpdate" | "trackRefOverride">;
+type CheckState = Omit<UpdateState, "autoUpdate" | "consentRemote" | "trackRefOverride">;
 
 export async function readCheckState(): Promise<CheckState> {
-  const { autoUpdate: _a, trackRefOverride: _t, ...defaults } = DEFAULT_UPDATE_STATE;
+  const { autoUpdate: _a, consentRemote: _c, trackRefOverride: _t, ...defaults } = DEFAULT_UPDATE_STATE;
   try {
     const parsed = JSON.parse(await readFile(statePath(), "utf8")) as Partial<CheckState>;
     return {
@@ -184,7 +184,7 @@ export async function readCheckState(): Promise<CheckState> {
 }
 
 async function writeCheckState(patch: Partial<UpdateState>): Promise<void> {
-  const { autoUpdate: _a, trackRefOverride: _t, ...rest } = patch;
+  const { autoUpdate: _a, consentRemote: _c, trackRefOverride: _t, ...rest } = patch;
   const next = { ...(await readCheckState()), ...rest };
   await mkdir(stateDir(), { recursive: true });
   const tmp = `${statePath()}.${process.pid}.tmp`;
@@ -194,11 +194,13 @@ async function writeCheckState(patch: Partial<UpdateState>): Promise<void> {
 
 export function createServerUpdater(settings: PluginSettings<(typeof updateSettings)["schema"]>) {
   async function loadState(): Promise<UpdateState> {
-    const current = await settings.read();
-    const prefs = current.status === "ready" ? current.values : DEFAULT_UPDATE_STATE;
+    // Settings that cannot be read (or fail validation) mean no consent: nothing is installed.
+    const current = await settings.read().catch(() => null);
+    const prefs = current?.status === "ready" ? current.values : DEFAULT_UPDATE_STATE;
     return {
       ...(await readCheckState()),
-      autoUpdate: prefs.autoUpdate,
+      autoUpdate: prefs.autoUpdate === true,
+      consentRemote: typeof prefs.consentRemote === "string" ? prefs.consentRemote : "",
       trackRefOverride: prefs.trackRefOverride,
     };
   }
@@ -223,19 +225,27 @@ export function createServerUpdater(settings: PluginSettings<(typeof updateSetti
   });
 }
 
-/** Check state for the settings screen, with the live installed revision when it can be read. */
-export async function currentUpdateStatus(): Promise<CheckState> {
+type StatusView = CheckState & { installKind: "git" | "local" | "other"; remote: string };
+
+/**
+ * Check state for the settings screen, with the install's kind, remote and live revision when they
+ * can be read. Local only (`paseo plugin ls`): the settings screen shows the remote before the owner
+ * decides, without contacting it.
+ */
+export async function currentUpdateStatus(): Promise<StatusView> {
   const state = await readCheckState();
   try {
     const paseo = await findPaseoBinary();
     const install = parseInstallInfo(JSON.parse(await run(paseo, ["plugin", "ls", "--json"], 15_000)));
-    if (install.kind === "local") return { ...state, installedRevision: "", lastResult: state.lastResult || "local" };
+    if (install.kind === "local") return { ...state, installedRevision: "", lastResult: state.lastResult || "local", installKind: "local", remote: "" };
+    if (install.kind !== "git" || !install.remote) return { ...state, installKind: "other", remote: "" };
+    const view = { ...state, installKind: "git" as const, remote: install.remote };
     if (install.revision && install.revision !== state.installedRevision) {
       const updated = state.lastResult === "updating" && install.revision === state.latestRevision;
-      return { ...state, installedRevision: install.revision, lastResult: updated ? "updated" : state.lastResult };
+      return { ...view, installedRevision: install.revision, lastResult: updated ? "updated" : state.lastResult };
     }
+    return view;
   } catch {
-    // keep the stored state
+    return { ...state, installKind: "other", remote: "" };
   }
-  return state;
 }
