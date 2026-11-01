@@ -15,7 +15,7 @@ When an agent repeats a block it already wrote earlier in the same chat (the sam
 
 ## Setup
 
-No account or token is needed. Paseo 0.14 or later.
+No account or token is needed. Paseo 0.11.4 or later.
 
 - **ChatGPT web mode** and **Copy only** work everywhere.
 - **ChatGPT app mode** (the desktop default) opens the ChatGPT desktop app with the prompt in a new chat (you still press send). It needs the ChatGPT desktop app on macOS or Windows and a small launcher page served by the plugin on the Paseo daemon's host. The launcher binds only to that host's own Tailscale address (100.64.0.0/10, detected with `tailscale ip -4` or from Tailscale's network interface) or, if you set it, to 127.0.0.1 when the Paseo app runs on the same machine. It never binds to 0.0.0.0, a LAN or a public address. Tailscale is optional: without it the launcher stays off and Start in ChatGPT copies the prompt instead. The first time, the browser asks whether to open ChatGPT.

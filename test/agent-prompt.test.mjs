@@ -317,14 +317,32 @@ test("server mode guard checks recorded browser runs on turn start and permissio
   assert.equal(handlers.size, 0);
 });
 
-test("server mode guard uses addHook names when the host has addHook", () => {
+test("server mode guard uses addHook names when the host has addHook", async () => {
   const handlers = new Map();
   const server = {
     addHook: (name, handler) => (handlers.set(name, handler), () => handlers.delete(name)),
     on: () => assert.fail("on must not be used when addHook exists"),
   };
-  const guard = registerModeGuard(server, recordedRuns([]), { log: () => {}, recordWaitMs: 0 });
+  const logs = [];
+  const settings = recordedRuns([["src:c1", "turn-run"], ["src:c2", "perm-run"]]);
+  const guard = registerModeGuard(server, settings, { log: (m) => logs.push(m), recordWaitMs: 0 });
   assert.deepEqual([...handlers.keys()].sort(), ["agent.permission.before", "agent.turn.before"]);
+
+  // The new hooks deliver the same payloads as the old events; both stop a run in a refused mode.
+  const runs = {
+    "turn-run": fakeRun({ modes: ["bypassPermissions"], labels: runLabels("src", "c1") }),
+    "perm-run": fakeRun({ modes: ["acceptEdits"], labels: runLabels("src", "c2") }),
+  };
+  const context = { paseo: { agents: { ref: (id) => runs[id].handle } }, signal: new AbortController().signal };
+  await handlers.get("agent.turn.before")({ agent: { id: "turn-run", provider: "claude" }, turnId: "t" }, context);
+  await handlers.get("agent.permission.before")({ agent: { id: "perm-run", provider: "claude" }, request: {} }, context);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(runs["turn-run"].calls.archive, 1, "stopped on agent.turn.before");
+  assert.equal(runs["perm-run"].calls.archive, 1, "stopped on agent.permission.before");
+  assert.deepEqual(logs.sort(), [
+    "run perm-run was in mode acceptEdits; stopped (archived)",
+    "run turn-run was in mode bypassPermissions; stopped (archived)",
+  ]);
   guard.dispose();
   assert.equal(handlers.size, 0);
 });

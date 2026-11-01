@@ -42,7 +42,7 @@ export async function readRecordedRun(settings: SettingsReader, query: { sourceI
 }
 
 /**
- * Wires "Report back to chat" to the turn-ended hook (`agent.turn.after`, `agent.turn_ended` on Paseo
+ * Wires "Report back to chat" to the turn-ended hook (`agent.turn.after`, `agent.turn_ended` up to Paseo
  * 0.14). The handler returns at once and the report is delivered in the background, because Paseo
  * cancels hook requests after 30 seconds and a report may wait for a busy chat. The returned cleanup
  * aborts every pending wait.

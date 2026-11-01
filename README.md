@@ -113,7 +113,7 @@ from and offers **Enable auto-update** (newer commits from that repository are t
 installed when the plugin is used) or **Not now**; **Check now** and **Update now** work by hand.
 
 `paseo plugin add` and `paseo plugin install` are aliases. The plugin has no runtime npm
-dependencies and no build step. Paseo 0.14 or later; thumbnails need a Paseo 0.13 or later app.
+dependencies and no build step. Paseo 0.11.4 or later; thumbnails need a Paseo 0.13 or later app.
 Tailscale on the daemon host is needed only for the ChatGPT desktop app launcher; everything else
 works without it.
 
@@ -361,7 +361,7 @@ The server hooks (`server/hooks.ts` `addLifecycleHook`) register with
 `server.addHook("agent.turn.after" | "agent.turn.before" | "agent.permission.before")` when the
 daemon passes `addHook`, else with the deprecated `server.on("agent.turn_ended" | "agent.turn_started" |
 "agent.permission_requested")`, which is removed after 2027-04-30. Both deliver the same payload and
-the daemon does not wait for either. The Paseo 0.14.0 daemon and its plugin SDK have only `on`;
+the daemon does not wait for either. Daemons up to Paseo 0.14.0 and their plugin SDKs have only `on`;
 `addHook` comes with the next plugin SDK (0.15 beta), and daemons that have it get it without a new
 plugin release.
 
