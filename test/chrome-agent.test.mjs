@@ -99,6 +99,15 @@ test("a run in the Paseo browser keeps its prompt", () => {
   assert.ok(!prompt.includes("claude-in-chrome"));
 });
 
+test("the brand marks pass Paseo's SVG check", async () => {
+  const { OPENAI_ICON, CLAUDE_ICON } = await import("../shared/brand-icons.ts");
+  const { findSvgIconProblem } = await import(new URL("../node_modules/@getpaseo/plugin/dist/icons.js", import.meta.url).href);
+  for (const icon of [OPENAI_ICON, CLAUDE_ICON]) {
+    assert.equal(findSvgIconProblem(icon.svg), null);
+    assert.match(icon.svg, /fill="currentColor"/, "tinted by the card");
+  }
+});
+
 test("the card's settings icon opens the page the plugin registers", () => {
   const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
   const entry = readFileSync(new URL("../index.client.tsx", import.meta.url), "utf8");
@@ -120,7 +129,8 @@ test("every way on the card can be the usual way", () => {
   assert.match(settings, /mobileStartMode: z\.enum\(\["copy-only", "web-agent", "paseo", "chrome"\]\)\.default\("copy-only"\)/);
   assert.equal(screen.match(/label: "Paseo browser", value: "paseo"/g)?.length, 2);
   assert.equal(screen.match(/label: "Claude in Chrome", value: "chrome"/g)?.length, 2);
-  for (const way of ["app", "web-agent", "extension", "copy-only", "paseo", "chrome"]) assert.ok(card.includes(`defaultMode === "${way}" ? styles.primary`), way);
+  for (const way of ["app", "web-agent", "extension", "paseo", "chrome"]) assert.ok(card.includes(`highlighted={defaultMode === "${way}"}`), way);
+  assert.ok(card.includes('defaultMode === "copy-only" ? styles.primary'), "copy-only");
   assert.match(readFileSync(new URL("../index.client.tsx", import.meta.url), "utf8"), /chatGptMode\(effectiveMode\(/, "the Command Center only opens ChatGPT");
 });
 
@@ -129,7 +139,7 @@ test("the ChatGPT extension button copies a prompt for the side panel", () => {
   const launch = readFileSync(new URL("../client/launch.ts", import.meta.url), "utf8");
   const settings = readFileSync(new URL("../shared/settings.ts", import.meta.url), "utf8");
   assert.match(card, /startInChatGpt\(title, text, "extension"/);
-  assert.match(card, />ChatGPT extension</);
+  assert.match(card, /label="Extension"/);
   assert.match(launch, /mode === "extension" \? CHATGPT_EXTENSION_HEADER/);
   assert.match(launch, /if \(mode === "extension"\) \{\s*return copied \? \{ ok: true, message: EXTENSION_HINT \}/, "copies and opens nothing");
   assert.match(settings, /startMode: z\.enum\(\["app", "web-agent", "extension", "copy-only", "paseo", "chrome"\]\)/);
@@ -143,7 +153,9 @@ test("a stored Browser setting is dropped", () => {
 
 test("the card offers every way to run, per card", () => {
   const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
-  for (const label of ["ChatGPT app", "ChatGPT web", "Paseo browser", "Claude in Chrome", "Copy", "Mark done"]) assert.ok(card.includes(label), label);
+  for (const label of ['label="Desktop"', 'label="Web"', 'label="Extension"', '"Paseo browser"', '"Chrome"', "`Copy ${displayTitle}`", "`Mark ${displayTitle} done`"]) assert.ok(card.includes(label), label);
+  assert.match(card, /<Icon icon=\{OPENAI_ICON\}/, "ChatGPT group has its mark");
+  assert.match(card, /agentIsClaude \? \(\s*<Icon icon=\{CLAUDE_ICON\}/, "Claude mark only for a Claude provider");
   assert.match(card, /startInChatGpt\(title, text, "app"/);
   assert.match(card, /startInChatGpt\(title, text, "web-agent"/);
   assert.match(card, /onRunPress\("paseo"\)/);
@@ -153,6 +165,7 @@ test("the card offers every way to run, per card", () => {
   assert.match(card, /\{mobile \? null : \(/, "no ChatGPT app button without a mobile deep link");
   assert.match(card, /\{showChrome \? \(/, "Claude in Chrome only when the launch would work");
   assert.match(card, /"Again: Paseo browser"/, "a card with a run says it would be another run");
+  assert.match(card, /"Again: Chrome"/);
   assert.match(card, /\{active \? <Text/, "the confirmation warns about a run still going");
   assert.match(card, /startInChatGpt\(title, text, "copy-only"/, "highlighted Copy keeps the paste hint");
   for (const demo of ["capture", "stills"]) {
