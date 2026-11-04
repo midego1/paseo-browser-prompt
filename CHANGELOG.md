@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.17.1 (unreleased)
+
+- A settings icon on the card opens the plugin's settings page.
+
 ## 0.17.0 (unreleased)
 
 - New setting, **Claude in Chrome provider**: the Paseo provider for the Claude in Chrome button. The
