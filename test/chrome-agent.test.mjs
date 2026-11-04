@@ -11,6 +11,8 @@ import {
   CHROME_RUN_MARKER,
   CHROME_SAFETY_PREAMBLE,
   chromeAvailable,
+  describeLaunch,
+  resolveLaunchWith,
   DEFAULT_CHROME_PROVIDER,
   pickChromeProvider,
   runStartedInChrome,
@@ -161,8 +163,8 @@ test("the card offers every way to run, per card", () => {
   assert.match(card, /startInChatGpt\(title, text, "web-agent"/);
   assert.match(card, /onRunPress\("paseo"\)/);
   assert.match(card, /onRunPress\("chrome"\)/);
-  assert.match(card, /launchAgent\(pendingBrowser\)/);
-  assert.match(card, /browserAgent: browser \}/, "the press decides the browser, not a setting");
+  assert.match(card, /launchAgent\(pendingLaunch\)/);
+  assert.match(card, /resolveLaunch\(paseo, [^)]*, browser\)/, "the press decides the browser, not a setting");
   assert.match(card, /\{mobile \? null : \(/, "no ChatGPT app button without a mobile deep link");
   assert.match(card, /\{showChrome \? \(/, "Claude in Chrome only when the launch would work");
   assert.match(card, /"Again: Paseo browser"/, "a card with a run says it would be another run");
@@ -173,6 +175,50 @@ test("the card offers every way to run, per card", () => {
     const script = readFileSync(new URL(`../scripts/demo/${demo}.mjs`, import.meta.url), "utf8");
     assert.match(script, /Run \.\* in the Paseo browser/, "the demo presses one button, the Paseo browser");
   }
+});
+
+test("the confirmation describes the exact provider and mode the run starts with", () => {
+  const omp = { ...DEFAULT_AGENT_SETTINGS, agentProvider: "omp", agentModel: "m", agentMode: "ask" };
+  // The registry review's case: Oh My Pi in ask mode, with a Claude provider for Chrome.
+  const chrome = resolveAgentConfig({ ...omp, browserAgent: "chrome", chromeProvider: "claude-chrome" });
+  const text = describeLaunch(chrome, "chrome");
+  assert.match(text, /claude-chrome\/m, starting in Auto mode/);
+  assert.match(text, /not you, approves its browser actions/);
+  assert.doesNotMatch(text, /asks you before every new tool/);
+  assert.match(describeLaunch(resolveAgentConfig(omp), "paseo"), /omp\/m, starting in "ask" mode: it asks you before every new tool/);
+  assert.match(describeLaunch(resolveAgentConfig({ ...DEFAULT_AGENT_SETTINGS, agentMode: "default" }), "chrome"), /starting in Always Ask mode/);
+  assert.match(describeLaunch(resolveAgentConfig(DEFAULT_AGENT_SETTINGS), "paseo"), /claude\/claude-sonnet-5-5, starting in Auto mode: a model classifier, not you, reviews/);
+  const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
+  const run = readFileSync(new URL("../client/agent-run.ts", import.meta.url), "utf8");
+  assert.match(card, /describeLaunch\(pendingLaunch\.config, pendingLaunch\.browser\)/, "the text comes from the resolved launch");
+  assert.match(card, /settings: values,\s*launch,/, "the start uses that same launch");
+  assert.match(run, /resolveLaunchWith\(\(\) => paseo\.providers\.listAvailable\(\), settings, browser\)/, "includes the automatic Chrome provider");
+});
+
+test("the reviewer's case end to end: the automatic Chrome provider is what the confirmation names and the run uses", async () => {
+  const omp = { ...DEFAULT_AGENT_SETTINGS, agentProvider: "omp", agentModel: "m", agentMode: "ask" };
+  const listAvailable = async () => ({ providers: [{ provider: "omp", available: true }, { provider: "claude-chrome", available: true }] });
+  const launch = await resolveLaunchWith(listAvailable, omp, "chrome");
+  assert.ok("config" in launch, JSON.stringify(launch));
+  assert.deepEqual(launch.config, { provider: "claude-chrome/m", modeId: "auto", thinkingOptionId: "high", options: { extraArgs: { chrome: null } } });
+  assert.equal(launch.settings.browserAgent, "chrome");
+  assert.match(describeLaunch(launch.config, launch.browser), /claude-chrome\/m, starting in Auto mode: a model classifier, not you, approves/);
+  // Without claude-chrome the Provider setting applies, and Chrome refuses a non-Claude provider.
+  const refused = await resolveLaunchWith(async () => ({ providers: [] }), omp, "chrome");
+  assert.ok("error" in refused && /needs a Claude provider/.test(refused.error));
+  const failedLookup = await resolveLaunchWith(async () => { throw new Error("down"); }, DEFAULT_AGENT_SETTINGS, "chrome");
+  assert.ok("config" in failedLookup && failedLookup.config.provider === "claude/claude-sonnet-5-5");
+  const paseo = await resolveLaunchWith(async () => { throw new Error("not asked"); }, omp, "paseo");
+  assert.ok("config" in paseo && paseo.config.provider === "omp/m" && paseo.config.modeId === "ask");
+  const run = readFileSync(new URL("../client/agent-run.ts", import.meta.url), "utf8");
+  assert.match(run, /const launch = input\.launch \?\? \(await resolveLaunch\(/, "the start uses the confirmed launch");
+});
+
+test("only the latest press counts, and the agent buttons wait while it resolves", () => {
+  const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
+  assert.match(card, /const seq = \+\+pressSeq\.current;/);
+  assert.match(card, /if \(seq !== pressSeq\.current\) return;/);
+  assert.equal(card.match(/disabled=\{busy \|\| resolving \|\| runBlocked\}/g)?.length, 2);
 });
 
 test("Claude in Chrome shows only when the launch would work", () => {
@@ -205,7 +251,7 @@ test("Chrome runs use claude-chrome by themselves when the daemon has it", () =>
   assert.equal(pickChromeProvider("", [{ provider: "claude", available: true }]), "");
   assert.equal(pickChromeProvider(" my-chrome ", list(true)), "my-chrome", "the setting wins");
   const run = readFileSync(new URL("../client/agent-run.ts", import.meta.url), "utf8");
-  assert.match(run, /resolveAgentConfig\(await withChromeProvider\(paseo, input\.settings\)\)/);
+  assert.match(run, /resolveLaunchWith\(\(\) => paseo\.providers\.listAvailable\(\)/);
   assert.match(run, /paseo\.providers\.listAvailable\(\)/);
 });
 

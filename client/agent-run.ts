@@ -4,10 +4,11 @@ import {
   buildAgentPrompt,
   chatQuestionBudget,
   parseBrowserAgent,
-  pickChromeProvider,
   providerOf,
-  resolveAgentConfig,
   type AgentSettingsInput,
+  type BrowserAgent,
+  resolveLaunchWith,
+  type ResolvedLaunch,
 } from "../shared/agent-prompt";
 import { enforceRunMode, type ModeCheck, type ModeGuardAgent } from "../shared/mode-guard";
 import { runLabels } from "../shared/report-back";
@@ -94,16 +95,11 @@ async function chooseWorkspace(
   return { workspaceId: recent.id, source: "most-recent" };
 }
 
-/** For a Chrome run without a chosen provider, use `claude-chrome` when the daemon has it. */
-async function withChromeProvider(paseo: PaseoApi, settings: AgentSettingsInput): Promise<AgentSettingsInput> {
-  if (parseBrowserAgent(settings.browserAgent) !== "chrome" || (settings.chromeProvider ?? "").trim()) return settings;
-  let available: { provider: string; available: boolean }[] | null = null;
-  try {
-    available = (await paseo.providers.listAvailable()).providers;
-  } catch {
-    available = null; // the Provider setting then applies, as before
-  }
-  return { ...settings, chromeProvider: pickChromeProvider(settings.chromeProvider, available) };
+export type { ResolvedLaunch };
+
+/** Resolves a launch, including the automatically chosen Chrome provider, without starting it. */
+export function resolveLaunch(paseo: PaseoApi, settings: AgentSettingsInput, browser: BrowserAgent): Promise<ResolvedLaunch> {
+  return resolveLaunchWith(() => paseo.providers.listAvailable(), settings, browser);
 }
 
 /**
@@ -120,10 +116,14 @@ export async function startBrowserAgent(
     displayTitle: string;
     steps: string;
     settings: AgentSettingsInput;
+    /** The launch the owner confirmed: started with exactly this config. */
+    launch?: Extract<ResolvedLaunch, { config: unknown }>;
   },
 ): Promise<StartedAgent> {
   const { workspaceId, source } = await chooseWorkspace(paseo, input.sourceAgentId, input.cachedWorkspaceId);
-  const config = resolveAgentConfig(await withChromeProvider(paseo, input.settings));
+  const launch = input.launch ?? (await resolveLaunch(paseo, input.settings, parseBrowserAgent(input.settings.browserAgent)));
+  if ("error" in launch) throw new Error(launch.error);
+  const config = launch.config;
   const agent = await paseo.workspaces.ref(workspaceId).agents.create({
     config,
     title: agentTitle(input.cardTitle, input.displayTitle),

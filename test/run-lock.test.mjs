@@ -93,7 +93,7 @@ test("expired locks are dropped and the map stays bounded", () => {
 
 test("the card takes the daemon's lock before starting and hands it back on start or failure", () => {
   const card = read("client/card.tsx");
-  const launch = card.slice(card.indexOf("async function launchAgent(browser: BrowserAgent)"));
+  const launch = card.slice(card.indexOf("async function launchAgent(launch: ResolvedLaunch | null)"));
   const lockAt = launch.indexOf("await takeRunLock()");
   const startAt = launch.indexOf("await startBrowserAgent(");
   assert.ok(lockAt > 0 && lockAt < startAt, "lock before the start");

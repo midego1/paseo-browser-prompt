@@ -52,6 +52,62 @@ export function pickChromeProvider(setting: string | undefined, available: reado
   return available?.some((entry) => entry.provider === DEFAULT_CHROME_PROVIDER && entry.available) ? DEFAULT_CHROME_PROVIDER : "";
 }
 
+/** The settings and config a launch will use; the confirmation and the start share it. */
+export type ResolvedLaunch =
+  | { browser: BrowserAgent; settings: AgentSettingsInput; config: ResolvedAgentConfig }
+  | { browser: BrowserAgent; error: string };
+
+/**
+ * Resolves a launch without starting it, including the automatically chosen Chrome provider.
+ * `listAvailable` is the daemon's provider list; a failed lookup keeps the Provider setting.
+ */
+export async function resolveLaunchWith(
+  listAvailable: () => Promise<{ providers: readonly { provider: string; available: boolean }[] }>,
+  settings: AgentSettingsInput,
+  browser: BrowserAgent,
+): Promise<ResolvedLaunch> {
+  try {
+    let resolved: AgentSettingsInput = { ...settings, browserAgent: browser };
+    if (browser === "chrome" && !(settings.chromeProvider ?? "").trim()) {
+      let available: readonly { provider: string; available: boolean }[] | null = null;
+      try {
+        available = (await listAvailable()).providers;
+      } catch {
+        available = null;
+      }
+      resolved = { ...resolved, chromeProvider: pickChromeProvider(settings.chromeProvider, available) };
+    }
+    return { browser, settings: resolved, config: resolveAgentConfig(resolved) };
+  } catch (error) {
+    return { browser, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * What the launch confirmation says about a run, from the exact config the agent is created with:
+ * where it works, which provider and model, and who approves its actions in that permission mode.
+ */
+export function describeLaunch(config: ResolvedAgentConfig, browser: BrowserAgent): string {
+  const where =
+    browser === "chrome"
+      ? "It works in your real Chrome, with every account you are signed in to, and is told to stay on the sites in these steps."
+      : "It uses only the Paseo browser tabs.";
+  const runs = `It runs as ${config.provider}`;
+  const mode = config.modeId.trim();
+  let approval: string;
+  if (usesClassifierMode(config)) {
+    approval =
+      browser === "chrome"
+        ? `${runs}, starting in Auto mode: a model classifier, not you, approves its browser actions, and the extension does not ask per site.`
+        : `${runs}, starting in Auto mode: a model classifier, not you, reviews its tool calls.`;
+  } else if (mode === "plan") {
+    approval = `${runs}, starting in Plan mode: it asks before it runs tools.`;
+  } else {
+    approval = `${runs}, starting in ${mode === "default" ? "Always Ask" : `"${mode}"`} mode: it asks you before every new tool.`;
+  }
+  return `${where} ${approval} It can move between Auto, Always Ask and Plan later; other modes are stopped. It is told to ask you, as a question, before secrets or anything destructive.`;
+}
+
 /** Whether a run with these settings can use Claude in Chrome, by the same rules as the launch. */
 export function chromeAvailable(settings: AgentSettingsInput): boolean {
   try {

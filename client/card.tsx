@@ -4,7 +4,7 @@ import { Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
 import { z } from "zod";
-import { agentTitle, CHROME_RUN_MARKER, chromeAvailable, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, providerFamily, resolveAgentConfig, runStartedInChrome, usesClassifierMode, type BrowserAgent } from "../shared/agent-prompt";
+import { agentTitle, CHROME_RUN_MARKER, chromeAvailable, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, providerFamily, resolveAgentConfig, runStartedInChrome, describeLaunch, type BrowserAgent } from "../shared/agent-prompt";
 import { MOST_RECENT_FALLBACK } from "../shared/report-back";
 import {
   blockFingerprint,
@@ -30,7 +30,7 @@ import {
   startInChatGpt,
   type ActionResult,
 } from "./launch";
-import { openPluginSettings, openRunScreen, startBrowserAgent } from "./agent-run";
+import { openPluginSettings, openRunScreen, resolveLaunch, startBrowserAgent, type ResolvedLaunch } from "./agent-run";
 import { MessageMarkdown } from "./markdown";
 import { OwnerPromptBox, useOwnerPrompts } from "./owner-prompt";
 import { RUN_LABELS, runVisual, useRunState } from "./run-status";
@@ -189,28 +189,15 @@ export function BrowserPromptCard({
     settings.status === "ready" ? settings.values.confirmAgentLaunch : DEFAULT_AGENT_SETTINGS.confirmAgentLaunch;
   /** The next run uses Claude Auto mode (classifier-reviewed, the default); the confirmation says so. */
   // The browser of the run the owner just chose; the confirmation describes it.
-  const [pendingBrowser, setPendingBrowser] = useState<BrowserAgent>("paseo");
-  const inChrome = pendingBrowser === "chrome";
+  // The launch the confirmation describes: resolved once, then started with exactly that config.
+  const [pendingLaunch, setPendingLaunch] = useState<ResolvedLaunch | null>(null);
+  const launchError = pendingLaunch && "error" in pendingLaunch ? pendingLaunch.error : null;
+  const inChrome = pendingLaunch?.browser === "chrome";
   // The modal describes the next run; a started run's hint names the browser it was started in.
   const [startedBrowser, setStartedBrowser] = useState<{ agentId: string; chrome: boolean } | null>(null);
   const runInChrome =
     runStartedInChrome(settings.status === "ready" ? settings.values.runs : [], runAgentId) ??
     (startedBrowser?.agentId === runAgentId && startedBrowser.chrome);
-  const launchError = useMemo(() => {
-    try {
-      resolveAgentConfig({ ...(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS), browserAgent: pendingBrowser });
-      return null;
-    } catch (error) {
-      return error instanceof Error ? error.message : String(error);
-    }
-  }, [settings, pendingBrowser]);
-  const launchesInAutoMode = useMemo(() => {
-    try {
-      return usesClassifierMode(resolveAgentConfig(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS));
-    } catch {
-      return false;
-    }
-  }, [settings]);
 
   // A later copy of a block in this chat is a full card with a hint (its buttons share the first's
   // done mark and run), and with "Collapse repeated blocks that are done" a done copy is one line
@@ -399,8 +386,10 @@ export function BrowserPromptCard({
     });
   }
 
-  async function launchAgent(browser: BrowserAgent) {
+  async function launchAgent(launch: ResolvedLaunch | null) {
     setConfirmOpen(false);
+    if (!launch || "error" in launch) return;
+    const browser = launch.browser;
     if (busy) return;
     setBusy(true);
     let lockToken: string | null = null;
@@ -408,7 +397,7 @@ export function BrowserPromptCard({
       const lock = await takeRunLock();
       if (!lock) return;
       lockToken = lock.token;
-      const values = { ...(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS), browserAgent: browser };
+      const values = launch.settings;
       const started = await startBrowserAgent(paseo, {
         sourceAgentId: agentId,
         cardId,
@@ -417,6 +406,7 @@ export function BrowserPromptCard({
         displayTitle,
         steps: text,
         settings: values,
+        launch,
       });
       // The lock now names the run, so a copy pressed before the record arrives shows this run.
       finishLock(lockToken, started.agentId);
@@ -448,12 +438,26 @@ export function BrowserPromptCard({
   // A copy of a block does not start a second run while the shared one is still going.
   const runBlocked = !canStartRun({ repeat: isRepeat, runState: runAgentId ? shownState : null });
 
-  function onRunPress(browser: BrowserAgent) {
-    if (busy || runBlocked) return;
-    setPendingBrowser(browser);
+  // Only the latest press counts; the buttons wait while it resolves.
+  const pressSeq = useRef(0);
+  const [resolving, setResolving] = useState(false);
+
+  async function onRunPress(browser: BrowserAgent) {
+    if (busy || resolving || runBlocked) return;
     updates.onUse();
+    const seq = ++pressSeq.current;
+    setResolving(true);
+    let launch: ResolvedLaunch;
+    try {
+      launch = await resolveLaunch(paseo, settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS, browser);
+    } finally {
+      if (seq === pressSeq.current) setResolving(false);
+    }
+    if (seq !== pressSeq.current) return;
+    setPendingLaunch(launch);
     if (confirmLaunch) setConfirmOpen(true);
-    else void launchAgent(browser);
+    else if ("error" in launch) toast.error(`Could not start a Paseo agent: ${launch.error}`);
+    else void launchAgent(launch);
   }
 
   const runVisuals = shownState === "asking" ? { icon: "CircleAlert", color: theme.colors.statusWarning } : runVisual(runState, theme);
@@ -552,9 +556,9 @@ export function BrowserPromptCard({
             a11y={`Run ${displayTitle} with a Paseo agent in the Paseo browser`}
             hint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
             highlighted={defaultMode === "paseo"}
-            disabled={busy || runBlocked}
+            disabled={busy || resolving || runBlocked}
             styles={styles}
-            onPress={() => onRunPress("paseo")}
+            onPress={() => void onRunPress("paseo")}
           />
           {showChrome ? (
             <WayButton
@@ -562,9 +566,9 @@ export function BrowserPromptCard({
               a11y={`Run ${displayTitle} with a Paseo agent in your Chrome, through Claude in Chrome`}
               hint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
               highlighted={defaultMode === "chrome"}
-              disabled={busy || runBlocked}
+              disabled={busy || resolving || runBlocked}
               styles={styles}
-              onPress={() => onRunPress("chrome")}
+              onPress={() => void onRunPress("chrome")}
             />
           ) : null}
         </View>
@@ -686,24 +690,9 @@ export function BrowserPromptCard({
           {active ? <Text style={[styles.hint, { color: theme.colors.statusWarning }]}>A run of these steps is still going. This starts a second one.</Text> : null}
           {launchError ? (
             <Text style={[styles.hint, { color: theme.colors.statusDanger }]}>{launchError}</Text>
-          ) : inChrome ? (
-            <Text style={styles.hint}>
-              {launchesInAutoMode
-                ? "It works in your real Chrome, with every account you are signed in to. It runs in Claude Auto mode: a model classifier approves its browser actions, and the extension does not ask per site. It is told to stay on the sites in these steps and to ask you, as a question, before secrets or anything destructive."
-                : "It works in your real Chrome, with every account you are signed in to. It asks before every new tool, is told to stay on the sites in these steps, and stops to ask you before secrets or anything destructive."}
-            </Text>
+          ) : pendingLaunch && "config" in pendingLaunch ? (
+            <Text style={styles.hint}>{describeLaunch(pendingLaunch.config, pendingLaunch.browser)}</Text>
           ) : null}
-          {launchError || inChrome ? null : launchesInAutoMode ? (
-            <Text style={styles.hint}>
-              It runs in Claude Auto mode: a model classifier reviews its tool calls. It uses only the Paseo browser
-              tabs and is told to ask you, as a question, before secrets or anything destructive.
-            </Text>
-          ) : (
-            <Text style={styles.hint}>
-              It uses only the Paseo browser tabs, asks before every new tool, and stops to ask you before secrets or
-              anything destructive.
-            </Text>
-          )}
           {layout.compact ? <Text style={styles.hint}>{inChrome ? CHROME_HINT : DESKTOP_HINT}</Text> : null}
           <View style={styles.modalActions}>
             <Pressable accessibilityRole="button" onPress={() => setConfirmOpen(false)} style={styles.secondary}>
@@ -712,7 +701,8 @@ export function BrowserPromptCard({
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Start the Paseo agent"
-              onPress={() => void launchAgent(pendingBrowser)}
+              disabled={!!launchError}
+              onPress={() => void launchAgent(pendingLaunch)}
               style={styles.primary}
             >
               <Icon name="Bot" size={14} color={theme.colors.accentForeground} />
