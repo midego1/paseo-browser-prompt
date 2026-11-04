@@ -15,7 +15,7 @@ mkdirSync(OUT, { recursive: true });
 const { browser, page, pause, settingsUrl, workspacePage } = await openDemo({ viewport: VIEWPORT, overlay: false });
 const title = () => page.getByText("Check what example.com says", { exact: true }).first();
 /** The card: the nearest ancestor of its title that also holds its buttons. */
-const card = () => title().locator("xpath=ancestor::*[.//*[text()='Copy']][1]");
+const card = () => title().locator("xpath=ancestor::*[.//*[text()='ChatGPT']][1]");
 
 /**
  * Scrolls `scroll` (the first part) to the top, then captures the union of the parts' boxes plus
@@ -99,7 +99,7 @@ try {
     await page.getByText("Show", { exact: true }).first().click();
     const hint = page.getByText("Also shown earlier in this chat").first();
     await hint.waitFor();
-    const copy = hint.locator("xpath=ancestor::*[.//*[text()='Copy']][1]");
+    const copy = hint.locator("xpath=ancestor::*[.//*[text()='ChatGPT']][1]");
     const collapsed = page.getByText("✓ Already done").first().locator("xpath=ancestor::*[.//*[text()='Show']][1]");
     await still("repeat-done", [copy, collapsed]);
   }
