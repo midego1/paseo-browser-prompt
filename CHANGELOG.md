@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.15.1 (unreleased)
+
+- Fix: 0.14.0 and 0.15.0 could not be installed. The RPC added for archived runs had a name with
+  capitals, which Paseo refuses (`Invalid plugin RPC method`), so the update stopped and the older
+  version kept running. It is now `run.archived`, and a test checks every RPC name against the SDK.
+
 ## 0.15.0 (unreleased)
 
 - New setting, **Browser**, under Run with Paseo agent: Paseo browser (the default) or Claude in
