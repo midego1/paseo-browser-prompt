@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.2 (unreleased)
+
+- The toast after starting a run is shorter and goes away sooner: "Paseo agent started." for 3
+  seconds instead of 5. The card already shows the run's status, and on narrow screens its note that
+  the desktop app must be open, so the toast no longer repeats them. Paseo's toast API has no close
+  button, so the toast has no X.
+
 ## 0.13.1 (unreleased)
 
 - Fix: a stopped run could turn up as done, because the plugin woke it. Reading a closed agent's
