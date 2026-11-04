@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.1 (unreleased)
+
+- Docs only. README, OVERVIEW and SECURITY describe the current card: a button per way to run, the
+  usual way highlighted, the gear, the ChatGPT extension, Claude in Chrome and its provider. The
+  README's screenshots are still from 0.10 and say so.
+
 ## 0.18.0 (unreleased)
 
 - New button, **ChatGPT extension**: copies the steps with a header for the ChatGPT Chrome extension
