@@ -4,10 +4,10 @@ Browser prompt turns step-by-step browser instructions written by an agent into 
 
 When an assistant message contains a fenced code block whose info string is `browser-prompt` (optionally followed by a title), the block is replaced by a card, and the rest of the message is shown as before. The card shows the title and the steps, with a button for every way to run them: **ChatGPT app**, **ChatGPT web**, **Paseo browser**, **Claude in Chrome**, **Copy** and **Mark done**. In short:
 
-- **Start in ChatGPT** copies the steps to the clipboard with a short header asking ChatGPT to carry them out with computer use, and to stop and ask before entering secrets or confirming destructive actions. It then opens ChatGPT as set in the settings.
+- **ChatGPT app** and **ChatGPT web** copy the steps to the clipboard with a short header asking ChatGPT to carry them out with computer use, and to stop and ask before entering secrets or confirming destructive actions. They then open the ChatGPT desktop app or chatgpt.com.
 - **Copy** copies the same text without opening anything.
 - **Mark done** marks the card as finished (**Undo done** reverts it). Done marks are stored on the Paseo host, so every connected app sees them.
-- **Run with Paseo agent** starts a new Paseo agent that carries out the steps in the browser tabs of your Paseo desktop app.
+- **Paseo browser** starts a new Paseo agent that carries out the steps in the browser tabs of your Paseo desktop app. **Claude in Chrome** does the same in your real Chrome.
 
 A card appears only after the block's closing fence has streamed in. Blocks nested inside another code block are ignored. The README describes the block convention for agents.
 
@@ -77,7 +77,7 @@ With auto-update on, the plugin checks the branch it was installed from when a c
 
 ## Settings
 
-- Start in ChatGPT on desktop (ChatGPT app, ChatGPT web, or copy only) and on iOS and Android (copy only or ChatGPT web).
+- The usual way to start, highlighted on the card, on desktop (ChatGPT app, ChatGPT web, or copy only) and on iOS and Android (copy only or ChatGPT web).
 - ChatGPT app deep link template (default `codex://new?prompt={prompt}`), collapse repeated blocks that are done (on by default), and clearing done marks.
 - Run with Paseo agent: confirm before starting, open the agent when started, show step progress, show live screenshot, thumbnails (all steps or latest only), talk to the chat, max questions to the chat per run, report back to chat (Auto, Always, Off), provider, model, permission mode, thinking level, reset to defaults, and clearing card-to-agent links.
 - ChatGPT launcher: status, bind address (empty means the detected Tailscale address) and port (default 5299).

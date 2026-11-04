@@ -26,7 +26,7 @@ const SOURCE_LABELS = {
 const STATE_LABELS = {
   listening: "Listening",
   starting: "Starting…",
-  "no-tailscale": "Off: no Tailscale address on this host. Start in ChatGPT copies the prompt instead.",
+  "no-tailscale": "Off: no Tailscale address on this host. The ChatGPT app button copies the prompt instead.",
   "not-local": "Off: the bind address is not this host's Tailscale address or 127.0.0.1.",
   "port-in-use": "Off: the port is in use on this host.",
   error: "Off: could not start.",

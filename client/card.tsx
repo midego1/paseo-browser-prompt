@@ -4,7 +4,7 @@ import { Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
 import { z } from "zod";
-import { agentTitle, CHROME_RUN_MARKER, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, providerFamily, resolveAgentConfig, usesClassifierMode, type BrowserAgent } from "../shared/agent-prompt";
+import { agentTitle, CHROME_RUN_MARKER, chromeAvailable, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, resolveAgentConfig, runStartedInChrome, usesClassifierMode, type BrowserAgent } from "../shared/agent-prompt";
 import { MOST_RECENT_FALLBACK } from "../shared/report-back";
 import {
   blockFingerprint,
@@ -108,8 +108,7 @@ export function BrowserPromptCard({
     settings.status === "ready" ? settings.values.mobileStartMode : DEFAULT_MODES.mobileStartMode;
   // The owner's usual way is highlighted; every way stays one press away.
   const defaultMode = effectiveMode({ startMode, mobileStartMode });
-  const chromeAvailable =
-    providerFamily((settings.status === "ready" ? settings.values.agentProvider : "") || DEFAULT_AGENT_SETTINGS.agentProvider) === "claude";
+  const showChrome = chromeAvailable(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS);
 
   // Copies of a block in this chat share its run: the newest one started from this card's id or for
   // the same content.
@@ -183,7 +182,10 @@ export function BrowserPromptCard({
   const [pendingBrowser, setPendingBrowser] = useState<BrowserAgent>("paseo");
   const inChrome = pendingBrowser === "chrome";
   // The modal describes the next run; a started run's hint names the browser it was started in.
-  const runInChrome = !!runRecord?.slice(2).includes(CHROME_RUN_MARKER);
+  const [startedBrowser, setStartedBrowser] = useState<{ agentId: string; chrome: boolean } | null>(null);
+  const runInChrome =
+    runStartedInChrome(settings.status === "ready" ? settings.values.runs : [], runAgentId) ??
+    (startedBrowser?.agentId === runAgentId && startedBrowser.chrome);
   const launchError = useMemo(() => {
     try {
       resolveAgentConfig({ ...(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS), browserAgent: pendingBrowser });
@@ -319,6 +321,7 @@ export function BrowserPromptCard({
    */
   async function rememberRun(startedAgentId: string, fallback: boolean, chrome: boolean) {
     setLocalRun(startedAgentId);
+    setStartedBrowser({ agentId: startedAgentId, chrome });
     // Position 2 stays the fallback marker the server reads; the content marker comes after it.
     const entry: [string, string, ...string[]] = [
       runKey,
@@ -505,9 +508,9 @@ export function BrowserPromptCard({
           style={[styles.secondary, runBlocked ? { opacity: 0.5 } : null]}
         >
           <Icon name="Bot" size={14} color={theme.colors.foreground} />
-          <Text style={styles.secondaryText}>Paseo browser</Text>
+          <Text style={styles.secondaryText}>{runAgentId ? "Again: Paseo browser" : "Paseo browser"}</Text>
         </Pressable>
-        {chromeAvailable ? (
+        {showChrome ? (
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={`Run ${displayTitle} with a Paseo agent in your Chrome`}
@@ -518,14 +521,20 @@ export function BrowserPromptCard({
             style={[styles.secondary, runBlocked ? { opacity: 0.5 } : null]}
           >
             <Icon name="Compass" size={14} color={theme.colors.foreground} />
-            <Text style={styles.secondaryText}>Claude in Chrome</Text>
+            <Text style={styles.secondaryText}>{runAgentId ? "Again: Claude in Chrome" : "Claude in Chrome"}</Text>
           </Pressable>
         ) : null}
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={`Copy ${displayTitle}`}
           disabled={busy}
-          onPress={() => void run(() => copyPrompt(title, text))}
+          onPress={() =>
+            void run(() =>
+              defaultMode === "copy-only"
+                ? startInChatGpt(title, text, "copy-only", (prompt) => stash({ prompt }))
+                : copyPrompt(title, text),
+            )
+          }
           style={defaultMode === "copy-only" ? styles.primary : styles.secondary}
         >
           <Icon name="Copy" size={14} color={defaultMode === "copy-only" ? theme.colors.accentForeground : theme.colors.foreground} />
@@ -628,6 +637,7 @@ export function BrowserPromptCard({
       >
         <Modal.Content>
           <Text style={styles.modalText}>Start a Paseo agent to do these steps in your browser?</Text>
+          {active ? <Text style={[styles.hint, { color: theme.colors.statusWarning }]}>A run of these steps is still going. This starts a second one.</Text> : null}
           {launchError ? (
             <Text style={[styles.hint, { color: theme.colors.statusDanger }]}>{launchError}</Text>
           ) : inChrome ? (

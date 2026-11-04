@@ -82,7 +82,7 @@ try {
   film.mark("run");
   await caption("Run them with a Paseo agent, in the background");
   await pause(600);
-  await pointTo(page.getByRole("button", { name: /Run .* with a Paseo agent/ }), { click: true });
+  await pointTo(page.getByRole("button", { name: /Run .* in the Paseo browser/ }), { click: true });
   await page.getByRole("button", { name: "Start the Paseo agent" }).waitFor();
   await pause(1300);
   await pointTo(page.getByRole("button", { name: "Start the Paseo agent" }), { click: true });

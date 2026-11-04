@@ -210,7 +210,7 @@ Rules:
 
 - The ChatGPT launcher binds only to this machine's own Tailscale address (100.64.0.0/10) or, when
   set explicitly, 127.0.0.1. Wildcards, LAN, public addresses and host names are refused; without a
-  usable address the launcher stays off and Start in ChatGPT only copies.
+  usable address the launcher stays off and the ChatGPT app button only copies.
 - Launcher links carry a random one-time id (18 bytes), expire after 10 minutes and are deleted on
   first fetch. The prompt is never in the launcher URL, and prompt text is never logged.
 - ChatGPT web mode puts the prompt in the `chatgpt.com` URL only when it is short and has nothing
@@ -303,7 +303,7 @@ a plain full card.
   (`sharedRunRecord`: its own id, else the content marker), so all copies show the same status. A
   later copy can start a run only while that shared run is not going (starting, running, needing you
   or waiting for the chat); then its Run button is disabled and the shared status shows. The first
-  card keeps its usual Run again.
+  card keeps its usual "Again:" buttons.
 - Item ids name their message (`card-<messageId>-<n>`; without a message id, a hash of the message
   text up to its first block): Paseo keeps plugin items by id within a chat, so ids shared between
   messages would show one message's cards in both.
