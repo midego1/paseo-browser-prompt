@@ -69,6 +69,7 @@ function setup({ text = SUCCESS, run = {}, source = {}, ...extra } = {}) {
     recordWaitMs: 30,
     recordPollMs: 5,
     notARunTtlMs: 0,
+    archiveGraceMs: 0,
     ...extra,
   });
   return { paseo, reportBack, sent, archives, agents };
@@ -120,7 +121,65 @@ test("a run still settling when the hook fires is archived once it is idle", asy
   await w.reportBack.dispose();
 });
 
+test("a repeated event for the same turn does not cancel the archive", async () => {
+  const w = setup();
+  const event = { ...ended(), turnId: "t1" };
+  const [first, second] = await Promise.all([w.reportBack.onTurnEnded(event, w.paseo), w.reportBack.onTurnEnded(event, w.paseo)]);
+  assert.deepEqual([first, second].sort(), ["duplicate", "sent"]);
+  assert.deepEqual(w.archives, [RUN]);
+  await w.reportBack.dispose();
+});
+
+test("a turn that ends while an archive waits stops that archive", async () => {
+  const w = setup({ archiveGraceMs: 40, mode: async () => "off" });
+  const first = w.reportBack.onTurnEnded({ ...ended(), turnId: "t1" }, w.paseo);
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  w.agents[RUN].text = "Step 3 failed.";
+  await Promise.all([first, w.reportBack.onTurnEnded({ ...ended({ kind: "failed", error: { message: "boom" } }), turnId: "t2" }, w.paseo)]);
+  assert.deepEqual(w.archives, []);
+  await w.reportBack.dispose();
+});
+
+for (const mode of ["off", "auto"]) {
+  test(`a follow-up turn with the success line stays open (reports ${mode})`, async () => {
+    const w = setup({ mode: async () => mode, text: "Step 3 failed." });
+    await w.reportBack.onTurnEnded({ ...ended(), turnId: "t1" }, w.paseo);
+    w.agents[RUN].text = SUCCESS;
+    await w.reportBack.onTurnEnded({ ...ended(), turnId: "t2" }, w.paseo);
+    assert.deepEqual(w.archives, []);
+    await w.reportBack.dispose();
+  });
+}
+
+test("a turn the owner stopped keeps later turns open", async () => {
+  const w = setup();
+  await w.reportBack.onTurnEnded({ ...ended({ kind: "canceled" }), turnId: "t1" }, w.paseo);
+  await w.reportBack.onTurnEnded({ ...ended(), turnId: "t2" }, w.paseo);
+  assert.deepEqual(w.archives, []);
+  await w.reportBack.dispose();
+});
+
+test("a question then its final report: the report archives the run", async () => {
+  const w = setup({ text: `${QUESTION_MARKER} Which one?`, talk: async () => ({ maxQuestions: 5 }) });
+  assert.equal(await w.reportBack.onTurnEnded({ ...ended(), turnId: "t1" }, w.paseo), "question-sent");
+  assert.deepEqual(w.archives, []);
+  w.agents[RUN].text = SUCCESS;
+  assert.equal(await w.reportBack.onTurnEnded({ ...ended(), turnId: "t2" }, w.paseo), "sent");
+  assert.deepEqual(w.archives, [RUN]);
+  await w.reportBack.dispose();
+});
+
+test("a question with the success line does not pass the line on", async () => {
+  const w = setup({ text: `${QUESTION_MARKER} Which one?\n${RUN_SUCCESS_MARKER}`, talk: async () => ({ maxQuestions: 5 }) });
+  assert.equal(await w.reportBack.onTurnEnded(ended(), w.paseo), "question-sent");
+  assert.ok(w.sent[0].includes("Which one?"));
+  assert.ok(!w.sent[0].includes(RUN_SUCCESS_MARKER));
+  assert.deepEqual(w.archives, []);
+  await w.reportBack.dispose();
+});
+
 const LEFT_OPEN = {
+  "the success line alone, no report": { text: RUN_SUCCESS_MARKER },
   "setting off": { archiveOnSuccess: async () => false },
   "setting not wired": { archiveOnSuccess: undefined },
   "setting unreadable": {
@@ -195,4 +254,5 @@ test("the card asks the server about a closed or unknown run and shows it as don
   const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
   assert.match(card, /followedState === "stopped" \|\| followedState === "unknown"/);
   assert.match(card, /archivedRun === runAgentId && mayBeArchived \? "done" : followedState/);
+  assert.match(card, /\[mayBeArchived, followedState, runAgentId\]/);
 });

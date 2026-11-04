@@ -203,7 +203,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
           />
           <SettingsSwitch
             label="Archive the agent after a successful run"
-            hint="When every step succeeded, the agent says so in the last line of its report and the plugin archives it, after the report went to the chat. A run that fails, stops, asks a question or leaves something for you stays open, and so does a run whose report could not be sent. The card keeps showing it as done. Its step progress and screenshots show only until the card reloads, because reading an archived agent would load it again. Applies to runs started after you turn it on."
+            hint="When every step succeeded, the agent says so in the last line of its report and the plugin archives it, once the chat got the report or notice (with Report back to chat off, right away). A run that fails, stops, asks a question or leaves something for you stays open, and so does a run whose report could not be sent or that you gave a follow-up. The card keeps showing it as done, but its screenshots, time and tokens show only until the card reloads, because reading an archived agent would load it again. Applies to runs started after you turn it on."
             value={values.archiveAgentOnSuccess}
             onValueChange={(archiveAgentOnSuccess) => void settings.save({ ...values, archiveAgentOnSuccess }, revision)}
           />

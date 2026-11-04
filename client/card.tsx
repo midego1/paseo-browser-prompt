@@ -124,16 +124,23 @@ export function BrowserPromptCard({
   useEffect(() => {
     if (!mayBeArchived || !runAgentId) return;
     let cancelled = false;
-    void checkArchived({ agentId: runAgentId }).then(
-      ({ archived }) => {
-        if (!cancelled && archived) setArchivedRun(runAgentId);
-      },
-      () => {},
-    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const check = (attempt: number) => {
+      void checkArchived({ agentId: runAgentId }).then(
+        ({ archived }) => {
+          if (!cancelled && archived) setArchivedRun(runAgentId);
+        },
+        () => {
+          if (!cancelled && attempt < 3) timer = setTimeout(() => check(attempt + 1), 2000 * attempt);
+        },
+      );
+    };
+    check(1);
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
-  }, [mayBeArchived, runAgentId]);
+  }, [mayBeArchived, followedState, runAgentId]);
   const observedState = archivedRun === runAgentId && mayBeArchived ? "done" : followedState;
   const totalSteps = useMemo(() => countSteps(text), [text]);
   const showSteps =
