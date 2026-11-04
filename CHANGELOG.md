@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.15.0 (unreleased)
+
+- New setting, **Browser**, under Run with Paseo agent: Paseo browser (the default) or Claude in
+  Chrome. With Claude in Chrome the run starts with the CLI's `--chrome` flag and works in your real
+  Chrome with every account you are signed in to. It follows the Permission mode setting, so Auto mode
+  is its default too: a model classifier approves browser actions and the extension skips its own
+  check per site. Always Ask stays available.
+- A run in Chrome gets its own rules: only the extension's tools, only the sites in the steps, its
+  own tab, and a report quoting the error when no browser is connected. It takes no screenshots, so
+  the card shows none. Tabs close after success with the extension's own tool.
+- Text a permission request would type through `form_input` or `computer` is masked on the card, like
+  `browser_fill`.
+- It needs a Claude provider, Chrome open, and the extension signed in to the same Claude account and
+  organization as the agent. Not tried yet from a card in the running app.
+
 ## 0.14.0 (unreleased)
 
 - New setting, **Archive the agent after a successful run** (off by default). A run started with it

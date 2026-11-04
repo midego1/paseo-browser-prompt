@@ -3,6 +3,7 @@ import {
   agentTitle,
   buildAgentPrompt,
   chatQuestionBudget,
+  parseBrowserAgent,
   providerOf,
   resolveAgentConfig,
   type AgentSettingsInput,
@@ -105,6 +106,7 @@ export async function startBrowserAgent(
     input.settings.showLiveScreenshot !== false,
     input.settings.closeTabsOnSuccess !== false,
     input.settings.archiveAgentOnSuccess === true,
+    parseBrowserAgent(input.settings.browserAgent),
     ),
     labels: runLabels(input.sourceAgentId, input.cardId),
   });

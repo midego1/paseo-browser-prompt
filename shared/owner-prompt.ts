@@ -186,7 +186,8 @@ interface FieldSpec {
   mask?: (tool: string, value: string) => boolean;
 }
 
-const TYPED_TEXT_TOOL = /(^|__)browser_(fill|type)$/;
+const TYPED_TEXT_TOOL = /(^|__)browser_(fill|type)$|^mcp__claude-in-chrome__(form_input|computer)$/;
+const CHROME_FORM_TOOL = /^mcp__claude-in-chrome__form_input$/;
 const KEYPRESS_TOOL = /(^|__)browser_keypress$/;
 /** One key, optionally with modifiers: a single character or a named key such as Enter, ArrowDown, F5, KeyA. */
 const KEY_NAME =
@@ -199,6 +200,9 @@ const typedKeys = (tool: string, value: string) => KEYPRESS_TOOL.test(tool) && !
 const SUMMARY_FIELDS: FieldSpec[] = [
   { field: "command", label: "Command", block: true },
   { field: "url", label: "URL" },
+  { field: "action", label: "Action", max: 100 },
+  { field: "tabId", label: "Tab", max: 50 },
+  { field: "coordinate", label: "Position", max: 50 },
   { field: "ref", label: "Element", max: 200 },
   { field: "sourceRef", label: "From element", max: 200 },
   { field: "targetRef", label: "To element", max: 200 },
@@ -288,6 +292,8 @@ export function permissionDetails(request: RequestLike): PermissionDetails {
   if (typeof dx === "number" || typeof dy === "number") {
     lines.push({ label: "Scroll", value: `${typeof dx === "number" ? dx : 0}, ${typeof dy === "number" ? dy : 0}`, block: false });
   }
+  // Unchecking a box or clearing a field has no value line to show: no Allow without seeing it.
+  if (CHROME_FORM_TOOL.test(name) && "value" in input && (fieldText(input.value) ?? "x").trim() === "") complete = false;
   if (lines.length > MAX_SUMMARY_LINES) complete = false;
   return { lines: lines.slice(0, MAX_SUMMARY_LINES), complete };
 }
