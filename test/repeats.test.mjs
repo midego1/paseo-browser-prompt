@@ -165,8 +165,8 @@ test("a repeat starts its own run only while the shared run is not going; the fi
   for (const state of [null, "done", "failed", "stopped", "unknown"]) assert.equal(canStartRun({ repeat: true, runState: state }), true, String(state));
   const card = read("client/card.tsx");
   assert.match(card, /const runBlocked = !canStartRun\(\{ repeat: isRepeat, runState: runAgentId \? shownState : null \}\);/);
-  assert.match(card, /if \(busy \|\| runBlocked\) return;/);
-  assert.match(card, /disabled=\{busy \|\| runBlocked\}/);
+  assert.match(card, /if \(busy \|\| resolving \|\| runBlocked\) return;/);
+  assert.match(card, /disabled=\{busy \|\| resolving \|\| runBlocked\}/);
   assert.match(card, /const runKey = `\$\{agentId\}:\$\{cardId\}`;/, "runs stay keyed by the card's own id (the server checks it)");
   assert.match(card, /runKey,\n\s+startedAgentId,\n\s+\.\.\.\(fallback \? \[MOST_RECENT_FALLBACK\] : \[\]\),\n\s+runKeyMarker\(key\),/);
 });

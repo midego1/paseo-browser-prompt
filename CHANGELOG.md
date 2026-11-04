@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.19.2 (unreleased)
+
+- Fix (registry review): the launch confirmation could describe another run than the one it starts.
+  With Oh My Pi in ask mode as Provider and a Claude provider for Chrome, pressing Chrome said "asks
+  before every new tool" while the run started in Claude Auto mode. The press now resolves the launch
+  once, including the automatically chosen `claude-chrome`; the confirmation names that provider and
+  model and says who approves actions in its mode, and Start uses exactly that config.
+- Only the latest press of an agent button counts, and those buttons wait while the launch resolves.
+- The confirmation says a run starts in its mode and may move between Auto, Always Ask and Plan.
+
 ## 0.19.1 (unreleased)
 
 - The button groups show their name next to the mark: "ChatGPT", and "Claude" (or "Paseo agent" for
