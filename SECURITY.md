@@ -13,11 +13,11 @@ Do not include real secrets, tokens or private prompts in a report; describe the
 
 | Data | Where it goes | When |
 | --- | --- | --- |
-| Prompt text (card steps plus a fixed header) | Clipboard of the device you use | Start in ChatGPT, Copy |
+| Prompt text (card steps plus a fixed header) | Clipboard of the device you use | ChatGPT app, ChatGPT web, ChatGPT extension, Copy |
 | Prompt text | `https://chatgpt.com/?hints=agent&q=...` in your browser (OpenAI, browser history) | ChatGPT web mode, only when the prompt is short and has nothing that looks like a credential |
 | Prompt text | Plugin memory on your Paseo daemon, under a random one-time id, at most 10 minutes; then the ChatGPT app via its `codex://` deep link | ChatGPT app mode |
 | Launcher URL `http://<own Tailscale IP or 127.0.0.1>:5299/open?id=<id>` | Your browser; contains no prompt text | ChatGPT app mode |
-| Card steps plus a fixed safety preamble | A new agent on your own Paseo daemon, and that agent's model provider (Anthropic by default) | Run with Paseo agent |
+| Card steps plus a fixed safety preamble | A new agent on your own Paseo daemon, and that agent's model provider (Anthropic by default); with Claude in Chrome also Anthropic's bridge to your Chrome | Paseo browser, Claude in Chrome |
 | The browser agent's final report (up to 4,000 characters), escaped and framed as untrusted output | The agent whose chat showed the card, and that agent's model provider | Report back to chat: Auto (default) only when that chat runs in an ask-first mode, or Always |
 | Title, outcome and run agent id only | The agent whose chat showed the card | Report back to chat: Auto, when that chat runs in any other mode |
 | Browser screenshots (viewport PNG after each step) | The browser agent's model provider, as tool output; a private copy kept by Paseo on the daemon host; shown as a thumbnail on the card in your Paseo app | Show live screenshot (on by default) |
@@ -35,7 +35,7 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
 - The launcher listens only on the daemon host's own Tailscale address (100.64.0.0/10) or on
   127.0.0.1, never on 0.0.0.0, a LAN or a public address. Anyone who can reach that address and
   guess a live 18-byte random id within 10 minutes could open that one prompt; ids are single-use.
-- Run with Paseo agent starts Claude agents in **Auto mode by default**. The agent acts in your
+- Paseo browser and Claude in Chrome start Claude agents in **Auto mode by default**. The agent acts in your
   Paseo desktop app's browser, where you may be signed in. In Auto mode a model classifier, not you,
   approves its tool calls, including clicks and form submissions on those sites. The safety preamble
   tells the agent to ask you as a question before secrets, destructive or irreversible actions,

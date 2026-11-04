@@ -1,14 +1,26 @@
 # Browser prompt for Paseo
 
-A [Paseo](https://paseo.sh) plugin that renders a card with **ChatGPT app**, **ChatGPT web**, **Paseo
-browser**, **Claude in Chrome**, **Copy** and **Mark done** for every `browser-prompt` block in an
-assistant message.
+A [Paseo](https://paseo.sh) plugin that turns every `browser-prompt` block in an assistant message
+into a card with a button for each way to run the steps:
 
-**Paseo browser** and **Claude in Chrome** start a Paseo agent. Claude in Chrome works in your real
-Chrome with every account you are signed in to, and needs a Claude provider, Chrome open and the
-extension signed in to the agent's Claude account. It follows Permission mode, so Auto by default: a
-classifier approves browser actions and the extension skips its check per site. The card shows no
-screenshots for those runs. The other sections and images below still use the older button names.
+| Button | What it does |
+| --- | --- |
+| **ChatGPT app** | Opens the ChatGPT desktop app with the steps in a new chat, starting with `@Chrome` so ChatGPT works in Chrome through its extension. You press send. Desktop only. |
+| **ChatGPT web** | Opens chatgpt.com in agent mode, with the steps in the URL when they are short and look secret-free. |
+| **ChatGPT extension** | Copies the steps for the ChatGPT Chrome extension and says to open its side panel and paste. Nothing outside the extension can open it or hand it a prompt. Desktop only. |
+| **Paseo browser** | Starts a Paseo agent that works in the browser tabs of your Paseo desktop app, with step progress and a screenshot per step on the card. |
+| **Claude in Chrome** | Starts a Paseo agent that works in your real Chrome through the Claude in Chrome extension, with every account you are signed in to. No screenshots on the card. |
+| **Copy** | Copies the steps. |
+| **Mark done** | Marks the card done on this host. |
+
+Your **Usual way to start** is highlighted. With a run on the card the agent buttons say "Again: …",
+and the status line names the browser the run uses. The gear in the card's header opens these
+settings.
+
+**Claude in Chrome** needs Chrome open with the extension signed in to the agent's Claude account. It
+follows Permission mode, so Auto by default: a model classifier approves browser actions and the
+extension skips its own check per site. A Paseo agent opens its own tab in the Paseo app; that is the
+agent's conversation, while the browsing happens in Chrome.
 
 If the run reports "Browser extension is not connected", the agent runs on another Claude account than
 the extension. Add a provider for the extension's account to the daemon's `config.json`, where
@@ -30,7 +42,7 @@ provider**:
 }
 ```
 
-- **Run with Paseo agent** starts a browser agent in the background (Claude Auto mode by default,
+- **Paseo browser** and **Claude in Chrome** start a browser agent in the background (Claude Auto mode by default,
   with a fixed safety preamble). The card shows "Step N of M", a screenshot per step, and the run's
   state; questions and permissions for you are answered right on the card.
 - The browser agent can ask the chat that showed the card about the task (**Talk to the chat**), and
@@ -51,17 +63,17 @@ See [OVERVIEW.md](OVERVIEW.md) for what it does, what data goes where, and its l
 
 ## How it works
 
-The screenshots below are the real Paseo app with this plugin. The agent text and the run's page
+The screenshots below are the real Paseo app with this plugin, taken with version 0.10: the card's
+buttons and the first settings section look different now (see the table above). The agent text and the run's page
 screenshots (real example.com and iana.org pages) are demo stand-ins; see
 [how they are made](scripts/demo/README.md). The settings named here are under Settings → Plugins →
 Browser prompts.
 
-**1. The card.** Every `browser-prompt` block in an agent's reply becomes a card. **Start in
-ChatGPT** copies the steps and opens ChatGPT, **Copy** only copies them, **Mark done** marks the
-card done on this host, and **Run with Paseo agent** starts a Paseo browser agent (after a
-confirmation, **Confirm before starting**).
+**1. The card.** Every `browser-prompt` block in an agent's reply becomes a card with a button for
+each way to run it (see the table above). The agent buttons ask first when **Confirm before
+starting** is on.
 
-![The card: the steps with Start in ChatGPT, Copy, Mark done and Run with Paseo agent](docs/screenshots/card.png)
+![The card in version 0.10, with Start in ChatGPT, Copy, Mark done and Run with Paseo agent; it now has a button per way](docs/screenshots/card.png)
 
 **2. Running in the background.** The agent works in the background and the card shows its state
 with an Open link (**Open the agent when started** opens it right away instead). "Step N of M" and
@@ -109,7 +121,7 @@ steps are done, later copies collapse to "✓ Already done · Show", and Show op
 
 **7. Settings.** Each behavior above is a setting (see [Settings](#settings) for the full list).
 
-![Settings: Start in ChatGPT, the deep link, Collapse repeated blocks that are done, and Done marks](docs/screenshots/settings-general.png)
+![Settings in version 0.10: Start in ChatGPT (now Usual way to start), the deep link, Collapse repeated blocks that are done, and Done marks](docs/screenshots/settings-general.png)
 
 ![Settings: Run with Paseo agent options](docs/screenshots/settings-run.png)
 
@@ -156,8 +168,8 @@ connected app shares them.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Usual way to start (desktop) | ChatGPT app | Which way is highlighted on the card and used by the Command Center: ChatGPT app (through the launcher), ChatGPT web, or Copy only. The card always offers every way. The prompt is always copied first. |
-| Usual way to start (iOS and Android) | Copy only | Copy only, or ChatGPT web. ChatGPT documents no mobile deep link for a new prompt. |
+| Usual way to start (desktop) | ChatGPT app | The button highlighted on the card: ChatGPT app (through the launcher), ChatGPT web, ChatGPT extension, Copy only, Paseo browser or Claude in Chrome. The card always offers every way. The Command Center opens ChatGPT this way, or the ChatGPT app when this is a Paseo agent. |
+| Usual way to start (iOS and Android) | Copy only | Copy only, ChatGPT web, Paseo browser or Claude in Chrome. There is no ChatGPT app or extension button on phones: ChatGPT documents no mobile deep link for a new prompt. |
 | ChatGPT app deep link | `codex://new?prompt={prompt}` | `{prompt}` is replaced by the encoded prompt; only `codex:` and `https:` are accepted. Save and Reset to default. |
 | Collapse repeated blocks that are done | on | A later copy of a block in the chat is a full card with "Also shown earlier in this chat"; once done, copies collapse to "✓ Already done · Show". Off: every copy is a plain full card. |
 | Done marks | – | How many cards are marked done on this host; Clear removes all marks. |
@@ -180,6 +192,7 @@ connected app shares them.
 | Model | `claude-sonnet-5-5` | Model id, or `provider/model`. |
 | Permission mode | `auto` | Claude: `auto` (Auto mode, a model classifier reviews tool calls; the default), `default` (Always Ask) or `plan`. Oh My Pi: `ask`. Bypass, accept-edits and other modes are refused and fall back to the default mode. |
 | Thinking | `high` | Thinking level passed to the provider. |
+| Claude in Chrome provider | empty | Paseo provider for the Claude in Chrome button, on the extension's Claude account. Empty: `claude-chrome` when the daemon has it, else Provider. |
 | Reset agent settings to default | – | Provider, model, mode and thinking back to the defaults above. |
 | Agent links on cards | – | How many cards remember a started agent; Clear forgets them. |
 
@@ -235,7 +248,7 @@ Rules:
   first fetch. The prompt is never in the launcher URL, and prompt text is never logged.
 - ChatGPT web mode puts the prompt in the `chatgpt.com` URL only when it is short and has nothing
   that looks like a credential.
-- Run with Paseo agent starts Claude agents in Auto mode by default (a model classifier reviews tool
+- Paseo browser and Claude in Chrome start Claude agents in Auto mode by default (a model classifier reviews tool
   calls), or in Always Ask or Plan when you choose them, and always prepends the fixed safety
   preamble. Bypass and accept-edits modes are refused, and a run that ends up in one is stopped.
 - The preamble's rules (only the Paseo browser tools, or the extension's with Claude in Chrome; ask before secrets and risky actions) are
@@ -270,7 +283,7 @@ RPC), `server/trampoline.ts` + `server/launcher.ts` (one-time launcher on this m
 IP, port 5299), `client/` (card, markdown fallback, launch actions, settings screen, agent run), `shared/agent-prompt.ts`
 (agent safety preamble, prompt builder, config defaults), `index.client.tsx`, `index.server.ts`.
 
-Start in ChatGPT (desktop default): copy prompt, RPC stashes it under a one-time id
+ChatGPT app (desktop default): copy prompt, RPC stashes it under a one-time id
 (10 min TTL, deleted on first fetch), Paseo opens `http://<tailscale-ip>:5299/open?id=...`,
 the page does `location.replace("codex://new?prompt=...")`. Prompt text is never logged.
 Check the bind with `ss -ltnp | grep 5299`.
@@ -341,7 +354,7 @@ control, so it holds only as well as the selected provider and model follow it. 
 not saved: the question cap must be a whole number from 0 to 50, and refused permission modes keep
 Save disabled (a malformed stored cap is clamped).
 
-The card's "Run with Paseo agent" button uses the app's own Paseo connection (`usePaseo()`):
+The card's **Paseo browser** and **Claude in Chrome** buttons use the app's own Paseo connection (`usePaseo()`):
 
 - Workspace: `useAgent(cardAgentId, a => a.workspaceId)`; if the app has no snapshot yet,
   `paseo.agents.ref(id).refresh()`; last resort the most recently active workspace
