@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.16.0 (unreleased)
+
+- The card offers every way to run a prompt, so you choose per prompt: **ChatGPT app**, **ChatGPT
+  web**, **Paseo browser**, **Claude in Chrome**, **Copy** and **Mark done**. The usual way is
+  highlighted (the start mode settings, now "Usual way to start"). There is no ChatGPT app button on
+  iOS and Android, and no Claude in Chrome button with a provider other than Claude.
+- The **Browser** setting from 0.15.0 is gone; a stored value is dropped. The run's status line says
+  which browser it uses.
+
 ## 0.15.2 (unreleased)
 
 - The steps show once, on the card. The raw `browser-prompt` block no longer stays in the message

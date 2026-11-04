@@ -29,8 +29,6 @@ export const DEFAULT_AGENT_SETTINGS = {
   closeTabsOnSuccess: true,
   /** After a fully successful run, the plugin archives the agent once its report went out. */
   archiveAgentOnSuccess: false,
-  /** Where the run works: the Paseo browser tabs, or the owner's real Chrome through Claude in Chrome. */
-  browserAgent: "paseo",
 } as const;
 
 export const BROWSER_AGENTS = ["paseo", "chrome"] as const;
@@ -38,6 +36,23 @@ export type BrowserAgent = (typeof BROWSER_AGENTS)[number];
 
 /** Marks a run record as started in Chrome, so its card names the right browser later. */
 export const CHROME_RUN_MARKER = "browser:chrome";
+
+/** Whether a run with these settings can use Claude in Chrome, by the same rules as the launch. */
+export function chromeAvailable(settings: AgentSettingsInput): boolean {
+  try {
+    resolveAgentConfig({ ...settings, browserAgent: "chrome" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether this run was started in Chrome: its own record decides, never a newer run's. */
+export function runStartedInChrome(runs: readonly (readonly string[])[], runAgentId: string | null): boolean | null {
+  if (!runAgentId) return null;
+  const record = runs.find((entry) => entry[1] === runAgentId);
+  return record ? record.slice(2).includes(CHROME_RUN_MARKER) : null;
+}
 
 /** Settings value to browser agent; anything unexpected is the Paseo browser. */
 export function parseBrowserAgent(value: unknown): BrowserAgent {
@@ -376,7 +391,7 @@ export function resolveAgentConfig(settings: AgentSettingsInput): ResolvedAgentC
   if (!allowed) throw new Error(agentModeError(providerId, "")!);
   const chrome = parseBrowserAgent(settings.browserAgent) === "chrome";
   if (chrome && providerFamily(providerId) !== "claude") {
-    throw new Error(`Claude in Chrome needs a Claude provider, not "${providerId}". Change the provider or the Browser setting.`);
+    throw new Error(`Claude in Chrome needs a Claude provider, not "${providerId}". Change the provider or use the Paseo browser.`);
   }
   const fallback = defaultModeFor(providerId) ?? allowed[0]!;
   let modeId = pick(settings.agentMode, fallback);

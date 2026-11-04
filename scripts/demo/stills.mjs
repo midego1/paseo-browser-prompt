@@ -45,7 +45,7 @@ try {
   // 1. The card, before anything runs.
   await still("card", [card()]);
 
-  await page.getByRole("button", { name: /Run .* with a Paseo agent/ }).click();
+  await page.getByRole("button", { name: /Run .* in the Paseo browser/ }).click();
   await page.getByRole("button", { name: "Start the Paseo agent" }).click();
 
   // 3. The browser agent asks the chat; the card waits for the chat's answer.
@@ -116,7 +116,7 @@ try {
   await still("settings-agent", [group("Provider")], { scroll: provider, top: provider, topPad: 20 });
   const general = page.getByText("Browser prompts", { exact: true }).last();
   const generalGroup = page.getByText("Done marks", { exact: true }).first().locator(
-    "xpath=ancestor::*[.//*[text()='Start in ChatGPT (desktop)']][1]",
+    "xpath=ancestor::*[.//*[text()='Usual way to start (desktop)']][1]",
   );
   await still("settings-general", [general, generalGroup], { scroll: general });
   // A Git install (record.sh with DEMO_PLUGIN_GIT) shows its repository and the consent text.

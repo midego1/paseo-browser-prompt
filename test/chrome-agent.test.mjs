@@ -10,6 +10,8 @@ import {
   CHROME_KEEP_TABS_RULE,
   CHROME_RUN_MARKER,
   CHROME_SAFETY_PREAMBLE,
+  chromeAvailable,
+  runStartedInChrome,
   CLASSIFIER_MODE_RULE,
   CLOSE_TABS_RULE,
   DEFAULT_AGENT_SETTINGS,
@@ -24,8 +26,7 @@ const AUTO = { provider: "claude/claude-sonnet-5-5", modeId: "auto" };
 const chromePrompt = (config = AUTO, screenshots = true, closeTabs = true) =>
   buildAgentPrompt("T", "1. x", config, undefined, undefined, screenshots, closeTabs, false, "chrome");
 
-test("the Paseo browser stays the default, and runs get no Chrome flag", () => {
-  assert.equal(DEFAULT_AGENT_SETTINGS.browserAgent, "paseo");
+test("runs get no Chrome flag unless asked", () => {
   assert.equal("options" in resolveAgentConfig(DEFAULT_AGENT_SETTINGS), false);
   assert.equal("options" in resolveAgentConfig({ ...DEFAULT_AGENT_SETTINGS, browserAgent: "anything" }), false);
   assert.equal(parseBrowserAgent("chrome"), "chrome");
@@ -96,10 +97,50 @@ test("a run in the Paseo browser keeps its prompt", () => {
   assert.ok(!prompt.includes("claude-in-chrome"));
 });
 
-test("the setting migrates, and an unknown value falls back", () => {
+test("a stored Browser setting is dropped", () => {
+  assert.equal("browserAgent" in migratePreferences({ browserAgent: "chrome" }, 15), false);
   assert.equal("browserAgent" in migratePreferences({ browserAgent: "firefox" }, 14), false);
-  assert.equal(migratePreferences({ browserAgent: "chrome" }, 14).browserAgent, "chrome");
-  assert.equal(migratePreferences({ browserAgent: "chrome" }, 15).browserAgent, "chrome");
+});
+
+test("the card offers every way to run, per card", () => {
+  const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
+  for (const label of ["ChatGPT app", "ChatGPT web", "Paseo browser", "Claude in Chrome", "Copy", "Mark done"]) assert.ok(card.includes(label), label);
+  assert.match(card, /startInChatGpt\(title, text, "app"/);
+  assert.match(card, /startInChatGpt\(title, text, "web-agent"/);
+  assert.match(card, /onRunPress\("paseo"\)/);
+  assert.match(card, /onRunPress\("chrome"\)/);
+  assert.match(card, /launchAgent\(pendingBrowser\)/);
+  assert.match(card, /browserAgent: browser \}/, "the press decides the browser, not a setting");
+  assert.match(card, /\{mobile \? null : \(/, "no ChatGPT app button without a mobile deep link");
+  assert.match(card, /\{showChrome \? \(/, "Claude in Chrome only when the launch would work");
+  assert.match(card, /"Again: Paseo browser"/, "a card with a run says it would be another run");
+  assert.match(card, /\{active \? <Text/, "the confirmation warns about a run still going");
+  assert.match(card, /startInChatGpt\(title, text, "copy-only"/, "highlighted Copy keeps the paste hint");
+  for (const demo of ["capture", "stills"]) {
+    const script = readFileSync(new URL(`../scripts/demo/${demo}.mjs`, import.meta.url), "utf8");
+    assert.match(script, /Run \.\* in the Paseo browser/, "the demo presses one button, the Paseo browser");
+  }
+});
+
+test("Claude in Chrome shows only when the launch would work", () => {
+  assert.equal(chromeAvailable(DEFAULT_AGENT_SETTINGS), true);
+  assert.equal(chromeAvailable({ ...DEFAULT_AGENT_SETTINGS, agentProvider: "omp", agentModel: "m" }), false);
+  assert.equal(chromeAvailable({ ...DEFAULT_AGENT_SETTINGS, agentProvider: "codex", agentModel: "claude/claude-sonnet-5-5" }), true);
+  assert.equal(chromeAvailable({ ...DEFAULT_AGENT_SETTINGS, agentProvider: "claude", agentModel: "omp/x" }), false);
+  assert.throws(() => resolveAgentConfig({ ...DEFAULT_AGENT_SETTINGS, browserAgent: "chrome", agentModel: "omp/x" }), /use the Paseo browser/);
+});
+
+test("a run's own record names its browser, not a newer run's", () => {
+  const runs = [
+    ["a:card1", "run-paseo", "key:k"],
+    ["a:card2", "run-chrome", "key:k", CHROME_RUN_MARKER],
+    ["a:card3", "run-fallback", "most-recent", "key:k", CHROME_RUN_MARKER],
+  ];
+  assert.equal(runStartedInChrome(runs, "run-paseo"), false);
+  assert.equal(runStartedInChrome(runs, "run-chrome"), true);
+  assert.equal(runStartedInChrome(runs, "run-fallback"), true);
+  assert.equal(runStartedInChrome(runs, "not-saved-yet"), null);
+  assert.equal(runStartedInChrome(runs, null), null);
 });
 
 test("the launch passes the flag and the browser to the prompt", () => {
