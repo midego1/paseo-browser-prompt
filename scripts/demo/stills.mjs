@@ -94,7 +94,7 @@ try {
   if (process.env.DEMO_REPEAT_WORKSPACE_ID) {
     await page.goto(workspacePage(process.env.DEMO_REPEAT_WORKSPACE_ID), { waitUntil: "networkidle" });
     await page.getByText("Also shown earlier in this chat").nth(1).waitFor({ timeout: 60_000 });
-    await page.getByText("Mark done", { exact: true }).first().click();
+    await page.getByRole("button", { name: /^Mark .* done$/ }).first().click();
     await page.getByText("✓ Already done").nth(1).waitFor();
     await page.getByText("Show", { exact: true }).first().click();
     const hint = page.getByText("Also shown earlier in this chat").first();

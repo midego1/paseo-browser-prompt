@@ -29,8 +29,8 @@ export async function openDemo({ viewport, overlay = true }) {
     }
   };
   await setSwitch("Show live screenshot", true);
-  await page.getByRole("textbox", { name: "Provider" }).fill("claude-demo");
-  await page.getByRole("textbox", { name: "Model" }).fill("stand-in");
+  await page.getByRole("textbox", { name: "Provider", exact: true }).fill("claude-demo");
+  await page.getByRole("textbox", { name: "Model", exact: true }).fill("stand-in");
   await page
     .getByText("Save agent provider, model and mode")
     .locator("xpath=ancestor::*[.//*[text()='Save']][1]")
