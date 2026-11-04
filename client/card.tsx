@@ -512,6 +512,18 @@ export function BrowserPromptCard({
           <Icon name="Globe" size={14} color={defaultMode === "web-agent" ? theme.colors.accentForeground : theme.colors.foreground} />
           <Text style={defaultMode === "web-agent" ? styles.primaryText : styles.secondaryText}>ChatGPT web</Text>
         </Pressable>
+        {mobile ? null : (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Copy ${displayTitle} for the ChatGPT extension in Chrome`}
+            disabled={busy}
+            onPress={() => void run(() => startInChatGpt(title, text, "extension", (prompt) => stash({ prompt })))}
+            style={defaultMode === "extension" ? styles.primary : styles.secondary}
+          >
+            <Icon name="Puzzle" size={14} color={defaultMode === "extension" ? theme.colors.accentForeground : theme.colors.foreground} />
+            <Text style={defaultMode === "extension" ? styles.primaryText : styles.secondaryText}>ChatGPT extension</Text>
+          </Pressable>
+        )}
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={`Run ${displayTitle} with a Paseo agent in the Paseo browser`}

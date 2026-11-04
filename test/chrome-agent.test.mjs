@@ -116,12 +116,24 @@ test("every way on the card can be the usual way", () => {
   const settings = readFileSync(new URL("../shared/settings.ts", import.meta.url), "utf8");
   const screen = readFileSync(new URL("../client/settings-screen.tsx", import.meta.url), "utf8");
   const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
-  assert.match(settings, /startMode: z\.enum\(\["app", "web-agent", "copy-only", "paseo", "chrome"\]\)\.default\("app"\)/);
+  assert.match(settings, /startMode: z\.enum\(\["app", "web-agent", "extension", "copy-only", "paseo", "chrome"\]\)\.default\("app"\)/);
   assert.match(settings, /mobileStartMode: z\.enum\(\["copy-only", "web-agent", "paseo", "chrome"\]\)\.default\("copy-only"\)/);
   assert.equal(screen.match(/label: "Paseo browser", value: "paseo"/g)?.length, 2);
   assert.equal(screen.match(/label: "Claude in Chrome", value: "chrome"/g)?.length, 2);
-  for (const way of ["app", "web-agent", "copy-only", "paseo", "chrome"]) assert.ok(card.includes(`defaultMode === "${way}" ? styles.primary`), way);
+  for (const way of ["app", "web-agent", "extension", "copy-only", "paseo", "chrome"]) assert.ok(card.includes(`defaultMode === "${way}" ? styles.primary`), way);
   assert.match(readFileSync(new URL("../index.client.tsx", import.meta.url), "utf8"), /chatGptMode\(effectiveMode\(/, "the Command Center only opens ChatGPT");
+});
+
+test("the ChatGPT extension button copies a prompt for the side panel", () => {
+  const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
+  const launch = readFileSync(new URL("../client/launch.ts", import.meta.url), "utf8");
+  const settings = readFileSync(new URL("../shared/settings.ts", import.meta.url), "utf8");
+  assert.match(card, /startInChatGpt\(title, text, "extension"/);
+  assert.match(card, />ChatGPT extension</);
+  assert.match(launch, /mode === "extension" \? CHATGPT_EXTENSION_HEADER/);
+  assert.match(launch, /if \(mode === "extension"\) \{\s*return copied \? \{ ok: true, message: EXTENSION_HINT \}/, "copies and opens nothing");
+  assert.match(settings, /startMode: z\.enum\(\["app", "web-agent", "extension", "copy-only", "paseo", "chrome"\]\)/);
+  assert.doesNotMatch(settings, /mobileStartMode: z\.enum\([^)]*"extension"/, "no extension on iOS and Android");
 });
 
 test("a stored Browser setting is dropped", () => {

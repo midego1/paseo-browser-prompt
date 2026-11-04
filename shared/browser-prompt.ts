@@ -212,9 +212,15 @@ export function explodeMessage(
 }
 
 /** The full text placed on the clipboard and in the ChatGPT URL. */
-export function composePrompt(title: string, body: string): string {
+/** Header for the ChatGPT extension's side panel, which already works in the owner's browser. */
+export const CHATGPT_EXTENSION_HEADER =
+  "Use this browser to carry out the following steps for me, where I am already signed in. " +
+  "Stop and ask me before entering any password, token, or other secret, and before confirming " +
+  "any destructive or irreversible action.";
+
+export function composePrompt(title: string, body: string, header: string = CHATGPT_HEADER): string {
   const heading = title ? `Task: ${title}\n\n` : "";
-  return `${CHATGPT_HEADER}\n\n${heading}${body.trim()}\n`;
+  return `${header}\n\n${heading}${body.trim()}\n`;
 }
 
 const SECRET_PATTERNS = [

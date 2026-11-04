@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  CHATGPT_EXTENSION_HEADER,
   composePrompt,
   explodeMessage,
   findBrowserPrompts,
@@ -185,4 +186,11 @@ test("two messages never share item ids, so each shows its own cards", () => {
   assert.notDeepEqual(ids(`First\n\n${block}`), ids(`Second\n\n${block}`), "no message ids, different text before the block");
   // Streaming: later text does not change the ids of what is already shown.
   assert.equal(explodeMessage(`${block}\nmore`, "streaming")[0].id, explodeMessage(`${block}\nmore and more`, "streaming")[0].id);
+});
+
+test("the extension prompt has its own header and no @Chrome mention", () => {
+  const prompt = composePrompt("T", "1. x", CHATGPT_EXTENSION_HEADER);
+  assert.ok(prompt.startsWith("Use this browser to carry out the following steps"));
+  assert.doesNotMatch(prompt, /@Chrome/);
+  assert.match(composePrompt("T", "1. x"), /^@Chrome /, "the app prompt keeps its mention");
 });
