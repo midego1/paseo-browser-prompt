@@ -2,7 +2,7 @@ Browser prompt turns step-by-step browser instructions written by an agent into 
 
 ## What it does
 
-When an assistant message contains a fenced code block whose info string is `browser-prompt` (optionally followed by a title), the message is shown as before and a card appears below each such block. The card shows the title and the steps, with four buttons:
+When an assistant message contains a fenced code block whose info string is `browser-prompt` (optionally followed by a title), the block is replaced by a card, and the rest of the message is shown as before. The card shows the title and the steps, with four buttons:
 
 - **Start in ChatGPT** copies the steps to the clipboard with a short header asking ChatGPT to carry them out with computer use, and to stop and ask before entering secrets or confirming destructive actions. It then opens ChatGPT as set in the settings.
 - **Copy** copies the same text without opening anything.

@@ -42,7 +42,7 @@ test("finds blocks with and without titles", () => {
   assert.equal(blocks[1].title, "");
 });
 
-test("explodes into markdown + card per block without losing text", () => {
+test("explodes into markdown + card per block, with the steps only on the card", () => {
   const items = explodeMessage(message, "complete");
   assert.ok(items);
   const scope = /^md-(h[0-9a-f]{8}-)0$/.exec(items[0].id)?.[1];
@@ -59,7 +59,11 @@ test("explodes into markdown + card per block without losing text", () => {
     ["md-msg-7-0", "card-msg-7-0", "md-msg-7-1", "card-msg-7-1", "md-msg-7-2"],
   );
   const rebuilt = items.filter((i) => i.kind === "browser-prompt-markdown").map((i) => i.data.text).join("");
-  assert.equal(rebuilt, message, "markdown segments concatenate back to the original text");
+  const blocks = findBrowserPrompts(message);
+  const outside = message.slice(0, blocks[0].start) + message.slice(blocks[0].end, blocks[1].start) + message.slice(blocks[1].end);
+  assert.equal(rebuilt, outside, "the text around the blocks is kept, without the blocks");
+  assert.doesNotMatch(rebuilt, /browser-prompt/);
+  assert.ok(!rebuilt.includes(blocks[0].body), "the steps show once, on the card");
   assert.doesNotThrow(() => JSON.stringify(items));
 });
 

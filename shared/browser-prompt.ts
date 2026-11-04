@@ -4,9 +4,6 @@
 /** Info-string word that marks a fenced block as a browser prompt. */
 export const INFO_WORD = "browser-prompt";
 
-/** Keep the raw fenced block in the rendered message text; the card follows it. */
-export const KEEP_BLOCK_IN_MESSAGE = true;
-
 /** Longest ChatGPT URL we open with a prefilled prompt. */
 export const MAX_URL_LENGTH = 1500;
 
@@ -194,7 +191,7 @@ export function explodeMessage(
   const scope = messageId ? `${messageId}-` : `h${hashText(text.slice(0, closed[0]!.end))}-`;
   let cursor = 0;
   for (const block of closed) {
-    pushText(text.slice(cursor, KEEP_BLOCK_IN_MESSAGE ? block.end : block.start), `md-${scope}${block.index}`, "complete");
+    pushText(text.slice(cursor, block.start), `md-${scope}${block.index}`, "complete");
     items.push({
       type: "plugin",
       id: `card-${scope}${block.index}`,
