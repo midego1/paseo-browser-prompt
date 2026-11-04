@@ -19,7 +19,7 @@ import { endedRun } from "../shared/run-lock";
 import { acquireRunLock, finishRunLock } from "../shared/run-lock-rpc";
 import { MAX_DONE, MAX_RUNS, preferences } from "../shared/settings";
 import { stashPrompt } from "../shared/trampoline";
-import { CLAUDE_ICON, OPENAI_ICON } from "../shared/brand-icons";
+import { CLAUDE_COLOR, CLAUDE_ICON, OPENAI_COLOR, OPENAI_ICON } from "../shared/brand-icons";
 import { archivedAfterSuccess } from "../shared/archive-rpc";
 import {
   copyPrompt,
@@ -267,7 +267,8 @@ export function BrowserPromptCard({
       actions: { flexDirection: "row" as const, flexWrap: "wrap" as const, alignItems: "center" as const, columnGap: 16, rowGap: 8 },
       // One group per service: its mark, then a button per way. Groups wrap as a whole.
       group: { flexDirection: "row" as const, flexWrap: "wrap" as const, alignItems: "center" as const, gap: 6 },
-      groupMark: { width: 20, alignItems: "center" as const },
+      groupMark: { flexDirection: "row" as const, alignItems: "center" as const, gap: 5, marginRight: 2 },
+      groupLabel: { color: theme.colors.foreground, fontSize: 13, fontWeight: "600" as const },
       iconButton: { paddingHorizontal: 8 },
       primary: {
         flexDirection: "row" as const,
@@ -505,7 +506,8 @@ export function BrowserPromptCard({
       <View style={styles.actions}>
         <View style={styles.group} accessibilityRole="toolbar" accessibilityLabel="ChatGPT">
           <View style={styles.groupMark} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-            <Icon icon={OPENAI_ICON} size={16} color={theme.colors.foreground} />
+            <Icon icon={OPENAI_ICON} size={16} color={OPENAI_COLOR} />
+            <Text style={styles.groupLabel}>ChatGPT</Text>
           </View>
           {mobile ? null : (
             <WayButton
@@ -539,10 +541,11 @@ export function BrowserPromptCard({
         <View style={styles.group} accessibilityRole="toolbar" accessibilityLabel="Paseo agent">
           <View style={styles.groupMark} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
             {agentIsClaude ? (
-              <Icon icon={CLAUDE_ICON} size={16} color={theme.colors.foreground} />
+              <Icon icon={CLAUDE_ICON} size={16} color={CLAUDE_COLOR} />
             ) : (
               <Icon name="Bot" size={16} color={theme.colors.foreground} />
             )}
+            <Text style={styles.groupLabel}>{agentIsClaude ? "Claude" : "Paseo agent"}</Text>
           </View>
           <WayButton
             label={runAgentId ? "Again: Paseo browser" : "Paseo browser"}

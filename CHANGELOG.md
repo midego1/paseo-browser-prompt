@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.1 (unreleased)
+
+- The button groups show their name next to the mark: "ChatGPT", and "Claude" (or "Paseo agent" for
+  another provider). The marks are in their brand colors.
+
 ## 0.19.0 (unreleased)
 
 - The card's buttons are grouped: ChatGPT (its mark, then **Desktop**, **Web** and **Extension**) and

@@ -154,7 +154,8 @@ test("a stored Browser setting is dropped", () => {
 test("the card offers every way to run, per card", () => {
   const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
   for (const label of ['label="Desktop"', 'label="Web"', 'label="Extension"', '"Paseo browser"', '"Chrome"', "`Copy ${displayTitle}`", "`Mark ${displayTitle} done`"]) assert.ok(card.includes(label), label);
-  assert.match(card, /<Icon icon=\{OPENAI_ICON\}/, "ChatGPT group has its mark");
+  assert.match(card, /<Icon icon=\{OPENAI_ICON\} size=\{16\} color=\{OPENAI_COLOR\} \/>\s*<Text style=\{styles\.groupLabel\}>ChatGPT<\/Text>/, "ChatGPT group: mark in color and name");
+  assert.match(card, /\{agentIsClaude \? "Claude" : "Paseo agent"\}/, "agent group: its name");
   assert.match(card, /agentIsClaude \? \(\s*<Icon icon=\{CLAUDE_ICON\}/, "Claude mark only for a Claude provider");
   assert.match(card, /startInChatGpt\(title, text, "app"/);
   assert.match(card, /startInChatGpt\(title, text, "web-agent"/);
