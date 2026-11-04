@@ -106,7 +106,7 @@ test("card id is stable for identical content", () => {
 
 test("launch plan: prefilled agent-mode URL when short and secret-free", () => {
   const prompt = composePrompt("Set DEPLOY_TOKEN", "1. Open https://github.com/x/y/settings/secrets/actions");
-  assert.match(prompt, /^Use computer use \(@Computer\)/);
+  assert.match(prompt, /^@Chrome Use my Chrome browser, through the ChatGPT extension/);
   const plan = planChatGptLaunch(prompt);
   assert.equal(plan.prefilled, true);
   assert.ok(plan.url.startsWith("https://chatgpt.com/?hints=agent&q="));

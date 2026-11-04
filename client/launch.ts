@@ -28,7 +28,7 @@ export interface ActionResult {
   message: string;
 }
 
-const PASTE_HINT = "Prompt copied. Paste it into ChatGPT (computer use).";
+const PASTE_HINT = "Prompt copied. Paste it into a ChatGPT Work chat.";
 
 /** Copies the prompt with the computer-use header, then opens ChatGPT according to the mode. */
 export async function startInChatGpt(

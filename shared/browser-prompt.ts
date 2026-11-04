@@ -9,8 +9,8 @@ export const MAX_URL_LENGTH = 1500;
 
 export const CHATGPT_AGENT_URL = "https://chatgpt.com/?hints=agent";
 
-export const COMPUTER_USE_HEADER =
-  "Use computer use (@Computer) to carry out the following steps for me in my web browser, " +
+export const CHATGPT_HEADER =
+  "@Chrome Use my Chrome browser, through the ChatGPT extension, to carry out the following steps for me, " +
   "where I am already signed in. Stop and ask me before entering any password, token, or other " +
   "secret, and before confirming any destructive or irreversible action.";
 
@@ -214,7 +214,7 @@ export function explodeMessage(
 /** The full text placed on the clipboard and in the ChatGPT URL. */
 export function composePrompt(title: string, body: string): string {
   const heading = title ? `Task: ${title}\n\n` : "";
-  return `${COMPUTER_USE_HEADER}\n\n${heading}${body.trim()}\n`;
+  return `${CHATGPT_HEADER}\n\n${heading}${body.trim()}\n`;
 }
 
 const SECRET_PATTERNS = [
