@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.19.3 (unreleased)
+
+- New README screenshots of the current card (grouped buttons with the ChatGPT and Claude marks, the
+  gear) and settings, from `scripts/demo/record.sh --stills`. The demo scripts find the card by its
+  ChatGPT group and the provider field by its exact name. The tour GIF and video are still from 0.10.
+
 ## 0.19.2 (unreleased)
 
 - Fix (registry review): the launch confirmation could describe another run than the one it starts.

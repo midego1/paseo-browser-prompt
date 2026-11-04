@@ -64,8 +64,7 @@ See [OVERVIEW.md](OVERVIEW.md) for what it does, what data goes where, and its l
 
 ## How it works
 
-The screenshots below are the real Paseo app with this plugin, taken with version 0.10: the card's
-buttons and the first settings section look different now (see the table above). The agent text and the run's page
+The screenshots below are the real Paseo app with this plugin. The agent text and the run's page
 screenshots (real example.com and iana.org pages) are demo stand-ins; see
 [how they are made](scripts/demo/README.md). The settings named here are under Settings → Plugins →
 Browser prompts.
@@ -74,7 +73,7 @@ Browser prompts.
 each way to run it (see the table above). The agent buttons ask first when **Confirm before
 starting** is on.
 
-![The card in version 0.10, with Start in ChatGPT, Copy, Mark done and Run with Paseo agent; it now has a button per way](docs/screenshots/card.png)
+![The card: ChatGPT with Desktop, Web and Extension; Claude with Paseo browser and Chrome; copy and done icons](docs/screenshots/card.png)
 
 **2. Running in the background.** The agent works in the background and the card shows its state
 with an Open link (**Open the agent when started** opens it right away instead). "Step N of M" and
@@ -122,11 +121,11 @@ steps are done, later copies collapse to "✓ Already done · Show", and Show op
 
 **7. Settings.** Each behavior above is a setting (see [Settings](#settings) for the full list).
 
-![Settings in version 0.10: Start in ChatGPT (now Usual way to start), the deep link, Collapse repeated blocks that are done, and Done marks](docs/screenshots/settings-general.png)
+![Settings: Usual way to start, the deep link, Collapse repeated blocks that are done, and Done marks](docs/screenshots/settings-general.png)
 
 ![Settings: Run with Paseo agent options](docs/screenshots/settings-run.png)
 
-![Settings: the agent's provider, model, permission mode and thinking](docs/screenshots/settings-agent.png)
+![Settings: the agent's provider, model, permission mode, Claude in Chrome provider and thinking](docs/screenshots/settings-agent.png)
 
 **8. Updates.** Auto-update is off. For a Git install, the Updates section names the repository the
 plugin was installed from and says that, once enabled, newer plugin code from it is downloaded and
