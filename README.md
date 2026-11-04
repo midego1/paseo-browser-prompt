@@ -1,8 +1,8 @@
 # Browser prompt for Paseo
 
 A [Paseo](https://paseo.sh) plugin that turns every `browser-prompt` block in an assistant message
-into a card with a button for each way to run the steps, in two groups: ChatGPT (with its mark) and the
-Paseo agent (with the Claude mark when it runs Claude):
+into a card with a button for each way to run the steps, in two groups: ChatGPT (its mark and name) and the
+Paseo agent ("Claude" with its mark when it runs Claude, "Paseo agent" otherwise):
 
 | Button | What it does |
 | --- | --- |
