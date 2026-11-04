@@ -97,6 +97,19 @@ test("a run in the Paseo browser keeps its prompt", () => {
   assert.ok(!prompt.includes("claude-in-chrome"));
 });
 
+test("the card's settings icon opens the page the plugin registers", () => {
+  const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
+  const entry = readFileSync(new URL("../index.client.tsx", import.meta.url), "utf8");
+  const run = readFileSync(new URL("../client/agent-run.ts", import.meta.url), "utf8");
+  assert.match(card, /accessibilityLabel="Browser prompt settings"/);
+  assert.match(card, /<Icon name="Settings"/);
+  assert.match(card, /openPluginSettings\(\)/);
+  assert.match(entry, /setOpenSettings\(\(id\) => client\.openSettings\(id\)\)/);
+  assert.match(entry, /addSettingsScreen\(\{\s*id: SETTINGS_SCREEN_ID,/);
+  assert.match(entry, /setOpenSettings\(null\)/);
+  assert.match(run, /SETTINGS_SCREEN_ID = "preferences"/);
+});
+
 test("a stored Browser setting is dropped", () => {
   assert.equal("browserAgent" in migratePreferences({ browserAgent: "chrome" }, 15), false);
   assert.equal("browserAgent" in migratePreferences({ browserAgent: "firefox" }, 14), false);

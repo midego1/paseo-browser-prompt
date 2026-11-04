@@ -1,5 +1,5 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
-import { RUN_SCREEN_ID, setOpenScreen } from "./client/agent-run";
+import { RUN_SCREEN_ID, setOpenScreen, setOpenSettings, SETTINGS_SCREEN_ID } from "./client/agent-run";
 import { BrowserPromptCard, cardSchema, MarkdownSegment, markdownSchema } from "./client/card";
 import { effectiveMode, getLastSeenPrompt, getRememberedModes, startInChatGpt } from "./client/launch";
 import { AgentRunScreen } from "./client/run-screen";
@@ -10,6 +10,7 @@ import { stashPrompt } from "./shared/trampoline";
 
 export default function contribute(client: PluginClientContext) {
   setOpenScreen((input) => client.openScreen(input));
+  setOpenSettings((id) => client.openSettings(id));
   client.addScreen({
     id: RUN_SCREEN_ID,
     title: (params) => params.title || "Paseo browser agent",
@@ -37,7 +38,7 @@ export default function contribute(client: PluginClientContext) {
     Component: BrowserPromptCard,
   });
   client.addSettingsScreen({
-    id: "preferences",
+    id: SETTINGS_SCREEN_ID,
     title: "Browser prompts",
     icon: "Globe",
     Component: SettingsScreen,
@@ -59,5 +60,6 @@ export default function contribute(client: PluginClientContext) {
   });
   return () => {
     setOpenScreen(null);
+    setOpenSettings(null);
   };
 }

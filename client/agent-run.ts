@@ -24,6 +24,22 @@ export function setOpenScreen(open: ((input: PluginOpenScreenInput) => void) | n
   openScreenRef = open;
 }
 
+/** The plugin's settings page, which Paseo lists under this id. */
+export const SETTINGS_SCREEN_ID = "preferences";
+
+let openSettingsRef: ((id: string) => void) | null = null;
+
+/** Called from the client entry so cards can open the settings page. */
+export function setOpenSettings(open: ((id: string) => void) | null): void {
+  openSettingsRef = open;
+}
+
+export function openPluginSettings(): boolean {
+  if (!openSettingsRef) return false;
+  openSettingsRef(SETTINGS_SCREEN_ID);
+  return true;
+}
+
 /** Each launch opens the agent automatically once; Back to the screen does not loop. */
 const consumedOpenTokens = new Set<string>();
 

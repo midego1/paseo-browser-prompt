@@ -29,7 +29,7 @@ import {
   startInChatGpt,
   type ActionResult,
 } from "./launch";
-import { openRunScreen, startBrowserAgent } from "./agent-run";
+import { openPluginSettings, openRunScreen, startBrowserAgent } from "./agent-run";
 import { MessageMarkdown } from "./markdown";
 import { OwnerPromptBox, useOwnerPrompts } from "./owner-prompt";
 import { RUN_LABELS, runVisual, useRunState } from "./run-status";
@@ -456,6 +456,20 @@ export function BrowserPromptCard({
           {displayTitle}
         </Text>
         <Text style={styles.label}>{done ? "Done" : "Browser prompt"}</Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Browser prompt settings"
+          hitSlop={8}
+          onPress={() => {
+            try {
+              if (!openPluginSettings()) toast.error("Cannot open the settings from here.");
+            } catch {
+              toast.error("Cannot open the settings from here.");
+            }
+          }}
+        >
+          <Icon name="Settings" size={14} color={theme.colors.foregroundMuted} />
+        </Pressable>
       </View>
       {view === "repeat" ? (
         <View style={styles.runRow}>
