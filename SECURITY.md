@@ -90,7 +90,7 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
   the last line of its own final report says it fully succeeded. The agent writes that line, so a page
   that misleads it could get a run archived too early; archiving keeps the agent's history. The daemon
   keeps the archived run ids, and nothing else, in `archived-runs.json` in the plugin's state directory.
-- Browser: Claude in Chrome (off by default) runs the agent in your real Chrome, with every account you
+- The Claude in Chrome button on the card runs the agent in your real Chrome, with every account you
   are signed in to, not in the Paseo browser. Its reach is much wider. In Auto mode, its default, a
   model classifier approves browser actions and the extension skips its own check per site, so the
   limits on sites and secrets are rules the agent is told, not rules that are enforced. A malicious

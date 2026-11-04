@@ -88,7 +88,6 @@ test("settings defaults: Anthropic Claude Sonnet 5.5, thinking high, Auto mode, 
     thumbnailMode: "all",
     closeTabsOnSuccess: true,
     archiveAgentOnSuccess: false,
-    browserAgent: "paseo",
   });
   assert.deepEqual(resolveAgentConfig(DEFAULT_AGENT_SETTINGS), {
     provider: "claude/claude-sonnet-5-5",

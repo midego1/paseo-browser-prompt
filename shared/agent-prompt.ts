@@ -29,8 +29,6 @@ export const DEFAULT_AGENT_SETTINGS = {
   closeTabsOnSuccess: true,
   /** After a fully successful run, the plugin archives the agent once its report went out. */
   archiveAgentOnSuccess: false,
-  /** Where the run works: the Paseo browser tabs, or the owner's real Chrome through Claude in Chrome. */
-  browserAgent: "paseo",
 } as const;
 
 export const BROWSER_AGENTS = ["paseo", "chrome"] as const;

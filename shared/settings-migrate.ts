@@ -50,8 +50,8 @@ export function migratePreferences(values: unknown, fromVersion: number): unknow
     next = { ...next };
     delete next.archiveAgentOnSuccess;
   }
-  // v15 adds browserAgent (default the Paseo browser). Any other stored value: drop it.
-  if (fromVersion < 15 && "browserAgent" in next && next.browserAgent !== "paseo" && next.browserAgent !== "chrome") {
+  // v15 had browserAgent; since v16 the card offers both browsers, so a stored value is dropped.
+  if (fromVersion < 16 && "browserAgent" in next) {
     next = { ...next };
     delete next.browserAgent;
   }

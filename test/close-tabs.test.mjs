@@ -92,7 +92,7 @@ test("the card passes the setting to the prompt, on unless it is false", () => {
   const run = readFileSync(new URL("../client/agent-run.ts", import.meta.url), "utf8");
   assert.match(run, /input\.settings\.closeTabsOnSuccess !== false/);
   const settings = readFileSync(new URL("../shared/settings.ts", import.meta.url), "utf8");
-  assert.match(settings, /version: 15,/);
+  assert.match(settings, /version: 16,/);
   assert.match(settings, /closeTabsOnSuccess: z\.boolean\(\)\.default\(DEFAULT_AGENT_SETTINGS\.closeTabsOnSuccess\)/);
   const screen = readFileSync(new URL("../client/settings-screen.tsx", import.meta.url), "utf8");
   assert.match(screen, /label="Close tabs after a successful run"/);

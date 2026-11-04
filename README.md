@@ -1,7 +1,14 @@
 # Browser prompt for Paseo
 
-A [Paseo](https://paseo.sh) plugin that renders a card with **Start in ChatGPT**, **Copy**, **Mark done**
-and **Run with Paseo agent** for every `browser-prompt` block in an assistant message.
+A [Paseo](https://paseo.sh) plugin that renders a card with **ChatGPT app**, **ChatGPT web**, **Paseo
+browser**, **Claude in Chrome**, **Copy** and **Mark done** for every `browser-prompt` block in an
+assistant message.
+
+**Paseo browser** and **Claude in Chrome** start a Paseo agent. Claude in Chrome works in your real
+Chrome with every account you are signed in to, and needs a Claude provider, Chrome open and the
+extension signed in to the agent's Claude account. It follows Permission mode, so Auto by default: a
+classifier approves browser actions and the extension skips its check per site. The card shows no
+screenshots for those runs. The other sections and images below still use the older button names.
 
 - **Run with Paseo agent** starts a browser agent in the background (Claude Auto mode by default,
   with a fixed safety preamble). The card shows "Step N of M", a screenshot per step, and the run's
@@ -129,8 +136,8 @@ connected app shares them.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Start in ChatGPT (desktop) | ChatGPT app | ChatGPT app (through the launcher), ChatGPT web, or Copy only. The prompt is always copied first. |
-| Start in ChatGPT (iOS and Android) | Copy only | Copy only, or ChatGPT web. ChatGPT documents no mobile deep link for a new prompt. |
+| Usual way to start (desktop) | ChatGPT app | Which way is highlighted on the card and used by the Command Center: ChatGPT app (through the launcher), ChatGPT web, or Copy only. The card always offers every way. The prompt is always copied first. |
+| Usual way to start (iOS and Android) | Copy only | Copy only, or ChatGPT web. ChatGPT documents no mobile deep link for a new prompt. |
 | ChatGPT app deep link | `codex://new?prompt={prompt}` | `{prompt}` is replaced by the encoded prompt; only `codex:` and `https:` are accepted. Save and Reset to default. |
 | Collapse repeated blocks that are done | on | A later copy of a block in the chat is a full card with "Also shown earlier in this chat"; once done, copies collapse to "✓ Already done · Show". Off: every copy is a plain full card. |
 | Done marks | – | How many cards are marked done on this host; Clear removes all marks. |
@@ -140,7 +147,6 @@ connected app shares them.
 | Setting | Default | What it does |
 | --- | --- | --- |
 | Confirm before starting | on | Asks before starting the agent; says when it will run in Auto mode. |
-| Browser | Paseo browser | Paseo browser: the tabs in your Paseo desktop app. Claude in Chrome: your real Chrome with every account you are signed in to, through the extension. Needs a Claude provider, Chrome open and the extension signed in to the agent's Claude account. It follows Permission mode, so Auto by default: a classifier approves browser actions and the extension skips its check per site. No screenshots on the card. |
 | Open the agent when started | off | Off: the agent works in the background; the card shows its status (running…, needs you, done ✓, failed) and an Open link. On: its view opens right away. |
 | Show step progress | on | The agent marks each numbered step as it starts it (`[browser-prompt step N/M] …`); the card shows "Step N of M · …" with a progress bar. |
 | Show live screenshot | on | The agent takes a viewport screenshot after each numbered step (never of pages showing secrets); the card shows them as thumbnails under the progress bar. Needs a Paseo 0.13+ app to show them. |

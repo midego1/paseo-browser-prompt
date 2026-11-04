@@ -4,7 +4,7 @@ import { Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
 import { z } from "zod";
-import { agentTitle, CHROME_RUN_MARKER, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, parseBrowserAgent, resolveAgentConfig, usesClassifierMode } from "../shared/agent-prompt";
+import { agentTitle, CHROME_RUN_MARKER, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, providerFamily, resolveAgentConfig, usesClassifierMode, type BrowserAgent } from "../shared/agent-prompt";
 import { MOST_RECENT_FALLBACK } from "../shared/report-back";
 import {
   blockFingerprint,
@@ -100,11 +100,16 @@ export function BrowserPromptCard({
     settings.status === "ready" ? settings.values.done.includes(doneMark) || settings.values.done.includes(runKey) : false;
   const done = localDone ?? persistedDone;
   const stash = useRpc(stashPrompt);
+  const mobile = Platform.OS === "ios" || Platform.OS === "android";
   const lockRun = useRpc(acquireRunLock);
   const unlockRun = useRpc(finishRunLock);
   const startMode = settings.status === "ready" ? settings.values.startMode : DEFAULT_MODES.startMode;
   const mobileStartMode =
     settings.status === "ready" ? settings.values.mobileStartMode : DEFAULT_MODES.mobileStartMode;
+  // The owner's usual way is highlighted; every way stays one press away.
+  const defaultMode = effectiveMode({ startMode, mobileStartMode });
+  const chromeAvailable =
+    providerFamily((settings.status === "ready" ? settings.values.agentProvider : "") || DEFAULT_AGENT_SETTINGS.agentProvider) === "claude";
 
   // Copies of a block in this chat share its run: the newest one started from this card's id or for
   // the same content.
@@ -174,17 +179,19 @@ export function BrowserPromptCard({
   const confirmLaunch =
     settings.status === "ready" ? settings.values.confirmAgentLaunch : DEFAULT_AGENT_SETTINGS.confirmAgentLaunch;
   /** The next run uses Claude Auto mode (classifier-reviewed, the default); the confirmation says so. */
-  const inChrome = settings.status === "ready" && settings.values.browserAgent === "chrome";
+  // The browser of the run the owner just chose; the confirmation describes it.
+  const [pendingBrowser, setPendingBrowser] = useState<BrowserAgent>("paseo");
+  const inChrome = pendingBrowser === "chrome";
   // The modal describes the next run; a started run's hint names the browser it was started in.
   const runInChrome = !!runRecord?.slice(2).includes(CHROME_RUN_MARKER);
   const launchError = useMemo(() => {
     try {
-      resolveAgentConfig(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS);
+      resolveAgentConfig({ ...(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS), browserAgent: pendingBrowser });
       return null;
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
     }
-  }, [settings]);
+  }, [settings, pendingBrowser]);
   const launchesInAutoMode = useMemo(() => {
     try {
       return usesClassifierMode(resolveAgentConfig(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS));
@@ -375,7 +382,7 @@ export function BrowserPromptCard({
     });
   }
 
-  async function launchAgent() {
+  async function launchAgent(browser: BrowserAgent) {
     setConfirmOpen(false);
     if (busy) return;
     setBusy(true);
@@ -384,7 +391,7 @@ export function BrowserPromptCard({
       const lock = await takeRunLock();
       if (!lock) return;
       lockToken = lock.token;
-      const values = settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS;
+      const values = { ...(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS), browserAgent: browser };
       const started = await startBrowserAgent(paseo, {
         sourceAgentId: agentId,
         cardId,
@@ -397,7 +404,7 @@ export function BrowserPromptCard({
       // The lock now names the run, so a copy pressed before the record arrives shows this run.
       finishLock(lockToken, started.agentId);
       lockToken = null;
-      await rememberRun(started.agentId, started.workspaceSource === "most-recent", parseBrowserAgent(values.browserAgent) === "chrome");
+      await rememberRun(started.agentId, started.workspaceSource === "most-recent", browser === "chrome");
       if (!started.modeCheck.ok) {
         // The run left its permission mode and was stopped (or could not be): keep it on the card.
         setRunError(started.modeCheck.message);
@@ -424,11 +431,12 @@ export function BrowserPromptCard({
   // A copy of a block does not start a second run while the shared one is still going.
   const runBlocked = !canStartRun({ repeat: isRepeat, runState: runAgentId ? shownState : null });
 
-  function onRunPress() {
+  function onRunPress(browser: BrowserAgent) {
     if (busy || runBlocked) return;
+    setPendingBrowser(browser);
     updates.onUse();
     if (confirmLaunch) setConfirmOpen(true);
-    else void launchAgent();
+    else void launchAgent(browser);
   }
 
   const runVisuals = shownState === "asking" ? { icon: "CircleAlert", color: theme.colors.statusWarning } : runVisual(runState, theme);
@@ -465,25 +473,63 @@ export function BrowserPromptCard({
         </Text>
       </View>
       <View style={styles.actions}>
+        {mobile ? null : (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Start ${displayTitle} in the ChatGPT app`}
+            disabled={busy}
+            onPress={() => void run(() => startInChatGpt(title, text, "app", (prompt) => stash({ prompt })))}
+            style={defaultMode === "app" ? styles.primary : styles.secondary}
+          >
+            <Icon name="Play" size={14} color={defaultMode === "app" ? theme.colors.accentForeground : theme.colors.foreground} />
+            <Text style={defaultMode === "app" ? styles.primaryText : styles.secondaryText}>ChatGPT app</Text>
+          </Pressable>
+        )}
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`Start ${displayTitle} in ChatGPT`}
+          accessibilityLabel={`Start ${displayTitle} in ChatGPT on the web`}
           disabled={busy}
-          onPress={() => void run(() => startInChatGpt(title, text, effectiveMode({ startMode, mobileStartMode }), (prompt) => stash({ prompt })))}
-          style={styles.primary}
+          onPress={() => void run(() => startInChatGpt(title, text, "web-agent", (prompt) => stash({ prompt })))}
+          style={defaultMode === "web-agent" ? styles.primary : styles.secondary}
         >
-          <Icon name="Play" size={14} color={theme.colors.accentForeground} />
-          <Text style={styles.primaryText}>Start in ChatGPT</Text>
+          <Icon name="Globe" size={14} color={defaultMode === "web-agent" ? theme.colors.accentForeground : theme.colors.foreground} />
+          <Text style={defaultMode === "web-agent" ? styles.primaryText : styles.secondaryText}>ChatGPT web</Text>
         </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Run ${displayTitle} with a Paseo agent in the Paseo browser`}
+          accessibilityHint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
+          accessibilityState={{ disabled: busy || runBlocked }}
+          disabled={busy || runBlocked}
+          onPress={() => onRunPress("paseo")}
+          style={[styles.secondary, runBlocked ? { opacity: 0.5 } : null]}
+        >
+          <Icon name="Bot" size={14} color={theme.colors.foreground} />
+          <Text style={styles.secondaryText}>Paseo browser</Text>
+        </Pressable>
+        {chromeAvailable ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Run ${displayTitle} with a Paseo agent in your Chrome`}
+            accessibilityHint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
+            accessibilityState={{ disabled: busy || runBlocked }}
+            disabled={busy || runBlocked}
+            onPress={() => onRunPress("chrome")}
+            style={[styles.secondary, runBlocked ? { opacity: 0.5 } : null]}
+          >
+            <Icon name="Compass" size={14} color={theme.colors.foreground} />
+            <Text style={styles.secondaryText}>Claude in Chrome</Text>
+          </Pressable>
+        ) : null}
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={`Copy ${displayTitle}`}
           disabled={busy}
           onPress={() => void run(() => copyPrompt(title, text))}
-          style={styles.secondary}
+          style={defaultMode === "copy-only" ? styles.primary : styles.secondary}
         >
-          <Icon name="Copy" size={14} color={theme.colors.foreground} />
-          <Text style={styles.secondaryText}>Copy</Text>
+          <Icon name="Copy" size={14} color={defaultMode === "copy-only" ? theme.colors.accentForeground : theme.colors.foreground} />
+          <Text style={defaultMode === "copy-only" ? styles.primaryText : styles.secondaryText}>Copy</Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
@@ -494,18 +540,6 @@ export function BrowserPromptCard({
         >
           <Icon name={done ? "Undo2" : "Check"} size={14} color={done ? theme.colors.statusSuccess : theme.colors.foreground} />
           <Text style={styles.doneText}>{done ? "Undo done" : "Mark done"}</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Run ${displayTitle} with a Paseo agent`}
-          accessibilityHint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
-          accessibilityState={{ disabled: busy || runBlocked }}
-          disabled={busy || runBlocked}
-          onPress={onRunPress}
-          style={[styles.secondary, runBlocked ? { opacity: 0.5 } : null]}
-        >
-          <Icon name="Bot" size={14} color={theme.colors.foreground} />
-          <Text style={styles.secondaryText}>{runAgentId ? "Run again with Paseo agent" : "Run with Paseo agent"}</Text>
         </Pressable>
       </View>
       {runAgentId ? (
@@ -520,6 +554,7 @@ export function BrowserPromptCard({
           >
             {shownState === "asking" ? "Waiting for the chat's answer" : RUN_LABELS[runState]}
           </Text>
+          <Text style={styles.hint}>{runInChrome ? "in Chrome" : "in Paseo browser"}</Text>
           <Text style={styles.hint}>·</Text>
           <Pressable
             accessibilityRole="link"
@@ -621,7 +656,7 @@ export function BrowserPromptCard({
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Start the Paseo agent"
-              onPress={() => void launchAgent()}
+              onPress={() => void launchAgent(pendingBrowser)}
               style={styles.primary}
             >
               <Icon name="Bot" size={14} color={theme.colors.accentForeground} />
