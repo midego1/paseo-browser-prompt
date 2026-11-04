@@ -369,8 +369,7 @@ export function BrowserPromptCard({
       const where = started.workspaceSource === "most-recent" ? " in your most recent workspace" : "";
       // Background by default: the card shows the run's status and its Open link.
       const open = opensAgentOnStart(values);
-      const notice = open ? `Paseo agent started${where}.` : `Paseo agent started in the background${where}. The card shows its status.`;
-      toast.show(layout.compact ? `${notice} ${DESKTOP_HINT}` : notice, { variant: "success", durationMs: 5000 });
+      toast.show(`Paseo agent started${where}.`, { variant: "success", durationMs: 3000 });
       if (open) openRunScreen(started.agentId, agentTitle(title, displayTitle), true);
     } catch (error) {
       const message = `Could not start a Paseo agent: ${error instanceof Error ? error.message : String(error)}`;
