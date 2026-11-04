@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.15.2 (unreleased)
+
+- The steps show once, on the card. The raw `browser-prompt` block no longer stays in the message
+  above it. While a block is still being written it shows as plain text, then becomes the card.
+
 ## 0.15.1 (unreleased)
 
 - Fix: 0.14.0 and 0.15.0 could not be installed. The RPC added for archived runs had a name with

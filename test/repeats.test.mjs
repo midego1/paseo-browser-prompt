@@ -88,9 +88,9 @@ test("cards are placed by message id: Paseo gives every card of a chat the same 
   assert.doesNotMatch(card.slice(card.indexOf("const first = ")), /timestamp\.getTime\(\), index \}/);
   assert.match(card, /useFirstOf\(paseo, agentId, fingerprint, messageId, index, true\)/, "always placed: the run guard needs it even with collapsing off");
   assert.match(read("index.client.tsx"), /explodeMessage\(item\.text, phase, messageId\)/);
-  const [, card1] = explodeMessage("```browser-prompt T\n1. x\n```", "complete", "msg-1");
+  const [card1] = explodeMessage("```browser-prompt T\n1. x\n```", "complete", "msg-1");
   assert.equal(card1.data.messageId, "msg-1");
-  const [, card2] = explodeMessage("```browser-prompt T\n1. x\n```", "complete");
+  const [card2] = explodeMessage("```browser-prompt T\n1. x\n```", "complete");
   assert.equal("messageId" in card2.data, false, "no id: the field is left out");
 });
 
