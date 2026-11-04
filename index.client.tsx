@@ -1,7 +1,7 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { RUN_SCREEN_ID, setOpenScreen, setOpenSettings, SETTINGS_SCREEN_ID } from "./client/agent-run";
 import { BrowserPromptCard, cardSchema, MarkdownSegment, markdownSchema } from "./client/card";
-import { effectiveMode, getLastSeenPrompt, getRememberedModes, startInChatGpt } from "./client/launch";
+import { chatGptMode, effectiveMode, getLastSeenPrompt, getRememberedModes, startInChatGpt } from "./client/launch";
 import { AgentRunScreen } from "./client/run-screen";
 import { SettingsScreen } from "./client/settings-screen";
 import { CARD_KIND, explodeMessage, MARKDOWN_KIND } from "./shared/browser-prompt";
@@ -52,7 +52,7 @@ export default function contribute(client: PluginClientContext) {
     async onSelect({ rpc }) {
       const last = getLastSeenPrompt();
       if (!last) throw new Error("No browser prompt has been shown in this app session yet.");
-      const result = await startInChatGpt(last.title, last.text, effectiveMode(getRememberedModes()), (prompt) =>
+      const result = await startInChatGpt(last.title, last.text, chatGptMode(effectiveMode(getRememberedModes())), (prompt) =>
         rpc(stashPrompt, { prompt }),
       );
       if (!result.ok) throw new Error(result.message);

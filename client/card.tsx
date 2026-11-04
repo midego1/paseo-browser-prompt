@@ -519,10 +519,10 @@ export function BrowserPromptCard({
           accessibilityState={{ disabled: busy || runBlocked }}
           disabled={busy || runBlocked}
           onPress={() => onRunPress("paseo")}
-          style={[styles.secondary, runBlocked ? { opacity: 0.5 } : null]}
+          style={[defaultMode === "paseo" ? styles.primary : styles.secondary, runBlocked ? { opacity: 0.5 } : null]}
         >
-          <Icon name="Bot" size={14} color={theme.colors.foreground} />
-          <Text style={styles.secondaryText}>{runAgentId ? "Again: Paseo browser" : "Paseo browser"}</Text>
+          <Icon name="Bot" size={14} color={defaultMode === "paseo" ? theme.colors.accentForeground : theme.colors.foreground} />
+          <Text style={defaultMode === "paseo" ? styles.primaryText : styles.secondaryText}>{runAgentId ? "Again: Paseo browser" : "Paseo browser"}</Text>
         </Pressable>
         {showChrome ? (
           <Pressable
@@ -532,10 +532,10 @@ export function BrowserPromptCard({
             accessibilityState={{ disabled: busy || runBlocked }}
             disabled={busy || runBlocked}
             onPress={() => onRunPress("chrome")}
-            style={[styles.secondary, runBlocked ? { opacity: 0.5 } : null]}
+            style={[defaultMode === "chrome" ? styles.primary : styles.secondary, runBlocked ? { opacity: 0.5 } : null]}
           >
-            <Icon name="Compass" size={14} color={theme.colors.foreground} />
-            <Text style={styles.secondaryText}>{runAgentId ? "Again: Claude in Chrome" : "Claude in Chrome"}</Text>
+            <Icon name="Compass" size={14} color={defaultMode === "chrome" ? theme.colors.accentForeground : theme.colors.foreground} />
+            <Text style={defaultMode === "chrome" ? styles.primaryText : styles.secondaryText}>{runAgentId ? "Again: Claude in Chrome" : "Claude in Chrome"}</Text>
           </Pressable>
         ) : null}
         <Pressable

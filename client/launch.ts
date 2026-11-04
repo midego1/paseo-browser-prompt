@@ -6,19 +6,28 @@ import { LAUNCHER_UNAVAILABLE_MESSAGES } from "../shared/trampoline-host";
 
 export type StartMode = "app" | "web-agent" | "copy-only";
 
+/** The way highlighted on the card: a way to open ChatGPT, or a Paseo agent in either browser. */
+export type UsualWay = StartMode | "paseo" | "chrome";
+
 export interface ModeSettings {
-  startMode: StartMode;
-  mobileStartMode: "copy-only" | "web-agent";
+  startMode: UsualWay;
+  mobileStartMode: Exclude<UsualWay, "app">;
 }
 
 export const DEFAULT_MODES: ModeSettings = { startMode: "app", mobileStartMode: "copy-only" };
 
 /** Desktop/web use `startMode`; iOS and Android use `mobileStartMode` (no mobile app deep link). */
-export function effectiveMode(settings: ModeSettings): StartMode {
+export function effectiveMode(settings: ModeSettings): UsualWay {
   return Platform.OS === "ios" || Platform.OS === "android" ? settings.mobileStartMode : settings.startMode;
 }
 
 /** Server RPC that stashes the prompt and returns the one-time launcher URL, or why it is off. */
+/** How the Command Center opens ChatGPT when the usual way is a Paseo agent, which it cannot start. */
+export function chatGptMode(way: UsualWay): StartMode {
+  if (way !== "paseo" && way !== "chrome") return way;
+  return Platform.OS === "ios" || Platform.OS === "android" ? "copy-only" : "app";
+}
+
 export type StashFn = (
   prompt: string,
 ) => Promise<{ url: string } | { unavailable: keyof typeof LAUNCHER_UNAVAILABLE_MESSAGES }>;
