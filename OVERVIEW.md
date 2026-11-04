@@ -4,7 +4,7 @@ Browser prompt turns step-by-step browser instructions written by an agent into 
 
 When an assistant message contains a fenced code block whose info string is `browser-prompt` (optionally followed by a title), the block is replaced by a card, and the rest of the message is shown as before. The card shows the title and the steps, with a button for every way to run them: **ChatGPT app**, **ChatGPT web**, **Paseo browser**, **Claude in Chrome**, **Copy** and **Mark done**. In short:
 
-- **ChatGPT app** and **ChatGPT web** copy the steps to the clipboard with a short header asking ChatGPT to carry them out with computer use, and to stop and ask before entering secrets or confirming destructive actions. They then open the ChatGPT desktop app or chatgpt.com.
+- **ChatGPT app** and **ChatGPT web** copy the steps to the clipboard with a short header asking ChatGPT to carry them out in Chrome through its extension (`@Chrome`), and to stop and ask before entering secrets or confirming destructive actions. They then open the ChatGPT desktop app or chatgpt.com.
 - **Copy** copies the same text without opening anything.
 - **Mark done** marks the card as finished (**Undo done** reverts it). Done marks are stored on the Paseo host, so every connected app sees them.
 - **Paseo browser** starts a new Paseo agent that carries out the steps in the browser tabs of your Paseo desktop app. **Claude in Chrome** does the same in your real Chrome.
@@ -88,6 +88,6 @@ The Command Center has **Open last browser prompt in ChatGPT**.
 ## Limits
 
 - The prompt is always copied first, so you can paste it if ChatGPT or the launcher page cannot be opened.
-- ChatGPT computer use requires the ChatGPT desktop app on macOS or Windows with computer use enabled. ChatGPT documents no mobile deep link for a new prompt.
+- ChatGPT in Chrome needs the ChatGPT desktop app on macOS or Windows and the ChatGPT extension in Chrome, set up under Settings > Computer Use. The app opens with the prompt filled in; you press send, because its links never send by themselves and the extension cannot be started from outside. ChatGPT documents no mobile deep link for a new prompt.
 - The ChatGPT web URL parameters are not officially documented and may change.
 - Run with Paseo agent needs the Paseo desktop app open; on Paseo 0.11 and 0.12 the card's message text uses a compact built-in Markdown renderer.

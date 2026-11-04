@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.1 (unreleased)
+
+- The prompt for ChatGPT now starts with `@Chrome` and asks for the ChatGPT extension in Chrome, not
+  computer use. You still press send: ChatGPT's links fill in a prompt and never send it, and the
+  extension cannot be started from outside.
+
 ## 0.16.0 (unreleased)
 
 - The card offers every way to run a prompt, so you choose per prompt: **ChatGPT app**, **ChatGPT
