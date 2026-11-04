@@ -1,17 +1,17 @@
 import { openExternalUrl } from "@getpaseo/plugin/client";
 import { copyText } from "@getpaseo/plugin/client/react-native";
 import { Platform } from "react-native";
-import { composePrompt, planChatGptLaunch } from "../shared/browser-prompt";
+import { CHATGPT_EXTENSION_HEADER, composePrompt, planChatGptLaunch } from "../shared/browser-prompt";
 import { LAUNCHER_UNAVAILABLE_MESSAGES } from "../shared/trampoline-host";
 
-export type StartMode = "app" | "web-agent" | "copy-only";
+export type StartMode = "app" | "web-agent" | "extension" | "copy-only";
 
 /** The way highlighted on the card: a way to open ChatGPT, or a Paseo agent in either browser. */
 export type UsualWay = StartMode | "paseo" | "chrome";
 
 export interface ModeSettings {
   startMode: UsualWay;
-  mobileStartMode: Exclude<UsualWay, "app">;
+  mobileStartMode: Exclude<UsualWay, "app" | "extension">;
 }
 
 export const DEFAULT_MODES: ModeSettings = { startMode: "app", mobileStartMode: "copy-only" };
@@ -38,6 +38,8 @@ export interface ActionResult {
 }
 
 const PASTE_HINT = "Prompt copied. Paste it into a ChatGPT Work chat.";
+const EXTENSION_HINT =
+  "Prompt copied. In Chrome, open the ChatGPT side panel (its toolbar icon, or ⌘⇧. on a Mac), paste and send.";
 
 /** Copies the prompt with the computer-use header, then opens ChatGPT according to the mode. */
 export async function startInChatGpt(
@@ -46,7 +48,7 @@ export async function startInChatGpt(
   mode: StartMode,
   stash: StashFn,
 ): Promise<ActionResult> {
-  const prompt = composePrompt(title, body);
+  const prompt = composePrompt(title, body, mode === "extension" ? CHATGPT_EXTENSION_HEADER : undefined);
   let copied = true;
   try {
     await copyText(prompt);
@@ -54,6 +56,11 @@ export async function startInChatGpt(
     copied = false;
   }
   const copyFailed = "Could not copy. Select the prompt text and copy it manually.";
+
+  // Nothing outside the extension can open its side panel or hand it a prompt, so the owner pastes.
+  if (mode === "extension") {
+    return copied ? { ok: true, message: EXTENSION_HINT } : { ok: false, message: copyFailed };
+  }
 
   if (mode === "copy-only") {
     return copied ? { ok: true, message: PASTE_HINT } : { ok: false, message: copyFailed };

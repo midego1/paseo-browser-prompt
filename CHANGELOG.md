@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.0 (unreleased)
+
+- New button, **ChatGPT extension**: copies the steps with a header for the ChatGPT Chrome extension
+  and says to open its side panel, paste and send. Nothing outside the extension can open its panel or
+  hand it a prompt. Desktop only; also a choice for **Usual way to start**.
+
 ## 0.17.3 (unreleased)
 
 - Claude in Chrome uses the provider `claude-chrome` by itself when the daemon has it and **Claude in
