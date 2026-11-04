@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.19.0 (unreleased)
+
+- The card's buttons are grouped: ChatGPT (its mark, then **Desktop**, **Web** and **Extension**) and
+  the Paseo agent (the Claude mark when it runs Claude, then **Paseo browser** and **Chrome**), with
+  icon buttons for copy and done. The groups sit side by side when there is room and wrap otherwise.
+  The marks are the Paseo app's own provider icons.
+
 ## 0.18.1 (unreleased)
 
 - Docs only. README, OVERVIEW and SECURITY describe the current card: a button per way to run, the

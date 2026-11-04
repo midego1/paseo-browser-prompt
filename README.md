@@ -1,17 +1,18 @@
 # Browser prompt for Paseo
 
 A [Paseo](https://paseo.sh) plugin that turns every `browser-prompt` block in an assistant message
-into a card with a button for each way to run the steps:
+into a card with a button for each way to run the steps, in two groups: ChatGPT (with its mark) and the
+Paseo agent (with the Claude mark when it runs Claude):
 
 | Button | What it does |
 | --- | --- |
-| **ChatGPT app** | Opens the ChatGPT desktop app with the steps in a new chat, starting with `@Chrome` so ChatGPT works in Chrome through its extension. You press send. Desktop only. |
-| **ChatGPT web** | Opens chatgpt.com in agent mode, with the steps in the URL when they are short and look secret-free. |
-| **ChatGPT extension** | Copies the steps for the ChatGPT Chrome extension and says to open its side panel and paste. Nothing outside the extension can open it or hand it a prompt. Desktop only. |
-| **Paseo browser** | Starts a Paseo agent that works in the browser tabs of your Paseo desktop app, with step progress and a screenshot per step on the card. |
-| **Claude in Chrome** | Starts a Paseo agent that works in your real Chrome through the Claude in Chrome extension, with every account you are signed in to. No screenshots on the card. |
-| **Copy** | Copies the steps. |
-| **Mark done** | Marks the card done on this host. |
+| ChatGPT › **Desktop** | Opens the ChatGPT desktop app with the steps in a new chat, starting with `@Chrome` so ChatGPT works in Chrome through its extension. You press send. Desktop only. |
+| ChatGPT › **Web** | Opens chatgpt.com in agent mode, with the steps in the URL when they are short and look secret-free. |
+| ChatGPT › **Extension** | Copies the steps for the ChatGPT Chrome extension and says to open its side panel and paste. Nothing outside the extension can open it or hand it a prompt. Desktop only. |
+| Agent › **Paseo browser** | Starts a Paseo agent that works in the browser tabs of your Paseo desktop app, with step progress and a screenshot per step on the card. |
+| Agent › **Chrome** (Claude in Chrome) | Starts a Paseo agent that works in your real Chrome through the Claude in Chrome extension, with every account you are signed in to. No screenshots on the card. |
+| Copy icon | Copies the steps. |
+| Check icon | Marks the card done on this host; press again to undo. |
 
 Your **Usual way to start** is highlighted. With a run on the card the agent buttons say "Again: …",
 and the status line names the browser the run uses. The gear in the card's header opens these

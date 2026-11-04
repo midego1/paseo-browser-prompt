@@ -4,7 +4,7 @@ import { Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
 import { z } from "zod";
-import { agentTitle, CHROME_RUN_MARKER, chromeAvailable, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, resolveAgentConfig, runStartedInChrome, usesClassifierMode, type BrowserAgent } from "../shared/agent-prompt";
+import { agentTitle, CHROME_RUN_MARKER, chromeAvailable, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, providerFamily, resolveAgentConfig, runStartedInChrome, usesClassifierMode, type BrowserAgent } from "../shared/agent-prompt";
 import { MOST_RECENT_FALLBACK } from "../shared/report-back";
 import {
   blockFingerprint,
@@ -19,6 +19,7 @@ import { endedRun } from "../shared/run-lock";
 import { acquireRunLock, finishRunLock } from "../shared/run-lock-rpc";
 import { MAX_DONE, MAX_RUNS, preferences } from "../shared/settings";
 import { stashPrompt } from "../shared/trampoline";
+import { CLAUDE_ICON, OPENAI_ICON } from "../shared/brand-icons";
 import { archivedAfterSuccess } from "../shared/archive-rpc";
 import {
   copyPrompt,
@@ -108,6 +109,15 @@ export function BrowserPromptCard({
     settings.status === "ready" ? settings.values.mobileStartMode : DEFAULT_MODES.mobileStartMode;
   // The owner's usual way is highlighted; every way stays one press away.
   const defaultMode = effectiveMode({ startMode, mobileStartMode });
+  // The mark follows the provider the Paseo browser run would really use (a `provider/model` model wins).
+  const agentIsClaude = useMemo(() => {
+    try {
+      const provider = resolveAgentConfig(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS).provider;
+      return providerFamily(provider.slice(0, provider.indexOf("/"))) === "claude";
+    } catch {
+      return false;
+    }
+  }, [settings]);
   const showChrome = chromeAvailable(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS);
 
   // Copies of a block in this chat share its run: the newest one started from this card's id or for
@@ -254,7 +264,11 @@ export function BrowserPromptCard({
         padding: layout.compact ? 8 : 10,
       },
       prompt: { color: theme.colors.foreground, fontFamily: MONO, fontSize: 13, lineHeight: 19 },
-      actions: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 8 },
+      actions: { flexDirection: "row" as const, flexWrap: "wrap" as const, alignItems: "center" as const, columnGap: 16, rowGap: 8 },
+      // One group per service: its mark, then a button per way. Groups wrap as a whole.
+      group: { flexDirection: "row" as const, flexWrap: "wrap" as const, alignItems: "center" as const, gap: 6 },
+      groupMark: { width: 20, alignItems: "center" as const },
+      iconButton: { paddingHorizontal: 8 },
       primary: {
         flexDirection: "row" as const,
         alignItems: "center" as const,
@@ -277,7 +291,6 @@ export function BrowserPromptCard({
         backgroundColor: theme.colors.surface2,
       },
       secondaryText: { color: theme.colors.foreground, fontSize: 13 },
-      doneText: { color: done ? theme.colors.statusSuccess : theme.colors.foreground, fontSize: 13 },
       runRow: { flexDirection: "row" as const, flexWrap: "wrap" as const, alignItems: "center" as const, gap: 6 },
       runText: { color: theme.colors.foreground, fontSize: 13 },
       link: { color: theme.colors.accent ?? theme.colors.foreground, fontSize: 13, fontWeight: "600" as const },
@@ -490,92 +503,96 @@ export function BrowserPromptCard({
         </Text>
       </View>
       <View style={styles.actions}>
-        {mobile ? null : (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Start ${displayTitle} in the ChatGPT app`}
+        <View style={styles.group} accessibilityRole="toolbar" accessibilityLabel="ChatGPT">
+          <View style={styles.groupMark} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+            <Icon icon={OPENAI_ICON} size={16} color={theme.colors.foreground} />
+          </View>
+          {mobile ? null : (
+            <WayButton
+              label="Desktop"
+              a11y={`Start ${displayTitle} in the ChatGPT desktop app`}
+              highlighted={defaultMode === "app"}
+              disabled={busy}
+              styles={styles}
+              onPress={() => void run(() => startInChatGpt(title, text, "app", (prompt) => stash({ prompt })))}
+            />
+          )}
+          <WayButton
+            label="Web"
+            a11y={`Start ${displayTitle} in ChatGPT on the web`}
+            highlighted={defaultMode === "web-agent"}
             disabled={busy}
-            onPress={() => void run(() => startInChatGpt(title, text, "app", (prompt) => stash({ prompt })))}
-            style={defaultMode === "app" ? styles.primary : styles.secondary}
-          >
-            <Icon name="Play" size={14} color={defaultMode === "app" ? theme.colors.accentForeground : theme.colors.foreground} />
-            <Text style={defaultMode === "app" ? styles.primaryText : styles.secondaryText}>ChatGPT app</Text>
-          </Pressable>
-        )}
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Start ${displayTitle} in ChatGPT on the web`}
-          disabled={busy}
-          onPress={() => void run(() => startInChatGpt(title, text, "web-agent", (prompt) => stash({ prompt })))}
-          style={defaultMode === "web-agent" ? styles.primary : styles.secondary}
-        >
-          <Icon name="Globe" size={14} color={defaultMode === "web-agent" ? theme.colors.accentForeground : theme.colors.foreground} />
-          <Text style={defaultMode === "web-agent" ? styles.primaryText : styles.secondaryText}>ChatGPT web</Text>
-        </Pressable>
-        {mobile ? null : (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Copy ${displayTitle} for the ChatGPT extension in Chrome`}
-            disabled={busy}
-            onPress={() => void run(() => startInChatGpt(title, text, "extension", (prompt) => stash({ prompt })))}
-            style={defaultMode === "extension" ? styles.primary : styles.secondary}
-          >
-            <Icon name="Puzzle" size={14} color={defaultMode === "extension" ? theme.colors.accentForeground : theme.colors.foreground} />
-            <Text style={defaultMode === "extension" ? styles.primaryText : styles.secondaryText}>ChatGPT extension</Text>
-          </Pressable>
-        )}
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Run ${displayTitle} with a Paseo agent in the Paseo browser`}
-          accessibilityHint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
-          accessibilityState={{ disabled: busy || runBlocked }}
-          disabled={busy || runBlocked}
-          onPress={() => onRunPress("paseo")}
-          style={[defaultMode === "paseo" ? styles.primary : styles.secondary, runBlocked ? { opacity: 0.5 } : null]}
-        >
-          <Icon name="Bot" size={14} color={defaultMode === "paseo" ? theme.colors.accentForeground : theme.colors.foreground} />
-          <Text style={defaultMode === "paseo" ? styles.primaryText : styles.secondaryText}>{runAgentId ? "Again: Paseo browser" : "Paseo browser"}</Text>
-        </Pressable>
-        {showChrome ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Run ${displayTitle} with a Paseo agent in your Chrome`}
-            accessibilityHint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
-            accessibilityState={{ disabled: busy || runBlocked }}
+            styles={styles}
+            onPress={() => void run(() => startInChatGpt(title, text, "web-agent", (prompt) => stash({ prompt })))}
+          />
+          {mobile ? null : (
+            <WayButton
+              label="Extension"
+              a11y={`Copy ${displayTitle} for the ChatGPT extension in Chrome`}
+              highlighted={defaultMode === "extension"}
+              disabled={busy}
+              styles={styles}
+              onPress={() => void run(() => startInChatGpt(title, text, "extension", (prompt) => stash({ prompt })))}
+            />
+          )}
+        </View>
+        <View style={styles.group} accessibilityRole="toolbar" accessibilityLabel="Paseo agent">
+          <View style={styles.groupMark} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+            {agentIsClaude ? (
+              <Icon icon={CLAUDE_ICON} size={16} color={theme.colors.foreground} />
+            ) : (
+              <Icon name="Bot" size={16} color={theme.colors.foreground} />
+            )}
+          </View>
+          <WayButton
+            label={runAgentId ? "Again: Paseo browser" : "Paseo browser"}
+            a11y={`Run ${displayTitle} with a Paseo agent in the Paseo browser`}
+            hint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
+            highlighted={defaultMode === "paseo"}
             disabled={busy || runBlocked}
-            onPress={() => onRunPress("chrome")}
-            style={[defaultMode === "chrome" ? styles.primary : styles.secondary, runBlocked ? { opacity: 0.5 } : null]}
+            styles={styles}
+            onPress={() => onRunPress("paseo")}
+          />
+          {showChrome ? (
+            <WayButton
+              label={runAgentId ? "Again: Chrome" : "Chrome"}
+              a11y={`Run ${displayTitle} with a Paseo agent in your Chrome, through Claude in Chrome`}
+              hint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
+              highlighted={defaultMode === "chrome"}
+              disabled={busy || runBlocked}
+              styles={styles}
+              onPress={() => onRunPress("chrome")}
+            />
+          ) : null}
+        </View>
+        <View style={styles.group}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Copy ${displayTitle}`}
+            disabled={busy}
+            hitSlop={4}
+            onPress={() =>
+              void run(() =>
+                defaultMode === "copy-only"
+                  ? startInChatGpt(title, text, "copy-only", (prompt) => stash({ prompt }))
+                  : copyPrompt(title, text),
+              )
+            }
+            style={[defaultMode === "copy-only" ? styles.primary : styles.secondary, styles.iconButton]}
           >
-            <Icon name="Compass" size={14} color={defaultMode === "chrome" ? theme.colors.accentForeground : theme.colors.foreground} />
-            <Text style={defaultMode === "chrome" ? styles.primaryText : styles.secondaryText}>{runAgentId ? "Again: Claude in Chrome" : "Claude in Chrome"}</Text>
+            <Icon name="Copy" size={14} color={defaultMode === "copy-only" ? theme.colors.accentForeground : theme.colors.foreground} />
           </Pressable>
-        ) : null}
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Copy ${displayTitle}`}
-          disabled={busy}
-          onPress={() =>
-            void run(() =>
-              defaultMode === "copy-only"
-                ? startInChatGpt(title, text, "copy-only", (prompt) => stash({ prompt }))
-                : copyPrompt(title, text),
-            )
-          }
-          style={defaultMode === "copy-only" ? styles.primary : styles.secondary}
-        >
-          <Icon name="Copy" size={14} color={defaultMode === "copy-only" ? theme.colors.accentForeground : theme.colors.foreground} />
-          <Text style={defaultMode === "copy-only" ? styles.primaryText : styles.secondaryText}>Copy</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={done ? `Mark ${displayTitle} not done` : `Mark ${displayTitle} done`}
-          accessibilityState={{ checked: done }}
-          onPress={() => void toggleDone()}
-          style={styles.secondary}
-        >
-          <Icon name={done ? "Undo2" : "Check"} size={14} color={done ? theme.colors.statusSuccess : theme.colors.foreground} />
-          <Text style={styles.doneText}>{done ? "Undo done" : "Mark done"}</Text>
-        </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={done ? `Mark ${displayTitle} not done` : `Mark ${displayTitle} done`}
+            accessibilityState={{ checked: done }}
+            hitSlop={4}
+            onPress={() => void toggleDone()}
+            style={[styles.secondary, styles.iconButton]}
+          >
+            <Icon name={done ? "Undo2" : "Check"} size={14} color={done ? theme.colors.statusSuccess : theme.colors.foreground} />
+          </Pressable>
+        </View>
       </View>
       {runAgentId ? (
         <View style={styles.runRow}>
@@ -702,6 +719,39 @@ export function BrowserPromptCard({
         </Modal.Content>
       </Modal>
     </View>
+  );
+}
+
+/** One way to run the steps: highlighted when it is the owner's usual way. */
+function WayButton({
+  label,
+  a11y,
+  hint,
+  highlighted,
+  disabled,
+  styles,
+  onPress,
+}: {
+  label: string;
+  a11y: string;
+  hint?: string;
+  highlighted: boolean;
+  disabled: boolean;
+  styles: { primary: object; secondary: object; primaryText: object; secondaryText: object };
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={a11y}
+      accessibilityHint={hint}
+      accessibilityState={{ disabled }}
+      disabled={disabled}
+      onPress={onPress}
+      style={[highlighted ? styles.primary : styles.secondary, disabled ? { opacity: 0.5 } : null]}
+    >
+      <Text style={highlighted ? styles.primaryText : styles.secondaryText}>{label}</Text>
+    </Pressable>
   );
 }
 
