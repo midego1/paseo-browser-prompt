@@ -130,6 +130,20 @@ test("Claude in Chrome shows only when the launch would work", () => {
   assert.throws(() => resolveAgentConfig({ ...DEFAULT_AGENT_SETTINGS, browserAgent: "chrome", agentModel: "omp/x" }), /use the Paseo browser/);
 });
 
+test("Chrome runs can use their own provider, and only Chrome runs", () => {
+  const settings = { ...DEFAULT_AGENT_SETTINGS, chromeProvider: " claude-chrome " };
+  assert.equal(resolveAgentConfig({ ...settings, browserAgent: "chrome" }).provider, "claude-chrome/claude-sonnet-5-5");
+  assert.equal(resolveAgentConfig({ ...settings, browserAgent: "chrome", agentModel: "claude/claude-opus-5-5" }).provider, "claude-chrome/claude-opus-5-5");
+  assert.equal(resolveAgentConfig({ ...settings, browserAgent: "chrome" }).modeId, "auto");
+  assert.equal(resolveAgentConfig(settings).provider, "claude/claude-sonnet-5-5", "the Paseo browser keeps the Provider setting");
+  assert.equal(resolveAgentConfig({ ...DEFAULT_AGENT_SETTINGS, browserAgent: "chrome" }).provider, "claude/claude-sonnet-5-5", "empty keeps it too");
+  assert.equal(chromeAvailable({ ...settings, chromeProvider: "omp" }), false);
+  // A Chrome provider makes the button work even when the Paseo browser uses another provider family.
+  assert.equal(chromeAvailable({ ...settings, agentProvider: "omp", agentModel: "m" }), true);
+  assert.equal("chromeProvider" in migratePreferences({ chromeProvider: 5 }, 16), false);
+  assert.equal(migratePreferences({ chromeProvider: "claude-chrome" }, 16).chromeProvider, "claude-chrome");
+});
+
 test("a run's own record names its browser, not a newer run's", () => {
   const runs = [
     ["a:card1", "run-paseo", "key:k"],

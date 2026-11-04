@@ -29,6 +29,8 @@ export const DEFAULT_AGENT_SETTINGS = {
   closeTabsOnSuccess: true,
   /** After a fully successful run, the plugin archives the agent once its report went out. */
   archiveAgentOnSuccess: false,
+  /** Provider for Claude in Chrome runs; empty = the Provider setting. */
+  chromeProvider: "",
 } as const;
 
 export const BROWSER_AGENTS = ["paseo", "chrome"] as const;
@@ -362,6 +364,7 @@ export interface AgentSettingsInput {
   closeTabsOnSuccess?: boolean;
   archiveAgentOnSuccess?: boolean;
   browserAgent?: string;
+  chromeProvider?: string;
   agentThinking?: string;
   agentMode?: string;
 }
@@ -385,11 +388,17 @@ export function resolveAgentConfig(settings: AgentSettingsInput): ResolvedAgentC
   const provider = pick(settings.agentProvider, DEFAULT_AGENT_SETTINGS.agentProvider);
   const model = pick(settings.agentModel, DEFAULT_AGENT_SETTINGS.agentModel);
   const thinking = (settings.agentThinking ?? DEFAULT_AGENT_SETTINGS.agentThinking).trim();
-  const providerModel = model.includes("/") ? model : `${provider}/${model}`;
+  const chrome = parseBrowserAgent(settings.browserAgent) === "chrome";
+  // The extension must use the agent's Claude account, so Chrome runs can have their own provider.
+  const chromeProvider = chrome ? (settings.chromeProvider ?? "").trim() : "";
+  const providerModel = chromeProvider
+    ? `${chromeProvider}/${model.slice(model.indexOf("/") + 1)}`
+    : model.includes("/")
+      ? model
+      : `${provider}/${model}`;
   const providerId = providerModel.slice(0, providerModel.indexOf("/"));
   const allowed = askFirstModes(providerId);
   if (!allowed) throw new Error(agentModeError(providerId, "")!);
-  const chrome = parseBrowserAgent(settings.browserAgent) === "chrome";
   if (chrome && providerFamily(providerId) !== "claude") {
     throw new Error(`Claude in Chrome needs a Claude provider, not "${providerId}". Change the provider or use the Paseo browser.`);
   }
