@@ -104,6 +104,7 @@ export async function startBrowserAgent(
     input.settings.showStepProgress === false ? undefined : { totalSteps: countSteps(input.steps) },
     input.settings.showLiveScreenshot !== false,
     input.settings.closeTabsOnSuccess !== false,
+    input.settings.archiveAgentOnSuccess === true,
     ),
     labels: runLabels(input.sourceAgentId, input.cardId),
   });

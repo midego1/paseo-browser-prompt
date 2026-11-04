@@ -16,7 +16,7 @@ export const MAX_RUNS = 200;
 export const preferences = defineSettings({
   id: "preferences",
   scope: "host",
-  version: 13,
+  version: 14,
   schema: z.object({
     /**
      * Desktop and web clients.
@@ -59,6 +59,8 @@ export const preferences = defineSettings({
     thumbnailMode: z.enum(THUMBNAIL_MODES).default(DEFAULT_AGENT_SETTINGS.thumbnailMode),
     /** After a fully successful run, the agent closes the tabs it opened itself (default on). */
     closeTabsOnSuccess: z.boolean().default(DEFAULT_AGENT_SETTINGS.closeTabsOnSuccess),
+    /** After a fully successful run, archive the agent once its report went out (default off). */
+    archiveAgentOnSuccess: z.boolean().default(DEFAULT_AGENT_SETTINGS.archiveAgentOnSuccess),
     /** Questions a run may send to the chat (0 to 50; 0 behaves like Talk to the chat off). */
     maxChatQuestions: z
       .number()

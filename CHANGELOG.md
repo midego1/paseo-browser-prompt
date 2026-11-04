@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.14.0 (unreleased)
+
+- New setting, **Archive the agent after a successful run** (off by default). A run started with it
+  on ends a fully successful report with a fixed last line. The plugin then archives the agent, once
+  the chat got the report or notice, or right away when Report back is off. A run that fails, stops,
+  asks a question or leaves something for you stays open, and so does one whose report could not be
+  sent or that got a follow-up turn.
+- The line is left out of the report to the chat. The card keeps showing an archived run as done (the
+  daemon keeps the ids in `archived-runs.json`); its screenshots, time and tokens show until the card
+  reloads, because reading an archived agent would load it again.
+
 ## 0.13.2 (unreleased)
 
 - The toast after starting a run is shorter and goes away sooner: "Paseo agent started." for 3
