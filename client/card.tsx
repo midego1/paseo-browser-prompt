@@ -4,7 +4,7 @@ import { Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
 import { z } from "zod";
-import { agentTitle, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, resolveAgentConfig, usesClassifierMode } from "../shared/agent-prompt";
+import { agentTitle, CHROME_RUN_MARKER, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, parseBrowserAgent, resolveAgentConfig, usesClassifierMode } from "../shared/agent-prompt";
 import { MOST_RECENT_FALLBACK } from "../shared/report-back";
 import {
   blockFingerprint,
@@ -175,7 +175,16 @@ export function BrowserPromptCard({
     settings.status === "ready" ? settings.values.confirmAgentLaunch : DEFAULT_AGENT_SETTINGS.confirmAgentLaunch;
   /** The next run uses Claude Auto mode (classifier-reviewed, the default); the confirmation says so. */
   const inChrome = settings.status === "ready" && settings.values.browserAgent === "chrome";
-  const browserHint = inChrome ? CHROME_HINT : DESKTOP_HINT;
+  // The modal describes the next run; a started run's hint names the browser it was started in.
+  const runInChrome = !!runRecord?.slice(2).includes(CHROME_RUN_MARKER);
+  const launchError = useMemo(() => {
+    try {
+      resolveAgentConfig(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }, [settings]);
   const launchesInAutoMode = useMemo(() => {
     try {
       return usesClassifierMode(resolveAgentConfig(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS));
@@ -301,7 +310,7 @@ export function BrowserPromptCard({
    * Records the run in host settings. The server reports a run back only when it finds this entry,
    * so a save that loses a revision race is retried against the newest settings.
    */
-  async function rememberRun(startedAgentId: string, fallback: boolean) {
+  async function rememberRun(startedAgentId: string, fallback: boolean, chrome: boolean) {
     setLocalRun(startedAgentId);
     // Position 2 stays the fallback marker the server reads; the content marker comes after it.
     const entry: [string, string, ...string[]] = [
@@ -309,6 +318,7 @@ export function BrowserPromptCard({
       startedAgentId,
       ...(fallback ? [MOST_RECENT_FALLBACK] : []),
       runKeyMarker(key),
+      ...(chrome ? [CHROME_RUN_MARKER] : []),
     ];
     for (let attempt = 0; attempt < 4; attempt++) {
       const current = latestSettings.current;
@@ -387,7 +397,7 @@ export function BrowserPromptCard({
       // The lock now names the run, so a copy pressed before the record arrives shows this run.
       finishLock(lockToken, started.agentId);
       lockToken = null;
-      await rememberRun(started.agentId, started.workspaceSource === "most-recent");
+      await rememberRun(started.agentId, started.workspaceSource === "most-recent", parseBrowserAgent(values.browserAgent) === "chrome");
       if (!started.modeCheck.ok) {
         // The run left its permission mode and was stopped (or could not be): keep it on the card.
         setRunError(started.modeCheck.message);
@@ -574,7 +584,7 @@ export function BrowserPromptCard({
           <Text style={[styles.hint, { color: theme.colors.statusDanger, flexShrink: 1 }]}>{runError}</Text>
         </View>
       ) : null}
-      {runAgentId && layout.compact ? <Text style={styles.hint}>{browserHint}</Text> : null}
+      {runAgentId && layout.compact ? <Text style={styles.hint}>{runInChrome ? CHROME_HINT : DESKTOP_HINT}</Text> : null}
       <Modal
         title="Run with Paseo agent"
         icon={<Icon name="Bot" size={18} color={theme.colors.foreground} />}
@@ -583,14 +593,16 @@ export function BrowserPromptCard({
       >
         <Modal.Content>
           <Text style={styles.modalText}>Start a Paseo agent to do these steps in your browser?</Text>
-          {inChrome ? (
+          {launchError ? (
+            <Text style={[styles.hint, { color: theme.colors.statusDanger }]}>{launchError}</Text>
+          ) : inChrome ? (
             <Text style={styles.hint}>
               {launchesInAutoMode
                 ? "It works in your real Chrome, with every account you are signed in to. It runs in Claude Auto mode: a model classifier approves its browser actions, and the extension does not ask per site. It is told to stay on the sites in these steps and to ask you, as a question, before secrets or anything destructive."
-                : "It works in your real Chrome, with every account you are signed in to. It asks before every new tool, stays on the sites in these steps, and stops to ask you before secrets or anything destructive."}
+                : "It works in your real Chrome, with every account you are signed in to. It asks before every new tool, is told to stay on the sites in these steps, and stops to ask you before secrets or anything destructive."}
             </Text>
           ) : null}
-          {inChrome ? null : launchesInAutoMode ? (
+          {launchError || inChrome ? null : launchesInAutoMode ? (
             <Text style={styles.hint}>
               It runs in Claude Auto mode: a model classifier reviews its tool calls. It uses only the Paseo browser
               tabs and is told to ask you, as a question, before secrets or anything destructive.
@@ -601,7 +613,7 @@ export function BrowserPromptCard({
               anything destructive.
             </Text>
           )}
-          {layout.compact ? <Text style={styles.hint}>{browserHint}</Text> : null}
+          {layout.compact ? <Text style={styles.hint}>{inChrome ? CHROME_HINT : DESKTOP_HINT}</Text> : null}
           <View style={styles.modalActions}>
             <Pressable accessibilityRole="button" onPress={() => setConfirmOpen(false)} style={styles.secondary}>
               <Text style={styles.secondaryText}>Cancel</Text>

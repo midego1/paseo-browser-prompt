@@ -18,6 +18,7 @@ import {
   MAX_CHAT_QUESTIONS_LIMIT,
   parseBrowserAgent,
   parseMaxChatQuestions,
+  providerFamily,
 } from "../shared/agent-prompt";
 import { DEFAULT_APP_LINK_TEMPLATE, validateAppLinkTemplate } from "../shared/browser-prompt";
 import { parseReportMode, type ReportMode } from "../shared/report-back";
@@ -92,6 +93,8 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
     agent.agentProvider || DEFAULT_AGENT_SETTINGS.agentProvider,
     agent.agentMode || DEFAULT_AGENT_SETTINGS.agentMode,
   );
+  const chromeNeedsClaude =
+    values.browserAgent === "chrome" && providerFamily(agent.agentProvider || DEFAULT_AGENT_SETTINGS.agentProvider) !== "claude";
   const maxQuestionsText = maxQuestionsDraft ?? String(values.maxChatQuestions);
   const maxQuestionsParsed = parseMaxChatQuestions(maxQuestionsText);
   const maxQuestionsError = "error" in maxQuestionsParsed ? maxQuestionsParsed.error : null;
@@ -278,6 +281,11 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
             placeholder={DEFAULT_AGENT_SETTINGS.agentMode}
             onChangeText={(agentMode) => setAgentDraft((d) => ({ ...d, agentMode }))}
           />
+          {chromeNeedsClaude ? (
+            <Text style={{ color: theme.colors.statusDanger, fontSize: 13, lineHeight: 18, paddingHorizontal: 16, paddingVertical: 10 }}>
+              Claude in Chrome needs a Claude provider. Runs will not start until you change the provider or the Browser setting.
+            </Text>
+          ) : null}
           {autoModeSelected ? (
             <Text style={{ color: theme.colors.foregroundMuted, fontSize: 13, lineHeight: 18, paddingHorizontal: 16, paddingVertical: 10 }}>
               In Auto mode a model classifier reviews this agent&apos;s tool calls instead of asking you each time. The

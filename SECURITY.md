@@ -95,7 +95,7 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
   model classifier approves browser actions and the extension skips its own check per site, so the
   limits on sites and secrets are rules the agent is told, not rules that are enforced. A malicious
   page can try to mislead it while those accounts are in reach. Choose Always Ask to approve actions
-  yourself. Steps and page content go through Anthropic's bridge (`bridge.claudeusercontent.com`).
+  yourself. Steps and page content can go through Anthropic's bridge (`bridge.claudeusercontent.com`).
 - Close tabs after a successful run (on by default) tells the agent to close only the tabs it opened
   itself, and only after a fully successful run. That is an instruction to a model, not an enforced
   control: the plugin does not check which tab a `browser_close_tab` call closes, so a model may

@@ -36,6 +36,9 @@ export const DEFAULT_AGENT_SETTINGS = {
 export const BROWSER_AGENTS = ["paseo", "chrome"] as const;
 export type BrowserAgent = (typeof BROWSER_AGENTS)[number];
 
+/** Marks a run record as started in Chrome, so its card names the right browser later. */
+export const CHROME_RUN_MARKER = "browser:chrome";
+
 /** Settings value to browser agent; anything unexpected is the Paseo browser. */
 export function parseBrowserAgent(value: unknown): BrowserAgent {
   return value === "chrome" ? "chrome" : "paseo";
@@ -82,12 +85,16 @@ export function stripRunSuccessMarker(text: string): string {
 
 /** The close-tabs rule for a run in Chrome, with the extension's tab tools. */
 export const CHROME_CLOSE_TABS_RULE =
-  "11. Closing tabs: remember each tab you open yourself with tabs_create_mcp. " +
+  "11. Closing tabs: remember each tab you open yourself, with tabs_create_mcp or createIfEmpty. " +
   "Only when the run is fully successful (every numbered step done, none failed, skipped or blocked, no question left unanswered, nothing left for the owner to do), then as your very last action, right before your final report, close those tabs with tabs_close_mcp. " +
   "Never close any other tab, and never a tab a step tells you to leave open. If you cannot tell whether you opened a tab yourself, leave it open. " +
   "Closing is cleanup, not a numbered step: write no step marker for it; it is not a destructive action under rule 3. If a close fails, leave that tab open and go on to your report. " +
   "If the run is anything less than fully successful, close no tab, so the owner can see where it stopped. " +
   "In your report, say which tabs you closed (by URL host only, such as example.com, never a full address or a secret) or that you left them open and why.";
+
+/** A tool description can tell the run to clean up its tabs; with the setting off it must not. */
+export const CHROME_KEEP_TABS_RULE =
+  "11. Tabs: do not close the tabs you opened, whatever a tool description says; leave them for the owner.";
 
 /** Start of a step marker line: `[browser-prompt step N/M] what the run is doing`. */
 export const STEP_MARKER_PREFIX = "[browser-prompt step";
@@ -237,7 +244,7 @@ export const CHROME_SAFETY_PREAMBLE = [
   "",
   "Rules:",
   "1. Use ONLY the Claude in Chrome tools, named mcp__claude-in-chrome__* (tabs_context_mcp, tabs_create_mcp, navigate, read_page, find, get_page_text, form_input, computer and tabs_close_mcp); load them with ToolSearch if they are deferred. Do not use the Paseo browser_* tools, Playwright or any browser on the server. Do not run shell commands. Do not edit files. Do not use javascript_tool to read cookies, storage or tokens, and do not use gif_creator or upload_image.",
-  "2. Start with tabs_context_mcp, without createIfEmpty, then open your own tab with tabs_create_mcp. Work only on the sites the steps name: never open, read or change anything else the owner is signed in to, and never use a tab the owner already had open unless a step says so. Read the page again after every navigation or page change. If these tools are missing, or report that no browser is connected or that the extension is signed in to another account, do not try another browser: end your turn with a report that quotes the error, so the owner can fix it.",
+  "2. Start with tabs_context_mcp. If it reports no tab group, call it once more with createIfEmpty true and use that new tab; otherwise open your own tab with tabs_create_mcp. Work only on the sites the steps name: never open, read or change anything else the owner is signed in to, and never use a tab the owner already had open unless a step says so. Read the page again after every navigation or page change. If these tools are missing, or report that no browser is connected or that the extension is signed in to another account, do not try another browser: end your turn with a report that quotes the error, so the owner can fix it. Never take a screenshot while a page shows a password, token, API key, 2FA or recovery code or any other secret.",
   ...SHARED_SAFETY_RULES,
 ].join("\n");
 
@@ -319,7 +326,8 @@ export function buildAgentPrompt(
   if (progress && progress.totalSteps > 0) rules += `\n${stepProgressRule(progress.totalSteps)}`;
   // The card's thumbnails come from Paseo's browser_screenshot, which a run in Chrome does not use.
   if (screenshots && !chrome) rules += `\n${SCREENSHOT_RULE}`;
-  if (closeTabs) rules += `\n${chrome ? CHROME_CLOSE_TABS_RULE : CLOSE_TABS_RULE}`;
+  if (chrome) rules += `\n${closeTabs ? CHROME_CLOSE_TABS_RULE : CHROME_KEEP_TABS_RULE}`;
+  else if (closeTabs) rules += `\n${CLOSE_TABS_RULE}`;
   if (archiveOnSuccess) rules += `\n${RUN_SUCCESS_RULE}`;
   return (
     `${rules}\n\n` +
