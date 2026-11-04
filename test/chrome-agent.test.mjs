@@ -110,6 +110,18 @@ test("the card's settings icon opens the page the plugin registers", () => {
   assert.match(run, /SETTINGS_SCREEN_ID = "preferences"/);
 });
 
+test("every way on the card can be the usual way", () => {
+  const settings = readFileSync(new URL("../shared/settings.ts", import.meta.url), "utf8");
+  const screen = readFileSync(new URL("../client/settings-screen.tsx", import.meta.url), "utf8");
+  const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
+  assert.match(settings, /startMode: z\.enum\(\["app", "web-agent", "copy-only", "paseo", "chrome"\]\)\.default\("app"\)/);
+  assert.match(settings, /mobileStartMode: z\.enum\(\["copy-only", "web-agent", "paseo", "chrome"\]\)\.default\("copy-only"\)/);
+  assert.equal(screen.match(/label: "Paseo browser", value: "paseo"/g)?.length, 2);
+  assert.equal(screen.match(/label: "Claude in Chrome", value: "chrome"/g)?.length, 2);
+  for (const way of ["app", "web-agent", "copy-only", "paseo", "chrome"]) assert.ok(card.includes(`defaultMode === "${way}" ? styles.primary`), way);
+  assert.match(readFileSync(new URL("../index.client.tsx", import.meta.url), "utf8"), /chatGptMode\(effectiveMode\(/, "the Command Center only opens ChatGPT");
+});
+
 test("a stored Browser setting is dropped", () => {
   assert.equal("browserAgent" in migratePreferences({ browserAgent: "chrome" }, 15), false);
   assert.equal("browserAgent" in migratePreferences({ browserAgent: "firefox" }, 14), false);

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.17.2 (unreleased)
+
+- **Usual way to start** also offers Paseo browser and Claude in Chrome, so either can be the highlighted
+  button. The Command Center can only open ChatGPT, so with one of these it opens the ChatGPT app (on
+  iOS and Android it copies).
+
 ## 0.17.1 (unreleased)
 
 - A settings icon on the card opens the plugin's settings page.

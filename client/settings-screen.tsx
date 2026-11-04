@@ -25,15 +25,19 @@ import { preferences } from "../shared/settings";
 import { LauncherSettings } from "./launcher-settings";
 import { UpdateSettings } from "./update-settings";
 
-const DESKTOP_OPTIONS: { label: string; value: "app" | "web-agent" | "copy-only" }[] = [
+const DESKTOP_OPTIONS: { label: string; value: "app" | "web-agent" | "copy-only" | "paseo" | "chrome" }[] = [
   { label: "ChatGPT app (macOS)", value: "app" },
   { label: "ChatGPT web agent", value: "web-agent" },
   { label: "Copy only", value: "copy-only" },
+  { label: "Paseo browser", value: "paseo" },
+  { label: "Claude in Chrome", value: "chrome" },
 ];
 
-const MOBILE_OPTIONS: { label: string; value: "copy-only" | "web-agent" }[] = [
+const MOBILE_OPTIONS: { label: string; value: "copy-only" | "web-agent" | "paseo" | "chrome" }[] = [
   { label: "Copy only", value: "copy-only" },
   { label: "ChatGPT web agent", value: "web-agent" },
+  { label: "Paseo browser", value: "paseo" },
+  { label: "Claude in Chrome", value: "chrome" },
 ];
 
 const THINKING_OPTIONS: { label: string; value: string }[] = [
@@ -114,7 +118,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
         <SettingsCard>
           <SettingsSelect
             label="Usual way to start (desktop)"
-            hint="Highlighted on the card and used by the Command Center. The card always offers every way. The prompt is always copied first."
+            hint="Highlighted on the card. The card always offers every way. The Command Center opens ChatGPT as chosen here, or the ChatGPT app when this is a Paseo agent."
             value={values.startMode}
             options={DESKTOP_OPTIONS}
             onValueChange={(startMode) => void settings.save({ ...values, startMode }, revision)}
