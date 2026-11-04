@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.17.3 (unreleased)
+
+- Claude in Chrome uses the provider `claude-chrome` by itself when the daemon has it and **Claude in
+  Chrome provider** is empty, so the setting is only needed for another name. Tested from a terminal
+  on paseo-box: with the owner's own Claude login the extension opened a tab in Chrome.
+
 ## 0.17.2 (unreleased)
 
 - **Usual way to start** also offers Paseo browser and Claude in Chrome, so either can be the highlighted

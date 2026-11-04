@@ -4,6 +4,7 @@ import {
   buildAgentPrompt,
   chatQuestionBudget,
   parseBrowserAgent,
+  pickChromeProvider,
   providerOf,
   resolveAgentConfig,
   type AgentSettingsInput,
@@ -93,6 +94,18 @@ async function chooseWorkspace(
   return { workspaceId: recent.id, source: "most-recent" };
 }
 
+/** For a Chrome run without a chosen provider, use `claude-chrome` when the daemon has it. */
+async function withChromeProvider(paseo: PaseoApi, settings: AgentSettingsInput): Promise<AgentSettingsInput> {
+  if (parseBrowserAgent(settings.browserAgent) !== "chrome" || (settings.chromeProvider ?? "").trim()) return settings;
+  let available: { provider: string; available: boolean }[] | null = null;
+  try {
+    available = (await paseo.providers.listAvailable()).providers;
+  } catch {
+    available = null; // the Provider setting then applies, as before
+  }
+  return { ...settings, chromeProvider: pickChromeProvider(settings.chromeProvider, available) };
+}
+
 /**
  * Creates the browser agent in the card agent's workspace with the safety-preamble prompt. Its labels
  * link it to the card's agent and card, so the server can report back when it finishes.
@@ -110,7 +123,7 @@ export async function startBrowserAgent(
   },
 ): Promise<StartedAgent> {
   const { workspaceId, source } = await chooseWorkspace(paseo, input.sourceAgentId, input.cachedWorkspaceId);
-  const config = resolveAgentConfig(input.settings);
+  const config = resolveAgentConfig(await withChromeProvider(paseo, input.settings));
   const agent = await paseo.workspaces.ref(workspaceId).agents.create({
     config,
     title: agentTitle(input.cardTitle, input.displayTitle),

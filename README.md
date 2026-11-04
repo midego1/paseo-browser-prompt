@@ -12,8 +12,9 @@ screenshots for those runs. The other sections and images below still use the ol
 
 If the run reports "Browser extension is not connected", the agent runs on another Claude account than
 the extension. Add a provider for the extension's account to the daemon's `config.json`, where
-`CLAUDE_CONFIG_DIR` is the directory of a Claude Code login on that account, restart the daemon, and
-enter `claude-chrome` under **Claude in Chrome provider**:
+`CLAUDE_CONFIG_DIR` is the directory of a Claude Code login on that account, and restart the daemon.
+The button then uses `claude-chrome` by itself; name another provider under **Claude in Chrome
+provider**:
 
 ```json
 {

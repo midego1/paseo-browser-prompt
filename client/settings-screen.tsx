@@ -299,7 +299,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
           <SettingsInput
             ref={chromeProviderInput}
             label="Claude in Chrome provider"
-            hint="Paseo provider for the Claude in Chrome button. The extension only connects when the agent uses its Claude account, so add a provider for that account to the daemon's config.json (see the README) and name it here. Empty: the Provider above."
+            hint="Paseo provider for the Claude in Chrome button. The extension only connects when the agent uses its Claude account, so add a provider for that account to the daemon's config.json (see the README) and name it here. Empty: claude-chrome when the daemon has that provider, else the Provider above."
             error={chromeProviderError ?? undefined}
             initialValue={values.chromeProvider}
             placeholder="claude-chrome"
