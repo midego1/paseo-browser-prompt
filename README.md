@@ -10,6 +10,25 @@ extension signed in to the agent's Claude account. It follows Permission mode, s
 classifier approves browser actions and the extension skips its check per site. The card shows no
 screenshots for those runs. The other sections and images below still use the older button names.
 
+If the run reports "Browser extension is not connected", the agent runs on another Claude account than
+the extension. Add a provider for the extension's account to the daemon's `config.json`, where
+`CLAUDE_CONFIG_DIR` is the directory of a Claude Code login on that account, restart the daemon, and
+enter `claude-chrome` under **Claude in Chrome provider**:
+
+```json
+{
+  "agents": {
+    "providers": {
+      "claude-chrome": {
+        "extends": "claude",
+        "label": "Claude in Chrome",
+        "env": { "CLAUDE_CONFIG_DIR": "/home/you/.claude" }
+      }
+    }
+  }
+}
+```
+
 - **Run with Paseo agent** starts a browser agent in the background (Claude Auto mode by default,
   with a fixed safety preamble). The card shows "Step N of M", a screenshot per step, and the run's
   state; questions and permissions for you are answered right on the card.

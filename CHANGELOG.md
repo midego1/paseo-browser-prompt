@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.17.0 (unreleased)
+
+- New setting, **Claude in Chrome provider**: the Paseo provider for the Claude in Chrome button. The
+  extension only connects when the agent uses its Claude account, and a host can run agents on another
+  one. Add a provider for the extension's account to the daemon's `config.json` and name it here.
+  Empty keeps the Provider setting.
+
 ## 0.16.1 (unreleased)
 
 - The prompt for ChatGPT now starts with `@Chrome` and asks for the ChatGPT extension in Chrome, not

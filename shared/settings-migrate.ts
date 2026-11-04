@@ -55,5 +55,10 @@ export function migratePreferences(values: unknown, fromVersion: number): unknow
     next = { ...next };
     delete next.browserAgent;
   }
+  // v17 adds chromeProvider (default empty). A stored value that is not a string: drop it.
+  if (fromVersion < 17 && "chromeProvider" in next && typeof next.chromeProvider !== "string") {
+    next = { ...next };
+    delete next.chromeProvider;
+  }
   return next;
 }

@@ -16,7 +16,7 @@ export const MAX_RUNS = 200;
 export const preferences = defineSettings({
   id: "preferences",
   scope: "host",
-  version: 16,
+  version: 17,
   schema: z.object({
     /**
      * Desktop and web clients.
@@ -42,6 +42,8 @@ export const preferences = defineSettings({
     agentModel: z.string().default(DEFAULT_AGENT_SETTINGS.agentModel),
     agentThinking: z.string().default(DEFAULT_AGENT_SETTINGS.agentThinking),
     agentMode: z.string().default(DEFAULT_AGENT_SETTINGS.agentMode),
+    /** Paseo provider for Claude in Chrome runs, on the extension's Claude account; empty = the Provider setting. */
+    chromeProvider: z.string().default(DEFAULT_AGENT_SETTINGS.chromeProvider),
     /** Ask before starting the agent. */
     confirmAgentLaunch: z.boolean().default(DEFAULT_AGENT_SETTINGS.confirmAgentLaunch),
     /** Open the new agent's view after starting it; off (default) = it runs in the background. */

@@ -17,6 +17,7 @@ import {
   isClassifierMode,
   MAX_CHAT_QUESTIONS_LIMIT,
   parseMaxChatQuestions,
+  providerFamily,
 } from "../shared/agent-prompt";
 import { DEFAULT_APP_LINK_TEMPLATE, validateAppLinkTemplate } from "../shared/browser-prompt";
 import { parseReportMode, type ReportMode } from "../shared/report-back";
@@ -66,6 +67,8 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
   const modeInput = useRef<SettingsInputHandle>(null);
   const maxQuestionsInput = useRef<SettingsInputHandle>(null);
   const [maxQuestionsDraft, setMaxQuestionsDraft] = useState<string | null>(null);
+  const chromeProviderInput = useRef<SettingsInputHandle>(null);
+  const [chromeProviderDraft, setChromeProviderDraft] = useState<string | null>(null);
 
   if (settings.status !== "ready") {
     const message = settings.status === "loading" ? "Loading..." : `Settings unavailable: ${settings.error}`;
@@ -86,6 +89,9 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
     agent.agentProvider || DEFAULT_AGENT_SETTINGS.agentProvider,
     agent.agentMode || DEFAULT_AGENT_SETTINGS.agentMode,
   );
+  const chromeProviderText = (chromeProviderDraft ?? values.chromeProvider).trim();
+  const chromeProviderError =
+    chromeProviderText && providerFamily(chromeProviderText) !== "claude" ? "Claude in Chrome needs a Claude provider." : null;
   const maxQuestionsText = maxQuestionsDraft ?? String(values.maxChatQuestions);
   const maxQuestionsParsed = parseMaxChatQuestions(maxQuestionsText);
   const maxQuestionsError = "error" in maxQuestionsParsed ? maxQuestionsParsed.error : null;
@@ -284,6 +290,24 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
                 agentMode: agent.agentMode.trim() || DEFAULT_AGENT_SETTINGS.agentMode,
               };
               if (await settings.save({ ...values, ...next }, revision)) setAgentDraft({});
+            }}
+          />
+          <SettingsInput
+            ref={chromeProviderInput}
+            label="Claude in Chrome provider"
+            hint="Paseo provider for the Claude in Chrome button. The extension only connects when the agent uses its Claude account, so add a provider for that account to the daemon's config.json (see the README) and name it here. Empty: the Provider above."
+            error={chromeProviderError ?? undefined}
+            initialValue={values.chromeProvider}
+            placeholder="claude-chrome"
+            onChangeText={setChromeProviderDraft}
+          />
+          <SettingsAction
+            label="Save Claude in Chrome provider"
+            actionLabel="Save"
+            disabled={chromeProviderDraft === null || chromeProviderError !== null || chromeProviderText === values.chromeProvider}
+            onPress={async () => {
+              if (chromeProviderError !== null) return;
+              if (await settings.save({ ...values, chromeProvider: chromeProviderText }, revision)) setChromeProviderDraft(null);
             }}
           />
           <SettingsSelect
