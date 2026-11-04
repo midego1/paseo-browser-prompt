@@ -1,6 +1,6 @@
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
-import { DEFAULT_AGENT_SETTINGS, MAX_CHAT_QUESTIONS_LIMIT } from "./agent-prompt";
+import { BROWSER_AGENTS, DEFAULT_AGENT_SETTINGS, MAX_CHAT_QUESTIONS_LIMIT } from "./agent-prompt";
 import { DEFAULT_APP_LINK_TEMPLATE } from "./browser-prompt";
 import { DEFAULT_REPORT_MODE, REPORT_MODES } from "./report-back";
 import { THUMBNAIL_MODES } from "./screenshot";
@@ -16,7 +16,7 @@ export const MAX_RUNS = 200;
 export const preferences = defineSettings({
   id: "preferences",
   scope: "host",
-  version: 14,
+  version: 15,
   schema: z.object({
     /**
      * Desktop and web clients.
@@ -42,6 +42,8 @@ export const preferences = defineSettings({
     agentModel: z.string().default(DEFAULT_AGENT_SETTINGS.agentModel),
     agentThinking: z.string().default(DEFAULT_AGENT_SETTINGS.agentThinking),
     agentMode: z.string().default(DEFAULT_AGENT_SETTINGS.agentMode),
+    /** Where the run works: the Paseo browser tabs, or the owner's real Chrome (Claude in Chrome). */
+    browserAgent: z.enum(BROWSER_AGENTS).default(DEFAULT_AGENT_SETTINGS.browserAgent),
     /** Ask before starting the agent. */
     confirmAgentLaunch: z.boolean().default(DEFAULT_AGENT_SETTINGS.confirmAgentLaunch),
     /** Open the new agent's view after starting it; off (default) = it runs in the background. */

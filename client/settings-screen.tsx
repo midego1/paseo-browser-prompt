@@ -16,6 +16,7 @@ import {
   DEFAULT_AGENT_SETTINGS,
   isClassifierMode,
   MAX_CHAT_QUESTIONS_LIMIT,
+  parseBrowserAgent,
   parseMaxChatQuestions,
 } from "../shared/agent-prompt";
 import { DEFAULT_APP_LINK_TEMPLATE, validateAppLinkTemplate } from "../shared/browser-prompt";
@@ -52,6 +53,11 @@ const REPORT_OPTIONS: { label: string; value: ReportMode }[] = [
 const THUMBNAIL_OPTIONS: { label: string; value: "all" | "latest" }[] = [
   { label: "All steps (default)", value: "all" },
   { label: "Latest only", value: "latest" },
+];
+
+const BROWSER_OPTIONS: { label: string; value: "paseo" | "chrome" }[] = [
+  { label: "Paseo browser (default)", value: "paseo" },
+  { label: "Claude in Chrome", value: "chrome" },
 ];
 
 type AgentDraft = { agentProvider: string; agentModel: string; agentMode: string };
@@ -97,7 +103,8 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
     values.agentProvider === DEFAULT_AGENT_SETTINGS.agentProvider &&
     values.agentModel === DEFAULT_AGENT_SETTINGS.agentModel &&
     values.agentMode === DEFAULT_AGENT_SETTINGS.agentMode &&
-    values.agentThinking === DEFAULT_AGENT_SETTINGS.agentThinking;
+    values.agentThinking === DEFAULT_AGENT_SETTINGS.agentThinking &&
+    values.browserAgent === DEFAULT_AGENT_SETTINGS.browserAgent;
   const thinkingOptions = THINKING_OPTIONS.some((option) => option.value === values.agentThinking)
     ? THINKING_OPTIONS
     : [...THINKING_OPTIONS, { label: values.agentThinking || "Provider default", value: values.agentThinking }];
@@ -163,6 +170,13 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
       </SettingsSection>
       <SettingsSection title="Run with Paseo agent">
         <SettingsCard>
+          <SettingsSelect
+            label="Browser"
+            hint="Paseo browser: the tabs in your Paseo desktop app. Claude in Chrome: your real Chrome with every account you are signed in to, through the Claude in Chrome extension. It needs a Claude provider, Chrome open, and the extension signed in to the same Claude account and organization as the agent. In Auto mode, the default, a model classifier approves browser actions and the extension skips its own check per site, so nothing asks you unless the agent does. Choose default (Always Ask) under Permission mode to approve them yourself. The card shows no screenshots for these runs."
+            value={values.browserAgent}
+            options={BROWSER_OPTIONS}
+            onValueChange={(browserAgent) => void settings.save({ ...values, browserAgent: parseBrowserAgent(browserAgent) }, revision)}
+          />
           <SettingsSwitch
             label="Confirm before starting"
             hint="Ask “Start a Paseo agent to do these steps in your browser?” first."
@@ -294,7 +308,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
           />
           <SettingsAction
             label="Reset agent settings to default"
-            hint="Claude Sonnet 5.5, thinking high, Auto mode."
+            hint="Claude Sonnet 5.5, thinking high, Auto mode, Paseo browser."
             actionLabel="Reset"
             disabled={agentIsDefault && !agentDirty}
             onPress={async () => {
@@ -306,6 +320,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
                 agentModel: DEFAULT_AGENT_SETTINGS.agentModel,
                 agentMode: DEFAULT_AGENT_SETTINGS.agentMode,
                 agentThinking: DEFAULT_AGENT_SETTINGS.agentThinking,
+                browserAgent: DEFAULT_AGENT_SETTINGS.browserAgent,
               };
               if (await settings.save({ ...values, ...defaults }, revision)) setAgentDraft({});
             }}

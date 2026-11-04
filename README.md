@@ -140,6 +140,7 @@ connected app shares them.
 | Setting | Default | What it does |
 | --- | --- | --- |
 | Confirm before starting | on | Asks before starting the agent; says when it will run in Auto mode. |
+| Browser | Paseo browser | Paseo browser: the tabs in your Paseo desktop app. Claude in Chrome: your real Chrome with every account you are signed in to, through the extension. Needs a Claude provider, Chrome open and the extension signed in to the agent's Claude account. It follows Permission mode, so Auto by default: a classifier approves browser actions and the extension skips its check per site. No screenshots on the card. |
 | Open the agent when started | off | Off: the agent works in the background; the card shows its status (running…, needs you, done ✓, failed) and an Open link. On: its view opens right away. |
 | Show step progress | on | The agent marks each numbered step as it starts it (`[browser-prompt step N/M] …`); the card shows "Step N of M · …" with a progress bar. |
 | Show live screenshot | on | The agent takes a viewport screenshot after each numbered step (never of pages showing secrets); the card shows them as thumbnails under the progress bar. Needs a Paseo 0.13+ app to show them. |
@@ -211,7 +212,7 @@ Rules:
 - Run with Paseo agent starts Claude agents in Auto mode by default (a model classifier reviews tool
   calls), or in Always Ask or Plan when you choose them, and always prepends the fixed safety
   preamble. Bypass and accept-edits modes are refused, and a run that ends up in one is stopped.
-- The preamble's rules (only the Paseo browser tools, ask before secrets and risky actions) are
+- The preamble's rules (only the Paseo browser tools, or the extension's with Claude in Chrome; ask before secrets and risky actions) are
   instructions to the model, not a tool sandbox: whether they are followed depends on the selected
   provider and model. Always Ask lets you approve each new tool yourself.
 - Links in rendered messages open only when they are http(s) URLs; the ChatGPT app deep link may

@@ -50,5 +50,10 @@ export function migratePreferences(values: unknown, fromVersion: number): unknow
     next = { ...next };
     delete next.archiveAgentOnSuccess;
   }
+  // v15 adds browserAgent (default the Paseo browser). Any other stored value: drop it.
+  if (fromVersion < 15 && "browserAgent" in next && next.browserAgent !== "paseo" && next.browserAgent !== "chrome") {
+    next = { ...next };
+    delete next.browserAgent;
+  }
   return next;
 }

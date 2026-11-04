@@ -43,7 +43,7 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
   control: a misbehaving model, or a web page that manipulates it, could act without asking, and the
   classifier may approve it. Set the permission mode to `default` (Always Ask) to approve every new
   tool yourself; review each approval there.
-- The browser-only rule (use only the Paseo browser tools: no shell commands, no file edits) and the
+- The browser-only rule (use only the Paseo browser tools, or the Claude in Chrome tools with that setting: no shell commands, no file edits) and the
   secret-handling rules are also instructions in the agent's prompt, not a tool sandbox. The plugin
   does not remove other tools from the run, so enforcement depends on the selected provider and
   model and on the permission mode; in Always Ask you approve each new tool.
@@ -90,6 +90,12 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
   the last line of its own final report says it fully succeeded. The agent writes that line, so a page
   that misleads it could get a run archived too early; archiving keeps the agent's history. The daemon
   keeps the archived run ids, and nothing else, in `archived-runs.json` in the plugin's state directory.
+- Browser: Claude in Chrome (off by default) runs the agent in your real Chrome, with every account you
+  are signed in to, not in the Paseo browser. Its reach is much wider. In Auto mode, its default, a
+  model classifier approves browser actions and the extension skips its own check per site, so the
+  limits on sites and secrets are rules the agent is told, not rules that are enforced. A malicious
+  page can try to mislead it while those accounts are in reach. Choose Always Ask to approve actions
+  yourself. Steps and page content go through Anthropic's bridge (`bridge.claudeusercontent.com`).
 - Close tabs after a successful run (on by default) tells the agent to close only the tabs it opened
   itself, and only after a fully successful run. That is an instruction to a model, not an enforced
   control: the plugin does not check which tab a `browser_close_tab` call closes, so a model may

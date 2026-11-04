@@ -45,6 +45,7 @@ import { useFirstOf } from "./chat-index";
 const RUN_LOCK_RPC_TIMEOUT_MS = 5_000;
 
 const DESKTOP_HINT = "Your Paseo desktop app must be open: the agent drives the browser tabs there.";
+const CHROME_HINT = "Chrome must be open with the Claude extension signed in: the agent works there.";
 
 
 export const cardSchema = z.object({
@@ -173,6 +174,8 @@ export function BrowserPromptCard({
   const confirmLaunch =
     settings.status === "ready" ? settings.values.confirmAgentLaunch : DEFAULT_AGENT_SETTINGS.confirmAgentLaunch;
   /** The next run uses Claude Auto mode (classifier-reviewed, the default); the confirmation says so. */
+  const inChrome = settings.status === "ready" && settings.values.browserAgent === "chrome";
+  const browserHint = inChrome ? CHROME_HINT : DESKTOP_HINT;
   const launchesInAutoMode = useMemo(() => {
     try {
       return usesClassifierMode(resolveAgentConfig(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS));
@@ -571,7 +574,7 @@ export function BrowserPromptCard({
           <Text style={[styles.hint, { color: theme.colors.statusDanger, flexShrink: 1 }]}>{runError}</Text>
         </View>
       ) : null}
-      {runAgentId && layout.compact ? <Text style={styles.hint}>{DESKTOP_HINT}</Text> : null}
+      {runAgentId && layout.compact ? <Text style={styles.hint}>{browserHint}</Text> : null}
       <Modal
         title="Run with Paseo agent"
         icon={<Icon name="Bot" size={18} color={theme.colors.foreground} />}
@@ -580,7 +583,14 @@ export function BrowserPromptCard({
       >
         <Modal.Content>
           <Text style={styles.modalText}>Start a Paseo agent to do these steps in your browser?</Text>
-          {launchesInAutoMode ? (
+          {inChrome ? (
+            <Text style={styles.hint}>
+              {launchesInAutoMode
+                ? "It works in your real Chrome, with every account you are signed in to. It runs in Claude Auto mode: a model classifier approves its browser actions, and the extension does not ask per site. It is told to stay on the sites in these steps and to ask you, as a question, before secrets or anything destructive."
+                : "It works in your real Chrome, with every account you are signed in to. It asks before every new tool, stays on the sites in these steps, and stops to ask you before secrets or anything destructive."}
+            </Text>
+          ) : null}
+          {inChrome ? null : launchesInAutoMode ? (
             <Text style={styles.hint}>
               It runs in Claude Auto mode: a model classifier reviews its tool calls. It uses only the Paseo browser
               tabs and is told to ask you, as a question, before secrets or anything destructive.
@@ -591,7 +601,7 @@ export function BrowserPromptCard({
               anything destructive.
             </Text>
           )}
-          {layout.compact ? <Text style={styles.hint}>{DESKTOP_HINT}</Text> : null}
+          {layout.compact ? <Text style={styles.hint}>{browserHint}</Text> : null}
           <View style={styles.modalActions}>
             <Pressable accessibilityRole="button" onPress={() => setConfirmOpen(false)} style={styles.secondary}>
               <Text style={styles.secondaryText}>Cancel</Text>
