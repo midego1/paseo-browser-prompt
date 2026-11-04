@@ -32,6 +32,16 @@ export async function readTalkSettings(settings: SettingsReader): Promise<TalkSe
   }
 }
 
+/** "Archive the agent after a successful run"; invalid or unreadable settings fail closed to off. */
+export async function readArchiveOnSuccess(settings: SettingsReader): Promise<boolean> {
+  try {
+    const state = await settings.read();
+    return state.status === "ready" && state.values.archiveAgentOnSuccess === true;
+  } catch {
+    return false;
+  }
+}
+
 /** The card's `runs` entry for this run, if any. */
 export async function readRecordedRun(settings: SettingsReader, query: { sourceId: string; cardId: string; runId: string }) {
   const state = await settings.read().catch(() => null);
@@ -50,11 +60,12 @@ export async function readRecordedRun(settings: SettingsReader, query: { sourceI
 export function registerReportBack(
   server: HookServer,
   settings: SettingsReader,
-  extra: Partial<Pick<ReportBackOptions, "store" | "log" | "busyWaitMs" | "permissionPollMs" | "recordWaitMs" | "recordPollMs">> = {},
+  extra: Partial<Pick<ReportBackOptions, "store" | "archivedStore" | "log" | "busyWaitMs" | "permissionPollMs" | "recordWaitMs" | "recordPollMs">> = {},
 ) {
   const reportBack = createReportBack({
     mode: () => readReportMode(settings),
     talk: () => readTalkSettings(settings),
+    archiveOnSuccess: () => readArchiveOnSuccess(settings),
     recordedRun: (query) => readRecordedRun(settings, query),
     ...extra,
   });

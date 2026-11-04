@@ -19,6 +19,7 @@ import { endedRun } from "../shared/run-lock";
 import { acquireRunLock, finishRunLock } from "../shared/run-lock-rpc";
 import { MAX_DONE, MAX_RUNS, preferences } from "../shared/settings";
 import { stashPrompt } from "../shared/trampoline";
+import { archivedAfterSuccess } from "../shared/archive-rpc";
 import {
   copyPrompt,
   DEFAULT_MODES,
@@ -111,11 +112,29 @@ export function BrowserPromptCard({
   const runAgentId = localRun ?? storedRun;
   // Started in this card session: an idle snapshot before its first turn means "starting".
   const {
-    state: observedState,
+    state: followedState,
     status: runStatus,
     createdAt: runCreatedAt,
     updatedAt: runUpdatedAt,
   } = useRunState(runAgentId, localRun !== null && localRun === runAgentId);
+  // A run the plugin archived after it succeeded is closed or gone from the app's cache: still done.
+  const checkArchived = useRpc(archivedAfterSuccess);
+  const [archivedRun, setArchivedRun] = useState<string | null>(null);
+  const mayBeArchived = !!runAgentId && (followedState === "stopped" || followedState === "unknown");
+  useEffect(() => {
+    if (!mayBeArchived || !runAgentId) return;
+    let cancelled = false;
+    void checkArchived({ agentId: runAgentId }).then(
+      ({ archived }) => {
+        if (!cancelled && archived) setArchivedRun(runAgentId);
+      },
+      () => {},
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [mayBeArchived, runAgentId]);
+  const observedState = archivedRun === runAgentId && mayBeArchived ? "done" : followedState;
   const totalSteps = useMemo(() => countSteps(text), [text]);
   const showSteps =
     settings.status === "ready" ? settings.values.showStepProgress : DEFAULT_AGENT_SETTINGS.showStepProgress;

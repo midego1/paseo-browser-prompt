@@ -11,25 +11,26 @@ import { stateDir } from "./state-dir.ts";
 export function fileReportedStore(
   dir = stateDir(),
   log: (message: string) => void = (message) => console.log(`[browser-prompt] ${message}`),
+  name = "reported-runs.json",
 ): ReportedStore {
-  const path = join(dir, "reported-runs.json");
+  const path = join(dir, name);
   return {
     async load() {
       let text: string;
       try {
         text = await readFile(path, "utf8");
       } catch (error) {
-        if ((error as { code?: string }).code !== "ENOENT") log("reported-runs.json could not be read; starting empty");
+        if ((error as { code?: string }).code !== "ENOENT") log(`${name} could not be read; starting empty`);
         return [];
       }
       try {
         const parsed: unknown = JSON.parse(text);
         if (!Array.isArray(parsed)) throw new Error("not a list");
         const ids = parsed.filter((id): id is string => typeof id === "string");
-        if (ids.length !== parsed.length) log(`reported-runs.json had ${parsed.length - ids.length} invalid entries; ignored`);
+        if (ids.length !== parsed.length) log(`${name} had ${parsed.length - ids.length} invalid entries; ignored`);
         return ids;
       } catch {
-        log("reported-runs.json is corrupt; starting empty");
+        log(`${name} is corrupt; starting empty`);
         return [];
       }
     },

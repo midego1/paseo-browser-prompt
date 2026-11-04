@@ -1,5 +1,5 @@
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
-import { mayLoadRun } from "../shared/agent-prompt.ts";
+import { hasRunSuccessMarker, mayLoadRun, QUESTION_MARKER, stripRunSuccessMarker } from "../shared/agent-prompt.ts";
 import {
   buildClosedRunNotice,
   buildReportMessage,
@@ -55,6 +55,7 @@ export interface ReportBackPaseo {
       };
       waitForFinish(timeoutMs?: number): Promise<{ status: string }>;
       send(text: string, options?: { activeTurnBehavior?: "interrupt" | "steer" }): Promise<void>;
+      archive(): Promise<unknown>;
     };
   };
 }
@@ -87,7 +88,11 @@ export interface ReportBackOptions {
   talk?(): Promise<TalkSettings>;
   /** The card's record of this run, or null when the host settings do not list it. */
   recordedRun(query: { sourceId: string; cardId: string; runId: string }): Promise<RecordedRun | null>;
+  /** "Archive the agent after a successful run"; read when a run succeeds. Must fail closed to off. */
+  archiveOnSuccess?(): Promise<boolean>;
   store?: ReportedStore;
+  /** Runs this plugin archived after they succeeded, so their cards keep showing done. */
+  archivedStore?: ReportedStore;
   log?(message: string): void;
   busyWaitMs?: number;
   permissionPollMs?: number;
@@ -96,6 +101,12 @@ export interface ReportBackOptions {
   recordWaitMs?: number;
   recordPollMs?: number;
 }
+
+const ARCHIVE_SETTLE_MS = 500;
+const ARCHIVE_SETTLE_TRIES = 10;
+
+/** A run is archived only after these: its report went out, or the owner turned reports off. */
+const ARCHIVE_AFTER: ReadonlySet<ReportResult> = new Set<ReportResult>(["sent", "sent-status", "disabled"]);
 
 export type ReportResult =
   | "question-sent"
@@ -204,6 +215,61 @@ export function createReportBack(options: ReportBackOptions) {
     (ids) => void reported.push(...ids.slice(-MAX_REPORTED)),
     () => log("could not read reported runs; starting empty"),
   );
+
+  /** Runs whose latest final text ended with the success line, until their report is handled. */
+  const succeeded = new Set<string>();
+  const archived: string[] = [];
+  let archiveWrites: Promise<void> = Promise.resolve();
+  const archivedLoaded = (options.archivedStore?.load() ?? Promise.resolve([])).then(
+    (ids) => void archived.push(...ids.slice(-MAX_REPORTED)),
+    () => log("could not read archived runs; starting empty"),
+  );
+
+  function persistArchived() {
+    const store = options.archivedStore;
+    if (!store) return;
+    const snapshot = archived.slice();
+    archiveWrites = archiveWrites.then(() => store.save(snapshot)).catch((error) => log(`could not save archived runs (${describe(error)})`));
+  }
+
+  /**
+   * Archives a run that said it fully succeeded, after its report. Reads the run again: only a run a
+   * card recorded, with no new turn and not archived by now. A failure leaves the run open.
+   */
+  async function archiveIfSucceeded(event: TurnEndedEvent, paseo: ReportBackPaseo, result: ReportResult) {
+    const runId = event.agent.id;
+    if (!succeeded.delete(runId) || !ARCHIVE_AFTER.has(result) || lifetime.signal.aborted) return;
+    try {
+      if (!(await options.archiveOnSuccess?.())) return;
+      const run = paseo.agents.ref(runId);
+      // The hook can fire just before the run's status settles, so give it a moment.
+      let snapshot = (await run.refresh())?.agent ?? null;
+      for (let wait = 0; wait < ARCHIVE_SETTLE_TRIES && snapshot?.status === "running" && !snapshot.pendingPermissions?.length; wait++) {
+        if ((await sleep(ARCHIVE_SETTLE_MS, lifetime.signal)) === ABORTED) return;
+        snapshot = (await run.refresh())?.agent ?? null;
+      }
+      const target = reportTarget(runId, snapshot?.labels ?? null);
+      if (!snapshot || !target || !isBrowserRun(snapshot.labels) || snapshot.archivedAt) return;
+      if (snapshot.status !== "idle" || snapshot.activeTurn || snapshot.pendingPermissions?.length) return;
+      const record = await waitForRecord({ sourceId: target.sourceId, cardId: target.cardId, runId }, lifetime.signal);
+      if (!record) return;
+      await archivedLoaded;
+      // Noted first, so a card that sees the closed run right away finds it as done.
+      archived.push(runId);
+      if (archived.length > MAX_REPORTED) archived.splice(0, archived.length - MAX_REPORTED);
+      persistArchived();
+      try {
+        await run.archive();
+        log(`archived run ${runId} after it succeeded`);
+      } catch (error) {
+        archived.splice(archived.indexOf(runId), 1);
+        persistArchived();
+        throw error;
+      }
+    } catch (error) {
+      if (!lifetime.signal.aborted) log(`could not archive run ${runId} (${describe(error)})`);
+    }
+  }
 
   function persist() {
     const store = options.store;
@@ -401,7 +467,10 @@ export function createReportBack(options: ReportBackOptions) {
    * a hook handler: Paseo cancels hook requests after 30 seconds. `dispose()` aborts every wait.
    */
   function onTurnEnded(event: TurnEndedEvent, paseo: ReportBackPaseo): Promise<ReportResult> {
-    const task = handle(event, paseo);
+    const task = handle(event, paseo).then(async (result) => {
+      await archiveIfSucceeded(event, paseo, result);
+      return result;
+    });
     active.add(task);
     void task.finally(() => active.delete(task));
     return task;
@@ -440,6 +509,9 @@ export function createReportBack(options: ReportBackOptions) {
       if (closedRun) log(`run ${runId} is closed or archived; its report is not read`);
       const finalText = final?.text ?? "";
       const question = event.outcome.kind === "completed" ? parseQuestion(finalText) : null;
+      // Anything that looks like a question leaves the run open, even if it also has the success line.
+      if (question === null && event.outcome.kind === "completed" && hasRunSuccessMarker(finalText) && !finalText.includes(QUESTION_MARKER)) succeeded.add(runId);
+      else succeeded.delete(runId);
       if (question !== null) {
         const handled = await handleQuestion(event, paseo, labels, runSnapshot, question, final?.messageId ?? null, signal);
         if (handled !== null) return handled;
@@ -496,7 +568,7 @@ export function createReportBack(options: ReportBackOptions) {
           : { kind: "completed" };
       let report: string | null = null;
       if (!closedRun && (mode === "full" || sourceAllowsFullReport(mode, sourceSnapshot.provider, sourceSnapshot.currentModeId))) {
-        report = finalText;
+        report = stripRunSuccessMarker(finalText);
       }
 
       // Claim before waiting so a later turn of the same run cannot report twice. The deadline runs
@@ -549,11 +621,17 @@ export function createReportBack(options: ReportBackOptions) {
 
   return {
     onTurnEnded,
+    /** Whether the plugin archived this run after it succeeded. */
+    async wasArchived(runId: string): Promise<boolean> {
+      await archivedLoaded;
+      return archived.includes(runId);
+    },
     /** Aborts every pending wait, then lets running handlers and queued saves finish. */
     async dispose() {
       lifetime.abort();
       await Promise.allSettled([...active]);
       await writes;
+      await archiveWrites;
     },
   };
 }

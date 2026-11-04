@@ -1,4 +1,5 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { archivedAfterSuccess } from "./shared/archive-rpc";
 import { createLauncher } from "./server/launcher";
 import { registerModeGuard } from "./server/mode-guard-hook";
 import { registerReportBack } from "./server/report-back-hook";
@@ -52,7 +53,11 @@ export default function contribute(server: PluginServerContext) {
   });
 
   // Report back to chat: a finished browser run reports to the agent whose card started it.
-  const reportBack = registerReportBack(server, settings, { store: fileReportedStore() });
+  const reportBack = registerReportBack(server, settings, {
+    store: fileReportedStore(),
+    archivedStore: fileReportedStore(undefined, undefined, "archived-runs.json"),
+  });
+  server.handle(archivedAfterSuccess, async ({ agentId }) => ({ archived: await reportBack.reportBack.wasArchived(agentId) }));
   // Mode guard: a browser run that leaves its allowed permission mode is set back or stopped.
   const modeGuard = registerModeGuard(server, settings);
 

@@ -45,5 +45,10 @@ export function migratePreferences(values: unknown, fromVersion: number): unknow
     next = { ...next };
     delete next.closeTabsOnSuccess;
   }
+  // v14 adds archiveAgentOnSuccess (default off). A stored value that is not a boolean: drop it.
+  if (fromVersion < 14 && "archiveAgentOnSuccess" in next && typeof next.archiveAgentOnSuccess !== "boolean") {
+    next = { ...next };
+    delete next.archiveAgentOnSuccess;
+  }
   return next;
 }

@@ -202,6 +202,12 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
             onValueChange={(closeTabsOnSuccess) => void settings.save({ ...values, closeTabsOnSuccess }, revision)}
           />
           <SettingsSwitch
+            label="Archive the agent after a successful run"
+            hint="When every step succeeded, the agent says so in the last line of its report and the plugin archives it, after the report went to the chat. A run that fails, stops, asks a question or leaves something for you stays open, and so does a run whose report could not be sent. The card keeps showing it as done. Its step progress and screenshots show only until the card reloads, because reading an archived agent would load it again. Applies to runs started after you turn it on."
+            value={values.archiveAgentOnSuccess}
+            onValueChange={(archiveAgentOnSuccess) => void settings.save({ ...values, archiveAgentOnSuccess }, revision)}
+          />
+          <SettingsSwitch
             label="Talk to the chat"
             hint="The agent may ask the chat that showed the card about the task (which button, which value, how to go on when the page differs). The plugin forwards each question marked as untrusted text. Not configurable: passwords, tokens, 2FA codes and approvals of destructive, security, billing, merge or publish actions are always asked of you, never of the chat."
             value={values.talkToChat}

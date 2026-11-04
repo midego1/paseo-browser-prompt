@@ -86,6 +86,10 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
   thumbnail only uses Paseo's own local attachment files, never a remote URL.
   The thumbnail is read from the agent's own timeline and stays in your Paseo app. Turn off Show
   live screenshot to stop the screenshots (this also saves the tokens each image costs).
+- Archive the agent after a successful run (off by default) acts only on a run a card recorded, when
+  the last line of its own final report says it fully succeeded. The agent writes that line, so a page
+  that misleads it could get a run archived too early; archiving keeps the agent's history. The daemon
+  keeps the archived run ids, and nothing else, in `archived-runs.json` in the plugin's state directory.
 - Close tabs after a successful run (on by default) tells the agent to close only the tabs it opened
   itself, and only after a fully successful run. That is an instruction to a model, not an enforced
   control: the plugin does not check which tab a `browser_close_tab` call closes, so a model may

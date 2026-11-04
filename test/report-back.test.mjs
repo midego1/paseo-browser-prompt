@@ -744,7 +744,7 @@ test("with addHook, report back registers agent.turn.after, returns at once and 
 
 test("index.server.ts wires report back with the file store and disposes it", () => {
   const source = readFileSync(new URL("../index.server.ts", import.meta.url), "utf8");
-  assert.match(source, /registerReportBack\(server, settings, \{ store: fileReportedStore\(\) \}\)/);
+  assert.match(source, /registerReportBack\(server, settings, \{\s*store: fileReportedStore\(\),/);
   assert.match(source, /await reportBack\.dispose\(\)/);
 });
 
