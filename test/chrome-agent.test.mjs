@@ -11,6 +11,8 @@ import {
   CHROME_RUN_MARKER,
   CHROME_SAFETY_PREAMBLE,
   chromeAvailable,
+  DEFAULT_CHROME_PROVIDER,
+  pickChromeProvider,
   runStartedInChrome,
   CLASSIFIER_MODE_RULE,
   CLOSE_TABS_RULE,
@@ -167,6 +169,18 @@ test("Chrome runs can use their own provider, and only Chrome runs", () => {
   assert.equal(chromeAvailable({ ...settings, agentProvider: "omp", agentModel: "m" }), true);
   assert.equal("chromeProvider" in migratePreferences({ chromeProvider: 5 }, 16), false);
   assert.equal(migratePreferences({ chromeProvider: "claude-chrome" }, 16).chromeProvider, "claude-chrome");
+});
+
+test("Chrome runs use claude-chrome by themselves when the daemon has it", () => {
+  const list = (available) => [{ provider: "claude", available: true }, { provider: DEFAULT_CHROME_PROVIDER, available }];
+  assert.equal(pickChromeProvider("", list(true)), "claude-chrome");
+  assert.equal(pickChromeProvider("", list(false)), "", "not available: the Provider setting");
+  assert.equal(pickChromeProvider("", null), "", "list failed: the Provider setting");
+  assert.equal(pickChromeProvider("", [{ provider: "claude", available: true }]), "");
+  assert.equal(pickChromeProvider(" my-chrome ", list(true)), "my-chrome", "the setting wins");
+  const run = readFileSync(new URL("../client/agent-run.ts", import.meta.url), "utf8");
+  assert.match(run, /resolveAgentConfig\(await withChromeProvider\(paseo, input\.settings\)\)/);
+  assert.match(run, /paseo\.providers\.listAvailable\(\)/);
 });
 
 test("a run's own record names its browser, not a newer run's", () => {

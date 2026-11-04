@@ -39,6 +39,19 @@ export type BrowserAgent = (typeof BROWSER_AGENTS)[number];
 /** Marks a run record as started in Chrome, so its card names the right browser later. */
 export const CHROME_RUN_MARKER = "browser:chrome";
 
+/** Provider name the README suggests for the extension's Claude account; used when it exists. */
+export const DEFAULT_CHROME_PROVIDER = "claude-chrome";
+
+/**
+ * The provider for a Chrome run: the setting, else `claude-chrome` when the daemon has it available,
+ * else the Provider setting (empty).
+ */
+export function pickChromeProvider(setting: string | undefined, available: readonly { provider: string; available: boolean }[] | null): string {
+  const chosen = (setting ?? "").trim();
+  if (chosen) return chosen;
+  return available?.some((entry) => entry.provider === DEFAULT_CHROME_PROVIDER && entry.available) ? DEFAULT_CHROME_PROVIDER : "";
+}
+
 /** Whether a run with these settings can use Claude in Chrome, by the same rules as the launch. */
 export function chromeAvailable(settings: AgentSettingsInput): boolean {
   try {
