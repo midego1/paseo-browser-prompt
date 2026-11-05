@@ -6,7 +6,7 @@ Paseo agent ("Claude" with its mark when it runs Claude, "Paseo agent" otherwise
 
 | Button | What it does |
 | --- | --- |
-| ChatGPT › **Desktop** | Opens the ChatGPT desktop app with the steps in a new chat, starting with `@Chrome` so ChatGPT works in Chrome through its extension. You press send. Desktop only. |
+| ChatGPT › **Desktop** | Opens the ChatGPT desktop app with the steps in a new chat, asking ChatGPT to use its own computer use (`@Computer`). You press send. Desktop only. |
 | ChatGPT › **Web** | Opens chatgpt.com in agent mode, with the steps in the URL when they are short and look secret-free. |
 | ChatGPT › **Extension** | Copies the steps for the ChatGPT Chrome extension and says to open its side panel and paste. Nothing outside the extension can open it or hand it a prompt. Desktop only. |
 | Agent › **Paseo browser** | Starts a Paseo agent that works in the browser tabs of your Paseo desktop app, with step progress and a screenshot per step on the card. |

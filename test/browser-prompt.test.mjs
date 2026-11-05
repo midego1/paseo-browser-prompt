@@ -107,7 +107,8 @@ test("card id is stable for identical content", () => {
 
 test("launch plan: prefilled agent-mode URL when short and secret-free", () => {
   const prompt = composePrompt("Set DEPLOY_TOKEN", "1. Open https://github.com/x/y/settings/secrets/actions");
-  assert.match(prompt, /^@Chrome Use my Chrome browser, through the ChatGPT extension/);
+  assert.match(prompt, /^Use computer use \(@Computer\)/);
+  assert.doesNotMatch(prompt, /extension|@Chrome/, "desktop and web do not go through the Chrome extension");
   const plan = planChatGptLaunch(prompt);
   assert.equal(plan.prefilled, true);
   assert.ok(plan.url.startsWith("https://chatgpt.com/?hints=agent&q="));
@@ -188,9 +189,9 @@ test("two messages never share item ids, so each shows its own cards", () => {
   assert.equal(explodeMessage(`${block}\nmore`, "streaming")[0].id, explodeMessage(`${block}\nmore and more`, "streaming")[0].id);
 });
 
-test("the extension prompt has its own header and no @Chrome mention", () => {
+test("only the extension prompt speaks to the Chrome extension", () => {
   const prompt = composePrompt("T", "1. x", CHATGPT_EXTENSION_HEADER);
   assert.ok(prompt.startsWith("Use this browser to carry out the following steps"));
   assert.doesNotMatch(prompt, /@Chrome/);
-  assert.match(composePrompt("T", "1. x"), /^@Chrome /, "the app prompt keeps its mention");
+  assert.match(composePrompt("T", "1. x"), /^Use computer use \(@Computer\)/, "desktop and web use computer use");
 });

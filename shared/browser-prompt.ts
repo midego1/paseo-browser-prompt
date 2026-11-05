@@ -9,8 +9,12 @@ export const MAX_URL_LENGTH = 1500;
 
 export const CHATGPT_AGENT_URL = "https://chatgpt.com/?hints=agent";
 
+/**
+ * Header for ChatGPT desktop and web: ChatGPT uses its own computer use (@Computer), not the Chrome
+ * extension, which has its own button and header below.
+ */
 export const CHATGPT_HEADER =
-  "@Chrome Use my Chrome browser, through the ChatGPT extension, to carry out the following steps for me, " +
+  "Use computer use (@Computer) to carry out the following steps for me in my web browser, " +
   "where I am already signed in. Stop and ask me before entering any password, token, or other " +
   "secret, and before confirming any destructive or irreversible action.";
 

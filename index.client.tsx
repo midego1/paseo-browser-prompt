@@ -47,7 +47,7 @@ export default function contribute(client: PluginClientContext) {
     id: "open-last-browser-prompt",
     title: "Open last browser prompt in ChatGPT",
     icon: "Globe",
-    keywords: ["browser prompt", "chatgpt", "chrome extension"],
+    keywords: ["browser prompt", "chatgpt", "computer use"],
     context: "global",
     async onSelect({ rpc }) {
       const last = getLastSeenPrompt();

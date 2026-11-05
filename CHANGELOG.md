@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.19.5 (unreleased)
+
+- ChatGPT **Desktop** and **Web** ask for ChatGPT's own computer use (`@Computer`) again, not the
+  Chrome extension (since 0.16.1 their prompt started with `@Chrome`). Only the **Extension** button
+  speaks to the ChatGPT Chrome extension.
+
 ## 0.19.4 (unreleased)
 
 - New README tour (GIF, MP4 and the X cut) of the current card, recorded with
