@@ -4,7 +4,7 @@ Browser prompt turns step-by-step browser instructions written by an agent into 
 
 When an assistant message contains a fenced code block whose info string is `browser-prompt` (optionally followed by a title), the block is replaced by a card, and the rest of the message is shown as before. The card shows the title and the steps, with a button for every way to run them: **ChatGPT app**, **ChatGPT web**, **ChatGPT extension**, **Paseo browser**, **Claude in Chrome**, **Copy** and **Mark done**. Your usual way is highlighted, and the gear in the card header opens the settings. In short:
 
-- ChatGPT › **Desktop** and **Web** copy the steps to the clipboard with a short header asking ChatGPT to carry them out in Chrome through its extension (`@Chrome`), and to stop and ask before entering secrets or confirming destructive actions. They then open the ChatGPT desktop app or chatgpt.com.
+- ChatGPT › **Desktop** and **Web** copy the steps to the clipboard with a short header asking ChatGPT to carry them out with its own computer use (`@Computer`), and to stop and ask before entering secrets or confirming destructive actions. They then open the ChatGPT desktop app or chatgpt.com.
 - ChatGPT › **Extension** copies the steps with a header for the ChatGPT Chrome extension and says to open its side panel and paste. Nothing outside the extension can open its panel or hand it a prompt.
 - The **copy** icon copies the same text without opening anything.
 - The **check** icon marks the card as finished (**Undo done** reverts it). Done marks are stored on the Paseo host, so every connected app sees them.

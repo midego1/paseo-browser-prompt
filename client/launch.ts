@@ -37,7 +37,7 @@ export interface ActionResult {
   message: string;
 }
 
-const PASTE_HINT = "Prompt copied. Paste it into a ChatGPT Work chat.";
+const PASTE_HINT = "Prompt copied. Paste it into ChatGPT (computer use).";
 const EXTENSION_HINT =
   "Prompt copied. In Chrome, open the ChatGPT side panel (its toolbar icon, or ⌘⇧. on a Mac), paste and send.";
 
