@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.4 (unreleased)
+
+- New README tour (GIF, MP4 and the X cut) of the current card, recorded with
+  `scripts/demo/record.sh` in the isolated demo daemon: 57 s, GIF 4.3 MB.
+
 ## 0.19.3 (unreleased)
 
 - New README screenshots of the current card (grouped buttons with the ChatGPT and Claude marks, the
