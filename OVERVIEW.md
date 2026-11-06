@@ -2,13 +2,13 @@ Browser prompt turns step-by-step browser instructions written by an agent into 
 
 ## What it does
 
-When an assistant message contains a fenced code block whose info string is `browser-prompt` (optionally followed by a title), the block is replaced by a card, and the rest of the message is shown as before. The card shows the title and the steps, with a button for every way to run them: **ChatGPT app**, **ChatGPT web**, **ChatGPT extension**, **Paseo browser**, **Claude in Chrome**, **Copy** and **Mark done**. Your usual way is highlighted, and the gear in the card header opens the settings. In short:
+When an assistant message contains a fenced code block whose info string is `browser-prompt` (optionally followed by a title), the block is replaced by a card, and the rest of the message is shown as before. The card shows the title and the steps, with a button for every way to run them, grouped by Paseo, ChatGPT and Claude, plus **Copy** and **Mark done**. Your usual way is highlighted, and the gear in the card header opens the settings. In short:
 
 - ChatGPT › **Desktop** and **Web** copy the steps to the clipboard with a short header asking ChatGPT to carry them out with its own computer use (`@Computer`), and to stop and ask before entering secrets or confirming destructive actions. They then open the ChatGPT desktop app or chatgpt.com.
-- ChatGPT › **Extension** copies the steps with a header for the ChatGPT Chrome extension and says to open its side panel and paste. Nothing outside the extension can open its panel or hand it a prompt.
-- The **copy** icon copies the same text without opening anything.
-- The **check** icon marks the card as finished (**Undo done** reverts it). Done marks are stored on the Paseo host, so every connected app sees them.
-- Agent › **Paseo browser** starts a new Paseo agent that carries out the steps in the browser tabs of your Paseo desktop app. Agent › **Chrome** (Claude in Chrome) does the same in your real Chrome.
+- Claude › **Desktop** copies the steps with a header asking Claude to use Claude in Chrome, then opens the Claude desktop app with them in a new chat (through the same launcher page as ChatGPT Desktop, with its `claude://claude.ai/new?q=` link). You press send.
+- **Copy** copies the same text without opening anything.
+- **Mark done** marks the card as finished (**Undo done** reverts it). Done marks are stored on the Paseo host, so every connected app sees them.
+- Paseo › **Paseo browser** starts a new Paseo agent that carries out the steps in the browser tabs of your Paseo desktop app. Claude › **Chrome tab** does the same in a tab of your real Chrome, through Claude in Chrome.
 
 A card appears only after the block's closing fence has streamed in. Blocks nested inside another code block are ignored. The README describes the block convention for agents.
 
@@ -89,6 +89,6 @@ The Command Center has **Open last browser prompt in ChatGPT**.
 ## Limits
 
 - The prompt is always copied first, so you can paste it if ChatGPT or the launcher page cannot be opened.
-- ChatGPT in Chrome needs the ChatGPT desktop app on macOS or Windows and the ChatGPT extension in Chrome, set up under Settings > Computer Use. The app opens with the prompt filled in; you press send, because its links never send by themselves and the extension cannot be started from outside. ChatGPT documents no mobile deep link for a new prompt.
+- ChatGPT Desktop needs the ChatGPT desktop app on macOS or Windows, and Claude Desktop the Claude desktop app on macOS, Windows or Linux. Both open with the prompt filled in; you press send, because their links never send by themselves. Neither documents a mobile deep link for a new prompt.
 - The ChatGPT web URL parameters are not officially documented and may change.
 - Run with Paseo agent needs the Paseo desktop app open; on Paseo 0.11 and 0.12 the card's message text uses a compact built-in Markdown renderer.

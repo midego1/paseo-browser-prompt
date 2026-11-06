@@ -13,7 +13,7 @@ Do not include real secrets, tokens or private prompts in a report; describe the
 
 | Data | Where it goes | When |
 | --- | --- | --- |
-| Prompt text (card steps plus a fixed header) | Clipboard of the device you use | ChatGPT app, ChatGPT web, ChatGPT extension, Copy |
+| Prompt text (card steps plus a fixed header) | Clipboard of the device you use | ChatGPT Desktop and Web, Claude Desktop, Copy |
 | Prompt text | `https://chatgpt.com/?hints=agent&q=...` in your browser (OpenAI, browser history) | ChatGPT web mode, only when the prompt is short and has nothing that looks like a credential |
 | Prompt text | Plugin memory on your Paseo daemon, under a random one-time id, at most 10 minutes; then the ChatGPT app via its `codex://` deep link | ChatGPT app mode |
 | Launcher URL `http://<own Tailscale IP or 127.0.0.1>:5299/open?id=<id>` | Your browser; contains no prompt text | ChatGPT app mode |
@@ -90,7 +90,7 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
   the last line of its own final report says it fully succeeded. The agent writes that line, so a page
   that misleads it could get a run archived too early; archiving keeps the agent's history. The daemon
   keeps the archived run ids, and nothing else, in `archived-runs.json` in the plugin's state directory.
-- The agent's Chrome button on the card (Claude in Chrome) runs the agent in your real Chrome, with every account you
+- The Claude › Chrome tab button on the card (Claude in Chrome) runs the agent in your real Chrome, with every account you
   are signed in to, not in the Paseo browser. Its reach is much wider. In Auto mode, its default, a
   model classifier approves browser actions and the extension skips its own check per site, so the
   limits on sites and secrets are rules the agent is told, not rules that are enforced. A malicious

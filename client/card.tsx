@@ -4,7 +4,7 @@ import { Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
 import { z } from "zod";
-import { agentTitle, CHROME_RUN_MARKER, chromeAvailable, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, providerFamily, resolveAgentConfig, runStartedInChrome, describeLaunch, type BrowserAgent } from "../shared/agent-prompt";
+import { agentTitle, CHROME_RUN_MARKER, chromeAvailable, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, resolveAgentConfig, runStartedInChrome, describeLaunch, type BrowserAgent } from "../shared/agent-prompt";
 import { MOST_RECENT_FALLBACK } from "../shared/report-back";
 import {
   blockFingerprint,
@@ -19,7 +19,7 @@ import { endedRun } from "../shared/run-lock";
 import { acquireRunLock, finishRunLock } from "../shared/run-lock-rpc";
 import { MAX_DONE, MAX_RUNS, preferences } from "../shared/settings";
 import { stashPrompt } from "../shared/trampoline";
-import { CLAUDE_COLOR, CLAUDE_ICON, OPENAI_COLOR, OPENAI_ICON } from "../shared/brand-icons";
+import { CLAUDE_COLOR, CLAUDE_ICON, OPENAI_COLOR, OPENAI_ICON, PASEO_ICON } from "../shared/brand-icons";
 import { archivedAfterSuccess } from "../shared/archive-rpc";
 import {
   copyPrompt,
@@ -28,6 +28,7 @@ import {
   recordSeenPrompt,
   rememberModes,
   startInChatGpt,
+  startInClaudeDesktop,
   type ActionResult,
 } from "./launch";
 import { openPluginSettings, openRunScreen, resolveLaunch, startBrowserAgent, type ResolvedLaunch } from "./agent-run";
@@ -109,15 +110,6 @@ export function BrowserPromptCard({
     settings.status === "ready" ? settings.values.mobileStartMode : DEFAULT_MODES.mobileStartMode;
   // The owner's usual way is highlighted; every way stays one press away.
   const defaultMode = effectiveMode({ startMode, mobileStartMode });
-  // The mark follows the provider the Paseo browser run would really use (a `provider/model` model wins).
-  const agentIsClaude = useMemo(() => {
-    try {
-      const provider = resolveAgentConfig(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS).provider;
-      return providerFamily(provider.slice(0, provider.indexOf("/"))) === "claude";
-    } catch {
-      return false;
-    }
-  }, [settings]);
   const showChrome = chromeAvailable(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS);
 
   // Copies of a block in this chat share its run: the newest one started from this card's id or for
@@ -256,7 +248,6 @@ export function BrowserPromptCard({
       group: { flexDirection: "row" as const, flexWrap: "wrap" as const, alignItems: "center" as const, gap: 6 },
       groupMark: { flexDirection: "row" as const, alignItems: "center" as const, gap: 5, marginRight: 2 },
       groupLabel: { color: theme.colors.foreground, fontSize: 13, fontWeight: "600" as const },
-      iconButton: { paddingHorizontal: 8 },
       primary: {
         flexDirection: "row" as const,
         alignItems: "center" as const,
@@ -508,6 +499,21 @@ export function BrowserPromptCard({
         </Text>
       </View>
       <View style={styles.actions}>
+        <View style={styles.group} accessibilityRole="toolbar" accessibilityLabel="Paseo">
+          <View style={styles.groupMark} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+            <Icon icon={PASEO_ICON} size={16} color={theme.colors.foreground} />
+            <Text style={styles.groupLabel}>Paseo</Text>
+          </View>
+          <WayButton
+            label={runAgentId ? "Again: Paseo browser" : "Paseo browser"}
+            a11y={`Run ${displayTitle} with a Paseo agent in the Paseo browser`}
+            hint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
+            highlighted={defaultMode === "paseo"}
+            disabled={busy || resolving || runBlocked}
+            styles={styles}
+            onPress={() => void onRunPress("paseo")}
+          />
+        </View>
         <View style={styles.group} accessibilityRole="toolbar" accessibilityLabel="ChatGPT">
           <View style={styles.groupMark} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
             <Icon icon={OPENAI_ICON} size={16} color={OPENAI_COLOR} />
@@ -531,53 +537,41 @@ export function BrowserPromptCard({
             styles={styles}
             onPress={() => void run(() => startInChatGpt(title, text, "web-agent", (prompt) => stash({ prompt })))}
           />
-          {mobile ? null : (
-            <WayButton
-              label="Extension"
-              a11y={`Copy ${displayTitle} for the ChatGPT extension in Chrome`}
-              highlighted={defaultMode === "extension"}
-              disabled={busy}
-              styles={styles}
-              onPress={() => void run(() => startInChatGpt(title, text, "extension", (prompt) => stash({ prompt })))}
-            />
-          )}
         </View>
-        <View style={styles.group} accessibilityRole="toolbar" accessibilityLabel="Paseo agent">
-          <View style={styles.groupMark} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-            {agentIsClaude ? (
+        {mobile && !showChrome ? null : (
+          <View style={styles.group} accessibilityRole="toolbar" accessibilityLabel="Claude">
+            <View style={styles.groupMark} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
               <Icon icon={CLAUDE_ICON} size={16} color={CLAUDE_COLOR} />
-            ) : (
-              <Icon name="Bot" size={16} color={theme.colors.foreground} />
+              <Text style={styles.groupLabel}>Claude</Text>
+            </View>
+            {mobile ? null : (
+              <WayButton
+                label="Desktop"
+                a11y={`Start ${displayTitle} in the Claude desktop app`}
+                highlighted={defaultMode === "claude-desktop"}
+                disabled={busy}
+                styles={styles}
+                onPress={() => void run(() => startInClaudeDesktop(title, text, (prompt) => stash({ prompt, target: "claude" })))}
+              />
             )}
-            <Text style={styles.groupLabel}>{agentIsClaude ? "Claude" : "Paseo agent"}</Text>
+            {showChrome ? (
+              <WayButton
+                label={runAgentId ? "Again: Chrome tab" : "Chrome tab"}
+                a11y={`Run ${displayTitle} with a Paseo agent in a tab of your Chrome, through Claude in Chrome`}
+                hint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
+                highlighted={defaultMode === "chrome"}
+                disabled={busy || resolving || runBlocked}
+                styles={styles}
+                onPress={() => void onRunPress("chrome")}
+              />
+            ) : null}
           </View>
-          <WayButton
-            label={runAgentId ? "Again: Paseo browser" : "Paseo browser"}
-            a11y={`Run ${displayTitle} with a Paseo agent in the Paseo browser`}
-            hint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
-            highlighted={defaultMode === "paseo"}
-            disabled={busy || resolving || runBlocked}
-            styles={styles}
-            onPress={() => void onRunPress("paseo")}
-          />
-          {showChrome ? (
-            <WayButton
-              label={runAgentId ? "Again: Chrome" : "Chrome"}
-              a11y={`Run ${displayTitle} with a Paseo agent in your Chrome, through Claude in Chrome`}
-              hint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
-              highlighted={defaultMode === "chrome"}
-              disabled={busy || resolving || runBlocked}
-              styles={styles}
-              onPress={() => void onRunPress("chrome")}
-            />
-          ) : null}
-        </View>
+        )}
         <View style={styles.group}>
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={`Copy ${displayTitle}`}
             disabled={busy}
-            hitSlop={4}
             onPress={() =>
               void run(() =>
                 defaultMode === "copy-only"
@@ -585,19 +579,22 @@ export function BrowserPromptCard({
                   : copyPrompt(title, text),
               )
             }
-            style={[defaultMode === "copy-only" ? styles.primary : styles.secondary, styles.iconButton]}
+            style={defaultMode === "copy-only" ? styles.primary : styles.secondary}
           >
             <Icon name="Copy" size={14} color={defaultMode === "copy-only" ? theme.colors.accentForeground : theme.colors.foreground} />
+            <Text style={defaultMode === "copy-only" ? styles.primaryText : styles.secondaryText}>Copy</Text>
           </Pressable>
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={done ? `Mark ${displayTitle} not done` : `Mark ${displayTitle} done`}
             accessibilityState={{ checked: done }}
-            hitSlop={4}
             onPress={() => void toggleDone()}
-            style={[styles.secondary, styles.iconButton]}
+            style={styles.secondary}
           >
             <Icon name={done ? "Undo2" : "Check"} size={14} color={done ? theme.colors.statusSuccess : theme.colors.foreground} />
+            <Text style={done ? [styles.secondaryText, { color: theme.colors.statusSuccess }] : styles.secondaryText}>
+              {done ? "Undo done" : "Mark done"}
+            </Text>
           </Pressable>
         </View>
       </View>

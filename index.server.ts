@@ -5,7 +5,7 @@ import { registerModeGuard } from "./server/mode-guard-hook";
 import { registerReportBack } from "./server/report-back-hook";
 import { fileReportedStore } from "./server/reported-store";
 import { createServerUpdater, currentUpdateStatus } from "./server/updater";
-import { DEFAULT_APP_LINK_TEMPLATE } from "./shared/browser-prompt";
+import { CLAUDE_DESKTOP_LINK_TEMPLATE, DEFAULT_APP_LINK_TEMPLATE } from "./shared/browser-prompt";
 import { createRunLocks, runLockKey } from "./shared/run-lock";
 import { acquireRunLock, finishRunLock } from "./shared/run-lock-rpc";
 import { preferences } from "./shared/settings";
@@ -35,7 +35,8 @@ export default function contribute(server: PluginServerContext) {
   server.handle(installUpdate, ({ remote, revision }) => updater.check({ install: { remote, revision } }));
   server.handle(getUpdateStatus, () => currentUpdateStatus());
 
-  server.handle(stashPrompt, async ({ prompt }) => {
+  server.handle(stashPrompt, async ({ prompt, target }) => {
+    if (target === "claude") return launcher.stash(prompt, CLAUDE_DESKTOP_LINK_TEMPLATE);
     const current = await settings.read();
     const template = current.status === "ready" ? current.values.appLinkTemplate : DEFAULT_APP_LINK_TEMPLATE;
     return launcher.stash(prompt, template);

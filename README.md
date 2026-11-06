@@ -1,18 +1,17 @@
 # Browser prompt for Paseo
 
 A [Paseo](https://paseo.sh) plugin that turns every `browser-prompt` block in an assistant message
-into a card with a button for each way to run the steps, in two groups: ChatGPT (its mark and name) and the
-Paseo agent ("Claude" with its mark when it runs Claude, "Paseo agent" otherwise):
+into a card with a button for each way to run the steps, in three groups, each with its mark:
 
 | Button | What it does |
 | --- | --- |
+| Paseo › **Paseo browser** | Starts a Paseo agent that works in the browser tabs of your Paseo desktop app, with step progress and a screenshot per step on the card. |
 | ChatGPT › **Desktop** | Opens the ChatGPT desktop app with the steps in a new chat, asking ChatGPT to use its own computer use (`@Computer`). You press send. Desktop only. |
 | ChatGPT › **Web** | Opens chatgpt.com in agent mode, with the steps in the URL when they are short and look secret-free. |
-| ChatGPT › **Extension** | Copies the steps for the ChatGPT Chrome extension and says to open its side panel and paste. Nothing outside the extension can open it or hand it a prompt. Desktop only. |
-| Agent › **Paseo browser** | Starts a Paseo agent that works in the browser tabs of your Paseo desktop app, with step progress and a screenshot per step on the card. |
-| Agent › **Chrome** (Claude in Chrome) | Starts a Paseo agent that works in your real Chrome through the Claude in Chrome extension, with every account you are signed in to. No screenshots on the card. |
-| Copy icon | Copies the steps. |
-| Check icon | Marks the card done on this host; press again to undo. |
+| Claude › **Desktop** | Opens the Claude desktop app with the steps in a new chat (`claude://claude.ai/new?q=…`), asking Claude to use Claude in Chrome. You press send. Desktop only. |
+| Claude › **Chrome tab** | Starts a Paseo agent that works in a tab of your real Chrome through the Claude in Chrome extension, with every account you are signed in to. No screenshots on the card. |
+| **Copy** | Copies the steps. |
+| **Mark done** | Marks the card done on this host; **Undo done** reverts it. |
 
 Your **Usual way to start** is highlighted. With a run on the card the agent buttons say "Again: …",
 and the status line names the browser the run uses. The gear in the card's header opens these
@@ -73,7 +72,7 @@ Browser prompts.
 each way to run it (see the table above). The agent buttons ask first when **Confirm before
 starting** is on.
 
-![The card: ChatGPT with Desktop, Web and Extension; Claude with Paseo browser and Chrome; copy and done icons](docs/screenshots/card.png)
+![The card in 0.19: ChatGPT with Desktop, Web and Extension; Claude with Paseo browser and Chrome; copy and done icons. Since 0.20 the groups are Paseo, ChatGPT (Desktop, Web) and Claude (Desktop, Chrome tab)](docs/screenshots/card.png)
 
 **2. Running in the background.** The agent works in the background and the card shows its state
 with an Open link (**Open the agent when started** opens it right away instead). "Step N of M" and
@@ -168,7 +167,7 @@ connected app shares them.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Usual way to start (desktop) | ChatGPT app | The button highlighted on the card: ChatGPT app (through the launcher), ChatGPT web, ChatGPT extension, Copy only, Paseo browser or Claude in Chrome. The card always offers every way. The Command Center opens ChatGPT this way, or the ChatGPT app when this is a Paseo agent. |
+| Usual way to start (desktop) | ChatGPT desktop | The button highlighted on the card: ChatGPT desktop (through the launcher), ChatGPT web, Claude desktop, Paseo browser, Claude Chrome tab or Copy only. The card always offers every way. The Command Center opens ChatGPT this way, or the ChatGPT desktop app for any other choice. |
 | Usual way to start (iOS and Android) | Copy only | Copy only, ChatGPT web, Paseo browser or Claude in Chrome. There is no ChatGPT app or extension button on phones: ChatGPT documents no mobile deep link for a new prompt. |
 | ChatGPT app deep link | `codex://new?prompt={prompt}` | `{prompt}` is replaced by the encoded prompt; only `codex:` and `https:` are accepted. Save and Reset to default. |
 | Collapse repeated blocks that are done | on | A later copy of a block in the chat is a full card with "Also shown earlier in this chat"; once done, copies collapse to "✓ Already done · Show". Off: every copy is a plain full card. |

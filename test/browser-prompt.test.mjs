@@ -2,7 +2,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  CHATGPT_EXTENSION_HEADER,
+  CLAUDE_DESKTOP_HEADER,
+  CLAUDE_DESKTOP_LINK_TEMPLATE,
   composePrompt,
   explodeMessage,
   findBrowserPrompts,
@@ -189,9 +190,11 @@ test("two messages never share item ids, so each shows its own cards", () => {
   assert.equal(explodeMessage(`${block}\nmore`, "streaming")[0].id, explodeMessage(`${block}\nmore and more`, "streaming")[0].id);
 });
 
-test("only the extension prompt speaks to the Chrome extension", () => {
-  const prompt = composePrompt("T", "1. x", CHATGPT_EXTENSION_HEADER);
-  assert.ok(prompt.startsWith("Use this browser to carry out the following steps"));
-  assert.doesNotMatch(prompt, /@Chrome/);
-  assert.match(composePrompt("T", "1. x"), /^Use computer use \(@Computer\)/, "desktop and web use computer use");
+test("the Claude desktop prompt asks for Claude in Chrome, and its link is the fixed claude:// one", () => {
+  const prompt = composePrompt("T", "1. x", CLAUDE_DESKTOP_HEADER);
+  assert.ok(prompt.startsWith("Use Claude in Chrome to carry out the following steps"));
+  assert.match(composePrompt("T", "1. x"), /^Use computer use \(@Computer\)/, "ChatGPT keeps computer use");
+  assert.equal(buildAppLink(CLAUDE_DESKTOP_LINK_TEMPLATE, "a b&c"), "claude://claude.ai/new?q=a%20b%26c");
+  assert.match(renderTrampolinePage("claude://claude.ai/new?q=x", "N"), /Open Claude<\/a>/);
+  assert.equal(validateAppLinkTemplate("claude://claude.ai/new?q={prompt}") === null, false, "the setting still accepts only codex: and https:");
 });

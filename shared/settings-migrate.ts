@@ -60,5 +60,7 @@ export function migratePreferences(values: unknown, fromVersion: number): unknow
     next = { ...next };
     delete next.chromeProvider;
   }
+  // v18 drops the ChatGPT extension way: a stored "extension" becomes the ChatGPT app.
+  if (fromVersion < 18 && next.startMode === "extension") next = { ...next, startMode: "app" };
   return next;
 }

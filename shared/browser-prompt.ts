@@ -216,11 +216,11 @@ export function explodeMessage(
 }
 
 /** The full text placed on the clipboard and in the ChatGPT URL. */
-/** Header for the ChatGPT extension's side panel, which already works in the owner's browser. */
-export const CHATGPT_EXTENSION_HEADER =
-  "Use this browser to carry out the following steps for me, where I am already signed in. " +
-  "Stop and ask me before entering any password, token, or other secret, and before confirming " +
-  "any destructive or irreversible action.";
+/** Header for the Claude desktop app: it should carry the steps out in Chrome through Claude in Chrome. */
+export const CLAUDE_DESKTOP_HEADER =
+  "Use Claude in Chrome to carry out the following steps for me in my Chrome browser, where I am already signed in. " +
+  "Stop and ask me before entering any password, token, or other secret, and before confirming any destructive " +
+  "or irreversible action.";
 
 export function composePrompt(title: string, body: string, header: string = CHATGPT_HEADER): string {
   const heading = title ? `Task: ${title}\n\n` : "";
@@ -276,6 +276,12 @@ export const DEFAULT_APP_LINK_TEMPLATE = "codex://new?prompt={prompt}";
  * Schemes the app deep-link template may use: the ChatGPT desktop app's documented `codex:` scheme,
  * and `https:` for a web fallback. Everything else (javascript:, file:, other apps) is refused.
  */
+/**
+ * Documented deep link of the Claude desktop app (macOS, Windows, Linux): opens a new chat with `q`
+ * in the prompt field, not sent (https://support.claude.com/en/articles/14729294). Fixed, not a setting.
+ */
+export const CLAUDE_DESKTOP_LINK_TEMPLATE = "claude://claude.ai/new?q={prompt}";
+
 export const ALLOWED_APP_LINK_SCHEMES: readonly string[] = ["codex", "https"];
 
 /** Returns an error message, or null when the template is usable. */
@@ -295,7 +301,8 @@ export function isSafeLinkHref(href: string): boolean {
 }
 
 export function buildAppLink(template: string, prompt: string): string {
-  const usable = validateAppLinkTemplate(template) === null ? template.trim() : DEFAULT_APP_LINK_TEMPLATE;
+  const fixed = template.trim() === CLAUDE_DESKTOP_LINK_TEMPLATE;
+  const usable = fixed || validateAppLinkTemplate(template) === null ? template.trim() : DEFAULT_APP_LINK_TEMPLATE;
   return usable.split("{prompt}").join(encodeURIComponent(prompt));
 }
 
@@ -312,14 +319,15 @@ function escapeHtml(value: string): string {
 export function renderTrampolinePage(deepLink: string, nonce: string): string {
   const scriptLink = JSON.stringify(deepLink).replace(/</g, "\\u003c").replace(/\u2028|\u2029/g, " ");
   const href = escapeHtml(deepLink);
+  const app = /^claude:/i.test(deepLink) ? "Claude" : "ChatGPT";
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>Opening ChatGPT</title>
+<title>Opening ${app}</title>
 <style>body{font:15px -apple-system,system-ui,sans-serif;margin:3em auto;max-width:36em;padding:0 1em;color-scheme:light dark}</style>
 </head><body>
-<p>Opening ChatGPT&hellip; the prompt is also on your clipboard, so you can paste it. <a href="${href}">Open ChatGPT</a></p>
+<p>Opening ${app}&hellip; the prompt is also on your clipboard, so you can paste it. <a href="${href}">Open ${app}</a></p>
 <script nonce="${nonce}">location.replace(${scriptLink});</script>
 </body></html>
 `;

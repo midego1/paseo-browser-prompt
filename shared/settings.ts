@@ -16,18 +16,18 @@ export const MAX_RUNS = 200;
 export const preferences = defineSettings({
   id: "preferences",
   scope: "host",
-  version: 17,
+  version: 18,
   schema: z.object({
     /**
      * Desktop and web clients.
      * app: copy, then open the ChatGPT desktop app with the prompt prefilled via the trampoline.
      * web-agent: copy, then open chatgpt.com agent mode (prefilled when short and secret-free).
      * copy-only: copy and remind to paste.
-     * extension: copy for the ChatGPT Chrome extension's side panel (with a header for it).
+     * claude-desktop: copy, then open the Claude desktop app with the prompt prefilled.
      * paseo, chrome: a Paseo agent in the Paseo browser or in Claude in Chrome.
      * The card offers every way; this one is highlighted.
      */
-    startMode: z.enum(["app", "web-agent", "extension", "copy-only", "paseo", "chrome"]).default("app"),
+    startMode: z.enum(["app", "web-agent", "copy-only", "claude-desktop", "paseo", "chrome"]).default("app"),
     /** iOS and Android. No documented ChatGPT mobile deep link for a new prompt exists. */
     mobileStartMode: z.enum(["copy-only", "web-agent", "paseo", "chrome"]).default("copy-only"),
     /** Desktop app deep link; `{prompt}` is replaced by the URI-encoded prompt. */
