@@ -9,7 +9,8 @@ const unavailable = z.enum(["starting", "no-tailscale", "not-local", "port-in-us
  */
 export const stashPrompt = defineRpc({
   name: "trampoline.stash",
-  input: z.object({ prompt: z.string().min(1).max(20000) }),
+  /** `claude` opens the Claude desktop app instead of ChatGPT's. */
+  input: z.object({ prompt: z.string().min(1).max(20000), target: z.enum(["chatgpt", "claude"]).optional() }),
   output: z.union([z.object({ url: z.string().url() }), z.object({ unavailable })]),
 });
 

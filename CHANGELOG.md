@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.20.0 (unreleased)
+
+- New order: **Paseo** (Paseo browser) first, then **ChatGPT** (Desktop, Web), then **Claude**
+  (Desktop, Chrome tab), each with its mark. Copy and Mark done have their text again.
+- New: Claude › **Desktop** opens the Claude desktop app with the steps prefilled through its
+  documented `claude://claude.ai/new?q=` link, via the same launcher page as ChatGPT Desktop. The
+  prompt asks Claude to use Claude in Chrome; you press send.
+- Removed: the ChatGPT **Extension** button. A usual way stored as "extension" becomes ChatGPT
+  Desktop. **Chrome** is now **Chrome tab**.
+
 ## 0.19.5 (unreleased)
 
 - ChatGPT **Desktop** and **Web** ask for ChatGPT's own computer use (`@Computer`) again, not the

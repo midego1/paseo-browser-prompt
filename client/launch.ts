@@ -1,17 +1,17 @@
 import { openExternalUrl } from "@getpaseo/plugin/client";
 import { copyText } from "@getpaseo/plugin/client/react-native";
 import { Platform } from "react-native";
-import { CHATGPT_EXTENSION_HEADER, composePrompt, planChatGptLaunch } from "../shared/browser-prompt";
+import { CLAUDE_DESKTOP_HEADER, composePrompt, planChatGptLaunch } from "../shared/browser-prompt";
 import { LAUNCHER_UNAVAILABLE_MESSAGES } from "../shared/trampoline-host";
 
-export type StartMode = "app" | "web-agent" | "extension" | "copy-only";
+export type StartMode = "app" | "web-agent" | "copy-only";
 
-/** The way highlighted on the card: a way to open ChatGPT, or a Paseo agent in either browser. */
-export type UsualWay = StartMode | "paseo" | "chrome";
+/** The way highlighted on the card: ChatGPT, the Claude desktop app, or a Paseo agent in either browser. */
+export type UsualWay = StartMode | "claude-desktop" | "paseo" | "chrome";
 
 export interface ModeSettings {
   startMode: UsualWay;
-  mobileStartMode: Exclude<UsualWay, "app" | "extension">;
+  mobileStartMode: Exclude<UsualWay, "app" | "claude-desktop">;
 }
 
 export const DEFAULT_MODES: ModeSettings = { startMode: "app", mobileStartMode: "copy-only" };
@@ -24,7 +24,7 @@ export function effectiveMode(settings: ModeSettings): UsualWay {
 /** Server RPC that stashes the prompt and returns the one-time launcher URL, or why it is off. */
 /** How the Command Center opens ChatGPT when the usual way is a Paseo agent, which it cannot start. */
 export function chatGptMode(way: UsualWay): StartMode {
-  if (way !== "paseo" && way !== "chrome") return way;
+  if (way !== "paseo" && way !== "chrome" && way !== "claude-desktop") return way;
   return Platform.OS === "ios" || Platform.OS === "android" ? "copy-only" : "app";
 }
 
@@ -38,8 +38,6 @@ export interface ActionResult {
 }
 
 const PASTE_HINT = "Prompt copied. Paste it into ChatGPT (computer use).";
-const EXTENSION_HINT =
-  "Prompt copied. In Chrome, open the ChatGPT side panel (its toolbar icon, or ⌘⇧. on a Mac), paste and send.";
 
 /** Copies the prompt with the computer-use header, then opens ChatGPT according to the mode. */
 export async function startInChatGpt(
@@ -48,7 +46,7 @@ export async function startInChatGpt(
   mode: StartMode,
   stash: StashFn,
 ): Promise<ActionResult> {
-  const prompt = composePrompt(title, body, mode === "extension" ? CHATGPT_EXTENSION_HEADER : undefined);
+  const prompt = composePrompt(title, body);
   let copied = true;
   try {
     await copyText(prompt);
@@ -56,11 +54,6 @@ export async function startInChatGpt(
     copied = false;
   }
   const copyFailed = "Could not copy. Select the prompt text and copy it manually.";
-
-  // Nothing outside the extension can open its side panel or hand it a prompt, so the owner pastes.
-  if (mode === "extension") {
-    return copied ? { ok: true, message: EXTENSION_HINT } : { ok: false, message: copyFailed };
-  }
 
   if (mode === "copy-only") {
     return copied ? { ok: true, message: PASTE_HINT } : { ok: false, message: copyFailed };
@@ -109,6 +102,39 @@ export async function startInChatGpt(
         ? `Prompt not put in the URL (looks like it holds a secret). ${PASTE_HINT}`
         : PASTE_HINT,
   };
+}
+
+const CLAUDE_PASTE_HINT = "Prompt copied. Paste it into the Claude desktop app.";
+
+/**
+ * Copies the prompt with a header asking Claude to use Claude in Chrome, then opens the Claude
+ * desktop app with it prefilled through the launcher page (Paseo opens only http(s) links).
+ */
+export async function startInClaudeDesktop(title: string, body: string, stash: StashFn): Promise<ActionResult> {
+  const prompt = composePrompt(title, body, CLAUDE_DESKTOP_HEADER);
+  let copied = true;
+  try {
+    await copyText(prompt);
+  } catch {
+    copied = false;
+  }
+  const fallback = copied ? CLAUDE_PASTE_HINT : "Could not copy. Select the prompt text and copy it manually.";
+  let url: string;
+  try {
+    const outcome = await stash(prompt);
+    if ("unavailable" in outcome) {
+      return { ok: false, message: `${LAUNCHER_UNAVAILABLE_MESSAGES[outcome.unavailable].replace("ChatGPT", "App")}. ${fallback}` };
+    }
+    url = outcome.url;
+  } catch {
+    return { ok: false, message: `App launcher unreachable. ${fallback}` };
+  }
+  try {
+    await openExternalUrl(url);
+  } catch {
+    return { ok: false, message: `Could not open Claude. ${fallback}` };
+  }
+  return { ok: true, message: copied ? "Opening the Claude app (prompt also copied)." : "Opening the Claude app." };
 }
 
 export async function copyPrompt(title: string, body: string): Promise<ActionResult> {

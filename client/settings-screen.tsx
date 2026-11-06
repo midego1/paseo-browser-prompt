@@ -25,20 +25,20 @@ import { preferences } from "../shared/settings";
 import { LauncherSettings } from "./launcher-settings";
 import { UpdateSettings } from "./update-settings";
 
-const DESKTOP_OPTIONS: { label: string; value: "app" | "web-agent" | "extension" | "copy-only" | "paseo" | "chrome" }[] = [
-  { label: "ChatGPT app (macOS)", value: "app" },
-  { label: "ChatGPT web agent", value: "web-agent" },
-  { label: "ChatGPT extension (Chrome)", value: "extension" },
-  { label: "Copy only", value: "copy-only" },
+const DESKTOP_OPTIONS: { label: string; value: "app" | "web-agent" | "copy-only" | "claude-desktop" | "paseo" | "chrome" }[] = [
+  { label: "ChatGPT desktop", value: "app" },
+  { label: "ChatGPT web", value: "web-agent" },
+  { label: "Claude desktop", value: "claude-desktop" },
   { label: "Paseo browser", value: "paseo" },
-  { label: "Claude in Chrome", value: "chrome" },
+  { label: "Claude Chrome tab", value: "chrome" },
+  { label: "Copy only", value: "copy-only" },
 ];
 
 const MOBILE_OPTIONS: { label: string; value: "copy-only" | "web-agent" | "paseo" | "chrome" }[] = [
   { label: "Copy only", value: "copy-only" },
-  { label: "ChatGPT web agent", value: "web-agent" },
+  { label: "ChatGPT web", value: "web-agent" },
   { label: "Paseo browser", value: "paseo" },
-  { label: "Claude in Chrome", value: "chrome" },
+  { label: "Claude Chrome tab", value: "chrome" },
 ];
 
 const THINKING_OPTIONS: { label: string; value: string }[] = [
