@@ -137,6 +137,22 @@ export function sharedRunRecord<Entry extends readonly string[]>(
   return null;
 }
 
+/** Records kept per card key: an earlier run that is still going keeps its record. */
+export const MAX_RUNS_PER_CARD = 5;
+
+/**
+ * Adds a run record, newest last. Earlier runs of the same card keep their records (up to
+ * MAX_RUNS_PER_CARD per card, then `max` in total, oldest dropped first): the server checks a run's
+ * mode and reports it back only while its own record exists, and the card shows the newest.
+ */
+export function addRunRecord<Entry extends readonly string[]>(runs: readonly Entry[], entry: Entry, max: number): Entry[] {
+  const [key, id] = entry;
+  const others = runs.filter((record) => !(record[0] === key && record[1] === id));
+  const sameCard = others.filter((record) => record[0] === key);
+  const drop = new Set(sameCard.slice(0, Math.max(0, sameCard.length - (MAX_RUNS_PER_CARD - 1))));
+  return [...others.filter((record) => !drop.has(record)), entry].slice(-max);
+}
+
 /** Run states during which a run is still going (a repeat does not start a second one then). */
 const ACTIVE_RUN_STATES = new Set(["starting", "running", "needs-input", "asking"]);
 

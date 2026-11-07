@@ -119,6 +119,7 @@ export type ReportResult =
   | "sent-status"
   | "sent-closed"
   | "not-forwarded-closed"
+  | "question-stale"
   | "canceled"
   | "aborted"
   | "duplicate"
@@ -203,7 +204,11 @@ export function createReportBack(options: ReportBackOptions) {
   const reported: string[] = [];
   /** Runs whose delivery failed once; a second failure keeps them claimed. */
   const retried = new Set<string>();
-  const inFlight = new Set<string>();
+  /**
+   * Runs whose turn is being read or claimed, with the handler that holds them. Released before a long
+   * wait for a busy chat, so a later turn of the same run is not taken for a duplicate.
+   */
+  const inFlight = new Map<string, symbol>();
   /** Questions each run sent to the chat (in memory; a plugin reload resets the count). */
   const questionCounts = new Map<string, number>();
   /** Turns whose question was already handled, so a repeated event is not forwarded twice. */
@@ -421,6 +426,8 @@ export function createReportBack(options: ReportBackOptions) {
     question: string,
     messageId: string | null,
     signal: AbortSignal,
+    superseded: () => boolean,
+    leave: () => void,
   ): Promise<ReportResult | null> {
     const runId = event.agent.id;
     const run = paseo.agents.ref(runId);
@@ -462,13 +469,23 @@ export function createReportBack(options: ReportBackOptions) {
     if (questionCounts.size > 1000) questionCounts.delete(questionCounts.keys().next().value!);
     const message = buildQuestionMessage({ title: event.agent.title, runId, question, index: asked + 1, max });
     const deadline = Date.now() + busyWaitMs;
+    // The turn is handled from here on (its key guards a repeated event), so a later turn of the run
+    // may report while this one waits.
+    if (turnKey) leave();
     const delivered = await enqueue(sourceId, async () => {
       const settled = await waitUntilSettled(source, deadline, signal);
       if (typeof settled === "string") return settled;
       if (signal.aborted) throw new AbortedError();
+      // The owner answered the run in the meantime: the question is out of date.
+      if (superseded()) return "stale" as const;
       await source.send(message, { activeTurnBehavior: "steer" });
       return "sent" as const;
     });
+    // Neither the chat nor the run is told about a question the run has moved past.
+    if (delivered === "stale" || (delivered !== "sent" && superseded())) {
+      log(`question of run ${runId} not forwarded; the run went on in the meantime`);
+      return "question-stale";
+    }
     if (delivered === "missing") return redirect(run, runId, "chat-unavailable", max);
     if (delivered === "timeout") return redirect(run, runId, "chat-busy", max);
     log(`forwarded question ${asked + 1} of run ${runId} to agent ${sourceId}`);
@@ -500,7 +517,7 @@ export function createReportBack(options: ReportBackOptions) {
   function onTurnEnded(event: TurnEndedEvent, paseo: ReportBackPaseo): Promise<ReportResult> {
     const seq = noteTurn(event);
     const verdict = { succeeded: false };
-    const task = handle(event, paseo, verdict).then(async (result) => {
+    const task = handle(event, paseo, verdict, seq).then(async (result) => {
       if (verdict.succeeded) await archiveIfSucceeded(event, paseo, result, seq);
       return result;
     });
@@ -509,9 +526,10 @@ export function createReportBack(options: ReportBackOptions) {
     return task;
   }
 
-  async function handle(event: TurnEndedEvent, paseo: ReportBackPaseo, verdict: { succeeded: boolean }): Promise<ReportResult> {
+  async function handle(event: TurnEndedEvent, paseo: ReportBackPaseo, verdict: { succeeded: boolean }, seq: number): Promise<ReportResult> {
     const runId = event.agent.id;
     const signal = lifetime.signal;
+    const superseded = () => latestTurns.get(runId)?.seq !== seq;
     // A stopped run is not a report; a later turn of the same agent may still report.
     if (event.outcome.kind === "canceled") {
       markConcluded(runId);
@@ -521,7 +539,11 @@ export function createReportBack(options: ReportBackOptions) {
     if ((notRuns.get(runId) ?? 0) > Date.now()) return "not-a-run";
     await loaded;
     if (inFlight.has(runId)) return "duplicate";
-    inFlight.add(runId);
+    const holder = Symbol(runId);
+    inFlight.set(runId, holder);
+    const leave = () => {
+      if (inFlight.get(runId) === holder) inFlight.delete(runId);
+    };
     let claimed = false;
     try {
       const run = paseo.agents.ref(runId);
@@ -546,7 +568,7 @@ export function createReportBack(options: ReportBackOptions) {
       const finalText = final?.text ?? "";
       const question = event.outcome.kind === "completed" ? parseQuestion(stripRunSuccessMarker(finalText)) : null;
       if (question !== null) {
-        const handled = await handleQuestion(event, paseo, labels, runSnapshot, question, final?.messageId ?? null, signal);
+        const handled = await handleQuestion(event, paseo, labels, runSnapshot, question, final?.messageId ?? null, signal, superseded, leave);
         if (handled !== null) return handled;
         // Past its redirects: fall through and handle this turn as the run's report.
       }
@@ -617,6 +639,8 @@ export function createReportBack(options: ReportBackOptions) {
       // from here, so waiting behind other reports for the same source counts against it.
       claim(runId);
       claimed = true;
+      // The claim now guards against a second report; the wait below can take hours.
+      leave();
       const deadline = Date.now() + busyWaitMs;
       const delivered = await enqueue(sourceId, async () => {
         const settled = await waitUntilSettled(source, deadline, signal);
@@ -657,7 +681,7 @@ export function createReportBack(options: ReportBackOptions) {
       if (claimed) release(runId);
       return "failed";
     } finally {
-      inFlight.delete(runId);
+      leave();
     }
   }
 

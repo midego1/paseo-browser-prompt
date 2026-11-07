@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.20.1 (unreleased)
+
+- Fixed: a run whose question waited for a busy chat no longer loses its report. When the owner
+  answered the run directly and it finished, that turn was taken for a duplicate, so the report was
+  never sent and the run was not archived. A question the run has moved past is now dropped: the
+  chat does not get it, and the finished run gets no redirect notice that would start a new turn.
+- Fixed: running a card again keeps the earlier run's record (up to 5 per card), so a run that is
+  still going stays under the mode check, can still ask the chat and still reports back. Before,
+  the newer run replaced it, and the earlier run was neither checked nor heard from again.
+
 ## 0.20.0 (unreleased)
 
 - New order: **Paseo** (Paseo browser) first, then **ChatGPT** (Desktop, Web), then **Claude**

@@ -258,6 +258,34 @@ test("the same question turn is forwarded once", async () => {
   assert.equal(w.sent.length, 1);
 });
 
+test("a question waiting on a busy chat does not swallow the run's later report", async () => {
+  const w = world({ source: { status: "running" }, finals: [QUESTION, REPORT] });
+  const reportBack = createReportBack(options());
+  const asking = reportBack.onTurnEnded(ended("t1"), w.paseo);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  // The owner answered the run directly; it finished with its report while the chat stayed busy.
+  w.next();
+  const reporting = reportBack.onTurnEnded(ended("t2"), w.paseo);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  w.agents[SOURCE].status = "idle";
+  assert.equal(await asking, "question-stale", "the run went on, so the question is out of date");
+  assert.equal(await reporting, "sent", "the report is not taken for a duplicate");
+  assert.deepEqual(w.sent.map((m) => m.id), [SOURCE], "only the report reaches the chat");
+  assert.match(w.sent[0].text, /Example Domain/);
+});
+
+test("a question that times out after the run went on sends no redirect to the finished run", async () => {
+  const w = world({ source: { status: "running" }, finals: [QUESTION, REPORT] });
+  const reportBack = createReportBack(options({ busyWaitMs: 60 }));
+  const asking = reportBack.onTurnEnded(ended("t1"), w.paseo);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  w.next();
+  const reporting = reportBack.onTurnEnded(ended("t2"), w.paseo);
+  assert.equal(await asking, "question-stale");
+  assert.equal(await reporting, "busy-timeout");
+  assert.deepEqual(w.sent, [], "no turn is started on the finished run");
+});
+
 test("unrecorded runs get nothing forwarded and no reply; a missing chat sends the run to the owner", async () => {
   const spoof = world({ finals: [QUESTION] });
   const reportBack = createReportBack(options({ recordedRun: async () => null }));
