@@ -311,6 +311,31 @@ test("a question that times out while the run is busy with a new turn sends it n
   assert.deepEqual(w.sent, [], "nothing steers into the owner's turn");
 });
 
+test("a question is not forwarded once the run was closed or archived while it waited", async () => {
+  for (const closing of [{ status: "closed" }, { archivedAt: "2026-01-01T00:00:00Z" }]) {
+    const w = world({ source: { status: "running" }, finals: [QUESTION] });
+    const reportBack = createReportBack(options());
+    const asking = reportBack.onTurnEnded(ended("t1"), w.paseo);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    Object.assign(w.agents[RUN], closing);
+    w.agents[SOURCE].status = "idle";
+    assert.equal(await asking, "question-stale", JSON.stringify(closing));
+    assert.deepEqual(w.sent, [], "the chat is not asked for a run that is gone");
+  }
+});
+
+test("a question that times out after the run closed sends it nothing", async () => {
+  for (const closing of [{ status: "closed" }, { archivedAt: "2026-01-01T00:00:00Z" }]) {
+    const w = world({ source: { status: "running" }, finals: [QUESTION] });
+    const reportBack = createReportBack(options({ busyWaitMs: 60 }));
+    const asking = reportBack.onTurnEnded(ended("t1"), w.paseo);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    Object.assign(w.agents[RUN], closing);
+    assert.equal(await asking, "not-forwarded-closed", JSON.stringify(closing));
+    assert.deepEqual(w.sent, [], "a redirect notice would load the closed run");
+  }
+});
+
 test("the question turn itself still settling, or an unreadable run status, keeps the question forwarded", async () => {
   const settling = world({ finals: [QUESTION] });
   settling.agents[RUN] = { ...settling.agents[RUN], status: "running", activeTurn: { turnId: "t1", startedAt: null } };

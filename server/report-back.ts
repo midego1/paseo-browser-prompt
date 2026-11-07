@@ -394,19 +394,31 @@ export function createReportBack(options: ReportBackOptions) {
    * Tells the run its question did not reach the chat, so it asks the owner instead. Returns null,
    * sending nothing, once the run had MAX_REDIRECTS notices: the caller then treats the turn as the
    * run's report. A run closed by now (the wait for a busy chat can take hours) gets no notice: a send
-   * would load it and start a turn.
+   * would load it and start a turn. A caller that just read the run passes what it found (`known`).
    */
-  async function redirect(run: ReturnType<ReportBackPaseo["agents"]["ref"]>, runId: string, reason: RedirectReason, max: number) {
+  async function redirect(
+    run: ReturnType<ReportBackPaseo["agents"]["ref"]>,
+    runId: string,
+    reason: RedirectReason,
+    max: number,
+    known?: Awaited<ReturnType<typeof runState>>,
+  ) {
     const count = redirectCounts.get(runId) ?? 0;
     if (count >= MAX_REDIRECTS) {
       log(`run ${runId} kept asking after ${count} redirects; handling its turn as the report`);
       return null;
     }
-    const fresh = await run.refresh().catch(() => {
-      log(`could not read the status of run ${runId}; sending its redirect notice anyway`);
-      return null;
-    });
-    if (fresh && !mayLoadRun(fresh.agent)) {
+    const closed =
+      known !== undefined
+        ? known === "closed"
+        : await run.refresh().then(
+            (fresh) => !!fresh && !mayLoadRun(fresh.agent),
+            () => {
+              log(`could not read the status of run ${runId}; sending its redirect notice anyway`);
+              return false;
+            },
+          );
+    if (closed) {
       log(`question of run ${runId} not forwarded; the run is closed or archived, so it is not told`);
       return "not-forwarded-closed" as const;
     }
@@ -506,19 +518,18 @@ export function createReportBack(options: ReportBackOptions) {
       await source.send(message, { activeTurnBehavior: "steer" });
       return "sent" as const;
     });
+    // Before a redirect, one read of the run covers both the busy check here and redirect()'s closed check.
+    const state = delivered === "timeout" || delivered === "missing" ? await runState(run, event) : undefined;
     // Neither the chat nor the run is told about a question the run has moved past. A closed run is
     // left to redirect(), which sends it nothing.
-    if (
-      delivered === "stale" ||
-      (delivered !== "sent" && (movedPast(runId, turnKey) || (await runState(run, event)) === "busy"))
-    ) {
+    if (delivered === "stale" || (delivered !== "sent" && (movedPast(runId, turnKey) || state === "busy"))) {
       // Not forwarded, so it does not count against the run's questions.
       if (questionCounts.get(runId) === asked + 1) questionCounts.set(runId, asked);
       log(`question of run ${runId} not forwarded; the run went on in the meantime`);
       return "question-stale";
     }
-    if (delivered === "missing") return redirect(run, runId, "chat-unavailable", max);
-    if (delivered === "timeout") return redirect(run, runId, "chat-busy", max);
+    if (delivered === "missing") return redirect(run, runId, "chat-unavailable", max, state);
+    if (delivered === "timeout") return redirect(run, runId, "chat-busy", max, state);
     log(`forwarded question ${asked + 1} of run ${runId} to agent ${sourceId}`);
     return "question-sent";
   }
