@@ -147,7 +147,8 @@ function world({ source = {}, finals = [], runLabels: labels = runLabels(SOURCE,
           async refresh() {
             const agent = agents[id];
             if (!agent) return null;
-            return { agent: { ...agent, pendingPermissions: [], activeTurn: null, archivedAt: agent.archivedAt ?? null } };
+            if (agent.refreshError) throw new Error("no answer");
+            return { agent: { pendingPermissions: [], activeTurn: null, ...agent, archivedAt: agent.archivedAt ?? null } };
           },
           timeline: {
             async refetch() {
@@ -284,6 +285,48 @@ test("a question that times out after the run went on sends no redirect to the f
   assert.equal(await asking, "question-stale");
   assert.equal(await reporting, "busy-timeout");
   assert.deepEqual(w.sent, [], "no turn is started on the finished run");
+});
+
+test("a question is not forwarded once the owner started a new turn of the run, before that turn ended", async () => {
+  for (const busy of [{ status: "running", activeTurn: { turnId: "t2", startedAt: null } }, { pendingPermissions: [{ id: "p1" }] }]) {
+    const w = world({ source: { status: "running" }, finals: [QUESTION] });
+    const reportBack = createReportBack(options());
+    const asking = reportBack.onTurnEnded(ended("t1"), w.paseo);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The owner answered the run directly; its new turn is still going when the chat goes idle.
+    Object.assign(w.agents[RUN], busy);
+    w.agents[SOURCE].status = "idle";
+    assert.equal(await asking, "question-stale", JSON.stringify(busy));
+    assert.deepEqual(w.sent, [], "the chat's answer would steer into the owner's turn");
+  }
+});
+
+test("a question that times out while the run is busy with a new turn sends it no redirect", async () => {
+  const w = world({ source: { status: "running" }, finals: [QUESTION] });
+  const reportBack = createReportBack(options({ busyWaitMs: 60 }));
+  const asking = reportBack.onTurnEnded(ended("t1"), w.paseo);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  Object.assign(w.agents[RUN], { status: "running", activeTurn: { turnId: "t2", startedAt: null } });
+  assert.equal(await asking, "question-stale");
+  assert.deepEqual(w.sent, [], "nothing steers into the owner's turn");
+});
+
+test("the question turn itself still settling, or an unreadable run status, keeps the question forwarded", async () => {
+  const settling = world({ finals: [QUESTION] });
+  settling.agents[RUN] = { ...settling.agents[RUN], status: "running", activeTurn: { turnId: "t1", startedAt: null } };
+  assert.equal(await createReportBack(options()).onTurnEnded(ended("t1"), settling.paseo), "question-sent");
+  assert.deepEqual(settling.sent.map((m) => m.id), [SOURCE]);
+
+  const w = world({ source: { status: "running" }, finals: [QUESTION] });
+  const logs = [];
+  const reportBack = createReportBack(options({ log: (line) => logs.push(line) }));
+  const asking = reportBack.onTurnEnded(ended("t1"), w.paseo);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  w.agents[RUN].refreshError = true;
+  w.agents[SOURCE].status = "idle";
+  assert.equal(await asking, "question-sent");
+  assert.deepEqual(w.sent.map((m) => m.id), [SOURCE]);
+  assert.ok(logs.includes(`could not read the status of run ${RUN}; its question is handled as still open`));
 });
 
 test("a repeated event without a turn id does not make a waiting question stale", async () => {

@@ -7,7 +7,9 @@
   never sent and the run was not archived (fixed for turns that carry a turn or message id, as Paseo
   sends them). A question the run has moved past is now dropped: the chat does not get it, it does
   not count against the run's questions, and the finished run gets no redirect notice that would
-  start a new turn.
+  start a new turn. That includes a run already busy with a new turn the owner started (or waiting
+  on a permission in it) when the chat frees up or the wait times out, so neither the chat's answer
+  nor a redirect notice steers into the owner's turn.
 - Fixed: running a card again keeps the earlier run's record (up to 5 per card), so a run that is
   still going stays under the mode check, can still ask the chat and still reports back. Before,
   the newer run replaced it, and the earlier run was neither checked nor heard from again. Each run

@@ -418,6 +418,24 @@ export function createReportBack(options: ReportBackOptions) {
   }
 
   /**
+   * The run's state while its question waits: "busy" with a turn after the question's (an active turn
+   * with another turn id, or a pending permission), "closed" when closed, archived or gone, else
+   * "waiting". An active turn with the question's own id, or any while that id is unknown, is the
+   * question turn still settling. Null, logged, when the status could not be read.
+   */
+  async function runState(run: ReturnType<ReportBackPaseo["agents"]["ref"]>, event: TurnEndedEvent) {
+    const fresh = await run.refresh().catch(() => undefined);
+    if (fresh === undefined) {
+      log(`could not read the status of run ${event.agent.id}; its question is handled as still open`);
+      return null;
+    }
+    if (!fresh || !mayLoadRun(fresh.agent)) return "closed" as const;
+    const active = fresh.agent.activeTurn as { turnId?: unknown } | null | undefined;
+    const newTurn = !!active && !!event.turnId && typeof active.turnId === "string" && active.turnId !== event.turnId;
+    return newTurn || (fresh.agent.pendingPermissions?.length ?? 0) > 0 ? ("busy" as const) : ("waiting" as const);
+  }
+
+  /**
    * A run ended its turn with a question for the chat. It is never claimed as the run's report.
    * Forwarded, framed by the plugin, only while "Talk to the chat" is on and under the run's cap,
    * and only for runs a card recorded; otherwise the run is told to ask the owner. Returns null when
@@ -483,11 +501,17 @@ export function createReportBack(options: ReportBackOptions) {
       if (signal.aborted) throw new AbortedError();
       // The owner answered the run in the meantime: the question is out of date.
       if (movedPast(runId, turnKey)) return "stale" as const;
+      const state = await runState(run, event);
+      if (state === "busy" || state === "closed") return "stale" as const;
       await source.send(message, { activeTurnBehavior: "steer" });
       return "sent" as const;
     });
-    // Neither the chat nor the run is told about a question the run has moved past.
-    if (delivered === "stale" || (delivered !== "sent" && movedPast(runId, turnKey))) {
+    // Neither the chat nor the run is told about a question the run has moved past. A closed run is
+    // left to redirect(), which sends it nothing.
+    if (
+      delivered === "stale" ||
+      (delivered !== "sent" && (movedPast(runId, turnKey) || (await runState(run, event)) === "busy"))
+    ) {
       // Not forwarded, so it does not count against the run's questions.
       if (questionCounts.get(runId) === asked + 1) questionCounts.set(runId, asked);
       log(`question of run ${runId} not forwarded; the run went on in the meantime`);
