@@ -194,8 +194,11 @@ export function BrowserPromptCard({
   // A later copy of a block in this chat is a full card with a hint (its buttons share the first's
   // done mark and run), and with "Collapse repeated blocks that are done" a done copy is one line
   // until the owner taps Show. Which block is first comes from the chat's index (client/chat-index).
+  // With collapsing off the index only matters while the shared run is going (the run guard below),
+  // so the chat is read then and not for every card.
   const collapse = settings.status === "ready" ? settings.values.mergeRepeats : true;
-  const first = withinMessage(useFirstOf(paseo, agentId, fingerprint, messageId, index, true), sameAs, messageId);
+  const sharedRunGoing = !!runAgentId && !canStartRun({ repeat: true, runState: shownState });
+  const first = withinMessage(useFirstOf(paseo, agentId, fingerprint, messageId, index, collapse || sharedRunGoing), sameAs, messageId);
   const isRepeat = first.state === "repeat";
   const [expanded, setExpanded] = useState(false);
   const view = repeatView({ collapse, first, done, expanded });
@@ -295,14 +298,26 @@ export function BrowserPromptCard({
     }
   }
 
+  /** Saves the done mark; a save that loses a revision race is retried against the newest settings. */
   async function toggleDone() {
     const next = !done;
     setLocalDone(next);
     if (settings.status !== "ready") return; // stays in memory for this session
-    const without = settings.values.done.filter((mark) => mark !== doneMark && mark !== runKey);
-    const list = next ? [...without, doneMark].slice(-MAX_DONE) : without;
-    const saved = await settings.save({ ...settings.values, done: list }, settings.revision);
-    if (saved) setLocalDone(null);
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const current = latestSettings.current;
+      if (current.status === "ready") {
+        const without = current.values.done.filter((mark) => mark !== doneMark && mark !== runKey);
+        const list = next ? [...without, doneMark].slice(-MAX_DONE) : without;
+        if (await current.save({ ...current.values, done: list }, current.revision)) {
+          setLocalDone(null);
+          return;
+        }
+      }
+      await current.reload();
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+    }
+    setLocalDone(null);
+    toast.error(next ? "Could not save the done mark; try again." : "Could not remove the done mark; try again.");
   }
 
   const displayTitle = title || `Browser prompt ${index + 1}`;

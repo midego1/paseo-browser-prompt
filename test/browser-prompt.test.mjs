@@ -15,6 +15,7 @@ import {
   trampolineHeaders,
   validateAppLinkTemplate,
   isSafeLinkHref,
+  looksLikeSecret,
 } from "../shared/browser-prompt.ts";
 
 const FENCE = "```";
@@ -125,6 +126,58 @@ test("launch plan: clipboard only when too long or secret-looking", () => {
   assert.equal(planChatGptLaunch(longHex).prefilled, false);
 });
 
+test("secret heuristic: Stripe, GitLab, Google, Twilio, hex runs, URL credentials and assigned values", () => {
+  // Built from pieces so secret scanners do not flag the fixtures.
+  const hex32 = "0123456789abcdef".repeat(2);
+  const secrets = [
+    "s" + "k_live_" + "4eC39HqLyjWDarjtT1zdp7dc",
+    "r" + "k_live_" + "4eC39HqLyjWDarjtT1zdp7dc",
+    "s" + "k_test_" + "4eC39HqLyjWDarjtT1zdp7dc",
+    "gl" + "pat-" + "xY7aBc9dEf1GhIjKlMnO",
+    "AI" + "za" + "SyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY",
+    "S" + "K" + hex32,
+    hex32,
+    "a1b2c3d4".repeat(5),
+    "https://" + "deploy:hunter2" + "@registry.example.com/v2",
+    "ftp://" + "admin:pa55" + "@files.example.com",
+    "Password: " + "hunter2",
+    "password=" + "Summer2026!",
+    "api_key=" + "abc123def456",
+    "API key: " + "s3cr3tValue",
+    'client_secret="' + "Zx9mQ2pL7vR4" + '"',
+    "token = " + "12345678",
+    "access_token=" + "ya29abc1def2",
+  ];
+  for (const text of secrets) {
+    assert.equal(looksLikeSecret(`1. Open the page\n2. Paste ${text} into the field`), true, text);
+    assert.equal(planChatGptLaunch(composePrompt("Leak", `Paste ${text}`)).reason, "possible-secret", text);
+  }
+});
+
+test("secret heuristic: ordinary step text is not taken for a secret", () => {
+  const ordinary = [
+    "1. Open https://github.com/acme/webshop/settings/secrets/actions\n2. Click New repository secret\n3. Name: DEPLOY_TOKEN\n4. Secret: paste the value from your password manager",
+    "Secret: DEPLOY_TOKEN_V2",
+    "Token: <paste it yourself>",
+    "API key: ${API_KEY}",
+    "API key: $API_KEY",
+    "Password: ********",
+    "Password: ask me before typing it",
+    "Token:\n2. Open the tokens page",
+    "Tokens: 1000 per day",
+    "Secret: https://github.com/acme/webshop/settings/secrets/actions/new",
+    "Open http://localhost:3000/login and sign in",
+    "Open https://example.com:8443/path@v2 and https://medium.com/@acme",
+    "Email support@example.com about it",
+    "Request id 123e4567-e89b-12d3-a456-426614174000",
+    "Check commit a1b2c3d and 0123456789abcdef0123456789abcde",
+    "The secretary: Anna, room 12",
+    "Order SKU 12345 and AIza is not a key",
+    "Rotate the sk_live key in the Stripe dashboard",
+  ];
+  for (const text of ordinary) assert.equal(looksLikeSecret(text), false, text);
+});
+
 test("app deep link: documented codex://new?prompt= with encoded prompt", () => {
   const prompt = composePrompt("T", "1. Open https://github.com/a?b=c&d=e\n2. Say \"hi\" <script>");
   const link = buildAppLink(DEFAULT_APP_LINK_TEMPLATE, prompt);
@@ -164,6 +217,11 @@ test("message links open only for http(s) URLs", () => {
   for (const bad of ["javascript:alert(1)", "file:///etc/passwd", "codex://new?prompt=x", "vscode://x", "data:text/html,x", "//example.com", "mailto:a@example.com", "https://"]) {
     assert.equal(isSafeLinkHref(bad), false, bad);
   }
+  for (const code of [0x00, 0x01, 0x08, 0x1b, 0x1f, 0x7f]) {
+    const bad = `https://example.com/a${String.fromCharCode(code)}b`;
+    assert.equal(isSafeLinkHref(bad), false, `U+${code.toString(16).padStart(4, "0")}`);
+  }
+  assert.equal(isSafeLinkHref("https://example.com/caf\u00e9"), true, "other non-ASCII stays allowed");
 });
 
 test("listing media: GIF first, each file packaged, sizes bounded; the X cut and other stills stay out", async () => {

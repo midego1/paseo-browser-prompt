@@ -86,7 +86,12 @@ test("a card whose message is not known yet (new, streaming, or no message id) i
 test("cards are placed by message id: Paseo gives every card of a chat the same timestamp", () => {
   const card = read("client/card.tsx");
   assert.doesNotMatch(card.slice(card.indexOf("const first = ")), /timestamp\.getTime\(\), index \}/);
-  assert.match(card, /useFirstOf\(paseo, agentId, fingerprint, messageId, index, true\)/, "always placed: the run guard needs it even with collapsing off");
+  assert.match(
+    card,
+    /useFirstOf\(paseo, agentId, fingerprint, messageId, index, collapse \|\| sharedRunGoing\)/,
+    "placed when collapsing is on, and with it off while the shared run is going (the run guard needs it)",
+  );
+  assert.match(card, /const sharedRunGoing = !!runAgentId && !canStartRun\(\{ repeat: true, runState: shownState \}\);/);
   assert.match(read("index.client.tsx"), /explodeMessage\(item\.text, phase, messageId\)/);
   const [card1] = explodeMessage("```browser-prompt T\n1. x\n```", "complete", "msg-1");
   assert.equal(card1.data.messageId, "msg-1");
@@ -180,6 +185,31 @@ test("no scrolling to the first card, no toast; a collapsed copy expands in plac
   assert.match(card, /setExpanded\(false\)\}>\n\s+<Text style=\{styles\.link\}>Hide<\/Text>/);
   assert.doesNotMatch(read("client/chat-index.ts"), /flash/i);
   assert.match(read("client/settings-screen.tsx"), /label="Collapse repeated blocks that are done"/);
+});
+
+test("with collapsing off, the chat is read only while the shared run is going; done marks and runs stay shared", () => {
+  const card = read("client/card.tsx");
+  // The order matters: the run state is known before the card asks the index.
+  assert.ok(card.indexOf("const shownState =") < card.indexOf("const sharedRunGoing ="));
+  for (const state of ["starting", "running", "needs-input", "asking"]) assert.equal(canStartRun({ repeat: true, runState: state }), false, state);
+  for (const state of ["done", "failed", "stopped", "unknown"]) assert.equal(canStartRun({ repeat: true, runState: state }), true, state);
+  // Done marks and the shared run are keyed by content, not by the chat index.
+  assert.match(card, /const doneMark = `\$\{agentId\}:\$\{key\}`;/);
+  assert.match(card, /sharedRunRecord\(settings\.values\.runs, agentId, runKey, key\)/);
+  assert.equal(repeatView({ collapse: false, first: { state: "first" }, done: true, expanded: false }), "full");
+  const index = read("client/chat-index.ts");
+  assert.match(index, /if \(!enabled \|\| !messageId\) return;/, "a disabled card does not read the chat");
+});
+
+test("toggling done retries a lost save against reloaded settings, then tells the owner and resets", () => {
+  const card = read("client/card.tsx");
+  const body = card.slice(card.indexOf("async function toggleDone()"), card.indexOf("const displayTitle ="));
+  assert.match(body, /for \(let attempt = 0; attempt < 4; attempt\+\+\)/);
+  assert.match(body, /const current = latestSettings\.current;/);
+  assert.match(body, /current\.values\.done\.filter/, "the list is rebuilt from the newest settings");
+  assert.match(body, /current\.save\(\{ \.\.\.current\.values, done: list \}, current\.revision\)/);
+  assert.match(body, /await current\.reload\(\);/);
+  assert.match(body, /\}\n\s+setLocalDone\(null\);\n\s+toast\.error\(/, "after the retries the local mark is reset and an error shown");
 });
 
 test("the run record keeps the server's fallback marker at position 2", () => {

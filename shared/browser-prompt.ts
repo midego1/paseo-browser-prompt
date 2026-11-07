@@ -235,13 +235,37 @@ const SECRET_PATTERNS = [
   /\bAKIA[0-9A-Z]{16}\b/,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
   /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/,
+  /\b[sr]k_(live|test)_[A-Za-z0-9]{10,}/,
+  /\bglpat-[A-Za-z0-9_-]{20,}/,
+  /\bAIza[0-9A-Za-z_-]{35}/,
+  /\bSK[0-9a-fA-F]{32}\b/,
+  // Bare hex run as long as an API key or hash secret; git short SHAs and UUIDs stay below it.
+  /\b[0-9a-fA-F]{32,}\b/,
+  // Credentials in a URL: scheme://user:password@host.
+  /\b[a-z][a-z0-9+.-]*:\/\/[^\s/?#@:]+:[^\s/?#@]+@/i,
   // Long opaque run without slashes or dots, so ordinary URLs and names do not match.
   /[A-Za-z0-9+_=-]{40,}/,
 ];
 
+/** `password: x`, `api_key=x`, `client_secret = "x"` on one line; the value is checked separately. */
+const ASSIGNED_SECRET = /(?<![A-Za-z])(?:password|passwd|secret|token|api[ _-]?key)s?[ \t]*[:=][ \t]*["'`]?([^\s"'`<>{}()[\],;]{6,})/gi;
+
+/** A value after `password:` and the like, as opposed to a secret's name, a placeholder or prose. */
+function isAssignedValue(value: string): boolean {
+  if (/^[A-Z][A-Z0-9_]*$/.test(value)) return false; // a name such as DEPLOY_TOKEN
+  if (/^[$%]/.test(value)) return false; // a variable such as $API_KEY or %TOKEN%
+  if (/^[*•x.]+$/i.test(value)) return false; // masked
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return false; // a URL, for example to the settings page
+  return /[0-9]/.test(value); // words in a sentence carry no digits; credentials nearly always do
+}
+
 /** True when the text looks like it contains a credential value rather than a name. */
 export function looksLikeSecret(text: string): boolean {
-  return SECRET_PATTERNS.some((pattern) => pattern.test(text));
+  if (SECRET_PATTERNS.some((pattern) => pattern.test(text))) return true;
+  for (const match of text.matchAll(ASSIGNED_SECRET)) {
+    if (isAssignedValue(match[1]!.replace(/[.!?]+$/, ""))) return true;
+  }
+  return false;
 }
 
 export interface LaunchPlan {
@@ -297,7 +321,10 @@ export function validateAppLinkTemplate(template: string): string | null {
 
 /** Links in rendered agent messages are opened only when they are plain http(s) URLs. */
 export function isSafeLinkHref(href: string): boolean {
-  return /^https?:\/\/[^\s]+$/i.test(href.trim());
+  const trimmed = href.trim();
+  // Control characters (U+0000-U+001F, U+007F) can hide or split the real target.
+  if (/[\u0000-\u001f\u007f]/.test(trimmed)) return false;
+  return /^https?:\/\/[^\s]+$/i.test(trimmed);
 }
 
 export function buildAppLink(template: string, prompt: string): string {
