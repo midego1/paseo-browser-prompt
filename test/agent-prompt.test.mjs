@@ -419,6 +419,25 @@ test("server mode guard skips agents without run labels for a while, then reads 
   guard.dispose();
 });
 
+test("server mode guard does not skip an agent whose snapshot or labels could not be read", async () => {
+  const { server } = captureHooks();
+  const guard = registerModeGuard(server, recordedRuns([["src:c1", "run"]]), { log: () => {}, recordWaitMs: 0 });
+  const run = fakeRun({ modes: ["bypassPermissions"], labels: runLabels("src", "c1") });
+  const refresh = run.handle.refresh;
+  const misses = [null, { agent: { currentModeId: "bypassPermissions" } }, { agent: { currentModeId: "bypassPermissions", labels: null } }];
+  run.handle.refresh = async () => (misses.length ? (run.calls.refresh++, misses.shift()) : refresh());
+  const paseo = { agents: { ref: () => run.handle } };
+  const agent = { id: "run", provider: "claude" };
+  // First no snapshot, then a snapshot without labels, then labels null: none of them is cached.
+  for (let i = 0; i < 3; i++) await guard.check(agent, paseo);
+  assert.equal(run.calls.refresh, 3);
+  assert.equal(run.calls.archive, 0);
+  await guard.check(agent, paseo);
+  assert.ok(run.calls.refresh >= 4, "the labelled snapshot is read on the next turn");
+  assert.equal(run.calls.archive, 1, "the run in bypass mode is stopped");
+  guard.dispose();
+});
+
 test("server mode guard keeps checking real runs on every turn", async () => {
   const { server } = captureHooks();
   const guard = registerModeGuard(server, recordedRuns([["src:c1", "run"]]), { log: () => {}, recordWaitMs: 0 });

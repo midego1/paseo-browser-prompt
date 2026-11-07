@@ -4,9 +4,11 @@
 
 - ChatGPT Web no longer prefills the URL when the steps hold a Stripe (`sk_live_`, `rk_live_`,
   `sk_test_`), GitLab (`glpat-`), Google (`AIza…`) or Twilio (`SK…`) key, a run of 32 or more hex
-  characters, a URL with a user and password, or a value after `password:`, `secret=`, `token:` or
-  `api key:`. Names such as `Secret: DEPLOY_TOKEN`, placeholders and ordinary step text still
-  prefill.
+  characters, a URL with a user and password, an AWS secret access key, a `Bearer` token, or a value
+  after `password:`, `secret=`, `token:`, `api key:`, `pwd:`, `passcode:`, a JSON key such as
+  `"token":`, or a name such as `authToken`, `access_token` or `private_key`. Names such as
+  `Secret: DEPLOY_TOKEN`, placeholders and ordinary step text still prefill. A prompt too long for
+  the URL is no longer scanned, and every check runs in linear time on long input.
 - Links in agent messages with a control character (U+0000 to U+001F, U+007F) are no longer opened.
 - The mode guard skips an agent without browser run labels for 60 seconds instead of reading it on
   every turn and permission request; recorded runs are still checked every time.

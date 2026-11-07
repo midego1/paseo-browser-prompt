@@ -1,5 +1,5 @@
 import { enforceRunMode, type ModeGuardAgent } from "../shared/mode-guard.ts";
-import { reportTarget } from "../shared/report-back.ts";
+import { isBrowserRun, reportTarget } from "../shared/report-back.ts";
 import { addLifecycleHook, type HookServer } from "./hooks.ts";
 import { NOT_A_RUN_TTL_MS } from "./report-back.ts";
 import { readRecordedRun, type SettingsReader } from "./report-back-hook.ts";
@@ -52,13 +52,17 @@ export function registerModeGuard(server: HookServer, settings: SettingsReader, 
     checking.add(agent.id);
     try {
       const handle = paseo.agents.ref(agent.id);
-      const labels = (await handle.refresh())?.agent.labels ?? null;
+      const snapshotLabels = (await handle.refresh())?.agent.labels;
+      const labels = snapshotLabels ?? null;
       const target = reportTarget(agent.id, labels);
       if (!target) {
-        // Labels can change after creation, so a non-run is only skipped for a short while.
-        const now = Date.now();
-        if (notRuns.size >= 1000) for (const [id, until] of notRuns) if (until <= now) notRuns.delete(id);
-        if (notRuns.size < 1000) notRuns.set(agent.id, now + notARunTtlMs);
+        // Only labels that were read and lack the run label mark a non-run; a missing snapshot or
+        // labels are checked again on the next turn. Labels can change, so the skip is short.
+        if (snapshotLabels && typeof snapshotLabels === "object" && !isBrowserRun(snapshotLabels)) {
+          const now = Date.now();
+          if (notRuns.size >= 1000) for (const [id, until] of notRuns) if (until <= now) notRuns.delete(id);
+          if (notRuns.size < 1000) notRuns.set(agent.id, now + notARunTtlMs);
+        }
         return;
       }
       notRuns.delete(agent.id);

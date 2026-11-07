@@ -21,6 +21,7 @@ import {
   repeatView,
 } from "../shared/repeats.ts";
 import { migratePreferences } from "../shared/settings-migrate.ts";
+import { saveWithRetries, withDoneMark } from "../shared/settings-save.ts";
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const steps = "1. Open https://example.com\n2. Read the first paragraph.\n3. Report it.";
@@ -135,7 +136,10 @@ test("done marks per key: an old mark moves to the content key; Clear still empt
   assert.equal(migrateDoneMark([], legacy, mark), null);
   const card = read("client/card.tsx");
   assert.match(card, /settings\.values\.done\.includes\(doneMark\) \|\| settings\.values\.done\.includes\(runKey\)/, "old marks count until moved");
-  assert.match(card, /mark !== doneMark && mark !== runKey/, "undo removes both forms");
+  assert.match(card, /withDoneMark\(values\.done, doneMark, runKey, next, MAX_DONE\)/);
+  assert.deepEqual(withDoneMark(["x", legacy, mark], mark, legacy, false, 500), ["x"], "undo removes both forms");
+  assert.deepEqual(withDoneMark(["x", legacy], mark, legacy, true, 500), ["x", mark], "done replaces the old form");
+  assert.deepEqual(withDoneMark(["a", "b"], mark, legacy, true, 2), ["b", mark], "capped, oldest dropped");
   assert.match(read("client/settings-screen.tsx"), /done: \[\] \}, revision/, "Clear");
 });
 
@@ -201,15 +205,42 @@ test("with collapsing off, the chat is read only while the shared run is going; 
   assert.match(index, /if \(!enabled \|\| !messageId\) return;/, "a disabled card does not read the chat");
 });
 
-test("toggling done retries a lost save against reloaded settings, then tells the owner and resets", () => {
+test("a done-mark save that loses a race is retried against reloaded settings", async () => {
+  const sleeps = [];
+  const sleep = async (ms) => void sleeps.push(ms);
+  // Another device saved in between: the first save fails, the reload brings newer values.
+  let state = { status: "ready", values: { done: ["other"], n: 1 }, revision: "1" };
+  const saved = [];
+  const handle = () => ({
+    ...state,
+    save: async (values, revision) => {
+      saved.push([values, revision]);
+      return revision === "2";
+    },
+    reload: async () => {
+      state = { status: "ready", values: { done: ["other", "newer"], n: 2 }, revision: "2" };
+    },
+  });
+  const update = (values) => ({ ...values, done: withDoneMark(values.done, "a:k", "a:c", true, 500) });
+  assert.equal(await saveWithRetries(handle, update, { sleep }), true);
+  assert.deepEqual(saved.at(-1), [{ done: ["other", "newer", "a:k"], n: 2 }, "2"], "built from the reloaded settings, not the stale ones");
+  assert.deepEqual(sleeps, [100]);
+
+  // Never wins: four tries, a reload after each, then false so the card resets and says so.
+  let reloads = 0;
+  const losing = () => ({ status: "ready", values: { done: [] }, revision: "1", save: async () => false, reload: async () => void reloads++ });
+  assert.equal(await saveWithRetries(losing, update, { sleep: async () => {} }), false);
+  assert.equal(reloads, 4);
+
+  // Not ready (loading or invalid): nothing is saved, it reloads and tries again.
+  let tries = 0;
+  const loading = () => ({ status: tries++ < 1 ? "loading" : "ready", values: { done: [] }, revision: "3", save: async () => true, reload: async () => {} });
+  assert.equal(await saveWithRetries(loading, update, { sleep: async () => {} }), true);
+
   const card = read("client/card.tsx");
   const body = card.slice(card.indexOf("async function toggleDone()"), card.indexOf("const displayTitle ="));
-  assert.match(body, /for \(let attempt = 0; attempt < 4; attempt\+\+\)/);
-  assert.match(body, /const current = latestSettings\.current;/);
-  assert.match(body, /current\.values\.done\.filter/, "the list is rebuilt from the newest settings");
-  assert.match(body, /current\.save\(\{ \.\.\.current\.values, done: list \}, current\.revision\)/);
-  assert.match(body, /await current\.reload\(\);/);
-  assert.match(body, /\}\n\s+setLocalDone\(null\);\n\s+toast\.error\(/, "after the retries the local mark is reset and an error shown");
+  assert.match(body, /saveWithRetries\(\n\s+\(\) => latestSettings\.current,/, "reads the newest settings on each try");
+  assert.match(body, /setLocalDone\(null\);\n\s+if \(!saved\) toast\.error\(/, "after the retries the local mark is reset and an error shown");
 });
 
 test("the run record keeps the server's fallback marker at position 2", () => {

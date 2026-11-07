@@ -18,6 +18,7 @@ import {
 import { endedRun } from "../shared/run-lock";
 import { acquireRunLock, finishRunLock } from "../shared/run-lock-rpc";
 import { MAX_DONE, MAX_RUNS, preferences } from "../shared/settings";
+import { saveWithRetries, withDoneMark } from "../shared/settings-save";
 import { stashPrompt } from "../shared/trampoline";
 import { CLAUDE_COLOR, CLAUDE_ICON, OPENAI_COLOR, OPENAI_ICON, PASEO_ICON } from "../shared/brand-icons";
 import { archivedAfterSuccess } from "../shared/archive-rpc";
@@ -303,21 +304,13 @@ export function BrowserPromptCard({
     const next = !done;
     setLocalDone(next);
     if (settings.status !== "ready") return; // stays in memory for this session
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const current = latestSettings.current;
-      if (current.status === "ready") {
-        const without = current.values.done.filter((mark) => mark !== doneMark && mark !== runKey);
-        const list = next ? [...without, doneMark].slice(-MAX_DONE) : without;
-        if (await current.save({ ...current.values, done: list }, current.revision)) {
-          setLocalDone(null);
-          return;
-        }
-      }
-      await current.reload();
-      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
-    }
+    const saved = await saveWithRetries(
+      () => latestSettings.current,
+      (values) => ({ ...values, done: withDoneMark(values.done, doneMark, runKey, next, MAX_DONE) }),
+    );
+    // Saved: the stored mark shows. Not saved: the card shows the stored state again and says so.
     setLocalDone(null);
-    toast.error(next ? "Could not save the done mark; try again." : "Could not remove the done mark; try again.");
+    if (!saved) toast.error(next ? "Could not save the done mark; try again." : "Could not remove the done mark; try again.");
   }
 
   const displayTitle = title || `Browser prompt ${index + 1}`;

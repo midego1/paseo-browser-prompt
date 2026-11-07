@@ -145,8 +145,20 @@ test("secret heuristic: Stripe, GitLab, Google, Twilio, hex runs, URL credential
     "api_key=" + "abc123def456",
     "API key: " + "s3cr3tValue",
     'client_secret="' + "Zx9mQ2pL7vR4" + '"',
-    "token = " + "12345678",
     "access_token=" + "ya29abc1def2",
+    "Passcode: " + "123456",
+    // JSON keys, camelCase and snake_case names, Bearer tokens, AWS secret access keys.
+    '{"password":"' + "abc123def" + '"}',
+    '"token": "' + "abc123def456" + '"',
+    "authToken: " + "abc123def456",
+    "accessToken=" + "abc123def456",
+    "secret_key=" + "abc123def456",
+    "private_key=" + "abc123def456",
+    "pwd: " + "hunter22",
+    "Bearer " + "abcdefghijkl",
+    "Authorization: Bearer " + "abc.def_ghi-jkl",
+    "aws_secret_access_key = " + "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "wJalrXUtnFEMI/K7MDENG/" + "bPxRfiCYEXAMPLEKEY",
   ];
   for (const text of secrets) {
     assert.equal(looksLikeSecret(`1. Open the page\n2. Paste ${text} into the field`), true, text);
@@ -174,8 +186,35 @@ test("secret heuristic: ordinary step text is not taken for a secret", () => {
     "The secretary: Anna, room 12",
     "Order SKU 12345 and AIza is not a key",
     "Rotate the sk_live key in the Stripe dashboard",
+    "Set Max tokens: 128000 and save",
+    "Monkey: 2 bananas, hotkey: Ctrl+1",
+    "Choose Bearer authentication, then Bearer tokens.",
+    "Authorization: Bearer <token>",
+    "Header Authorization: Bearer YOUR_TOKEN_HERE",
+    '{"tokenName": "DEPLOY_TOKEN", "passwordHint": "ask me"}',
+    "Open github.com/acme/webshop/settings/secrets/actions/new and src/Components/Button2/index.tsx",
+    "Go to Settings/Developer2/PersonalAccessTokens/Fine",
   ];
   for (const text of ordinary) assert.equal(looksLikeSecret(text), false, text);
+});
+
+test("secret heuristic runs in linear time on long hostile input", () => {
+  const size = 100_000;
+  const inputs = [
+    "a.", "a", "a:", "a://", "a://b:", "a://b:c", "eyJ-", "eyJ", "token ", "token:", "token: ", "Bearer ", "a/", "aA1/",
+    "-----BEGIN ", "0", "0g", "SK", "x=", '"', "api key", "_", "authToken",
+  ].map((unit) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size));
+  inputs.push("a".repeat(size) + "@", "x://" + "a".repeat(size), "x://a:" + "b".repeat(size));
+  for (const text of inputs) {
+    const started = performance.now();
+    looksLikeSecret(text);
+    const took = performance.now() - started;
+    assert.ok(took < 100, `${JSON.stringify(text.slice(0, 12))}… took ${took.toFixed(1)} ms`);
+  }
+  // A prompt too long for the URL is not scanned at all.
+  const started = performance.now();
+  assert.equal(planChatGptLaunch("a.".repeat(size / 2)).reason, "too-long");
+  assert.ok(performance.now() - started < 100);
 });
 
 test("app deep link: documented codex://new?prompt= with encoded prompt", () => {

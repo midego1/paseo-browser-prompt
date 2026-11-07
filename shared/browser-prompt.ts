@@ -227,14 +227,16 @@ export function composePrompt(title: string, body: string, header: string = CHAT
   return `${header}\n\n${heading}${body.trim()}\n`;
 }
 
+// Each pattern runs in linear time on any input: a match may start only where its token starts (a
+// lookbehind or \b with nothing optional before the fixed prefix), and open-ended parts are bounded.
 const SECRET_PATTERNS = [
   /\b(sk|pk|rk)-[A-Za-z0-9_-]{16,}/,
   /\bgh[pousr]_[A-Za-z0-9]{20,}/,
   /\bgithub_pat_[A-Za-z0-9_]{20,}/,
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/,
   /\bAKIA[0-9A-Z]{16}\b/,
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
-  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/,
+  /-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----/,
+  /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,2048}\.[A-Za-z0-9_-]{10,}/,
   /\b[sr]k_(live|test)_[A-Za-z0-9]{10,}/,
   /\bglpat-[A-Za-z0-9_-]{20,}/,
   /\bAIza[0-9A-Za-z_-]{35}/,
@@ -242,13 +244,26 @@ const SECRET_PATTERNS = [
   // Bare hex run as long as an API key or hash secret; git short SHAs and UUIDs stay below it.
   /\b[0-9a-fA-F]{32,}\b/,
   // Credentials in a URL: scheme://user:password@host.
-  /\b[a-z][a-z0-9+.-]*:\/\/[^\s/?#@:]+:[^\s/?#@]+@/i,
+  /(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/[^\s/?#@:]{1,256}:[^\s/?#@]{1,256}@/,
   // Long opaque run without slashes or dots, so ordinary URLs and names do not match.
   /[A-Za-z0-9+_=-]{40,}/,
 ];
 
-/** `password: x`, `api_key=x`, `client_secret = "x"` on one line; the value is checked separately. */
-const ASSIGNED_SECRET = /(?<![A-Za-z])(?:password|passwd|secret|token|api[ _-]?key)s?[ \t]*[:=][ \t]*["'`]?([^\s"'`<>{}()[\],;]{6,})/gi;
+/**
+ * `password: x`, `api_key=x`, `"token": "x"`, `authToken=x` on one line: a name (a bare word, `api
+ * key` and the like, or a quoted JSON key), `:` or `=`, and a value. Name and value are checked
+ * separately (`isSecretName`, `isAssignedValue`).
+ */
+const ASSIGNED_SECRET =
+  /(?<![A-Za-z0-9_-])((?:api|secret|private|access) key|[A-Za-z][A-Za-z0-9_-]{0,40})["']?[ \t]{0,8}[:=][ \t]{0,8}["'`]?([^\s"'`<>{}()[\],;]{6,512})/gi;
+
+/** A name that holds a credential: `password`, `pwd`, `passcode`, `*token`, `*secret`, `*_key`, `apiKey`. */
+function isSecretName(name: string): boolean {
+  if (/(?:password|passwd|passcode|pwd|secret|token)s?$/i.test(name)) return true;
+  if (/^(?:api|secret|private|access)[ _-]?key$/i.test(name)) return true;
+  // snake_case or kebab-case `*_key`, camelCase `*Key`; a plain word such as `hotkey` is not one.
+  return /[_-]key$/i.test(name) || /[a-z0-9]Key$/.test(name);
+}
 
 /** A value after `password:` and the like, as opposed to a secret's name, a placeholder or prose. */
 function isAssignedValue(value: string): boolean {
@@ -259,11 +274,36 @@ function isAssignedValue(value: string): boolean {
   return /[0-9]/.test(value); // words in a sentence carry no digits; credentials nearly always do
 }
 
+/** `Bearer <token>`; words that follow "Bearer" in prose are not tokens. */
+const BEARER = /\bBearer[ \t]{1,8}([A-Za-z0-9_.~+/-]{12,2048}={0,2})/g;
+const BEARER_PROSE = /^(?:authentication|authorization|authorisation|credentials?|tokens?|headers?|schemes?)$/i;
+
+/**
+ * A 40-character base64 run with `/` or `+` (an AWS secret access key): mixed case and digits, and
+ * not part of a path or name, so `acme/webshop/settings/secrets/actions` does not count.
+ */
+const BASE64_40 = /(?<![A-Za-z0-9/+=.:_-])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+=._-])/g;
+
+function isAwsLikeSecret(run: string): boolean {
+  return /[/+]/.test(run) && /[A-Z]/.test(run) && /[a-z]/.test(run) && /[0-9]/.test(run) && !run.includes("//");
+}
+
 /** True when the text looks like it contains a credential value rather than a name. */
 export function looksLikeSecret(text: string): boolean {
   if (SECRET_PATTERNS.some((pattern) => pattern.test(text))) return true;
   for (const match of text.matchAll(ASSIGNED_SECRET)) {
-    if (isAssignedValue(match[1]!.replace(/[.!?]+$/, ""))) return true;
+    const name = match[1]!;
+    const value = match[2]!.replace(/[.!?]+$/, "");
+    // Digits alone are a passcode or PIN, but a count after `max tokens:` and the like.
+    if (/^[0-9]+$/.test(value) && !/pass|pwd/i.test(name)) continue;
+    if (isSecretName(name) && isAssignedValue(value)) return true;
+  }
+  for (const match of text.matchAll(BEARER)) {
+    const token = match[1]!.replace(/[.!?]+$/, "");
+    if (!BEARER_PROSE.test(token) && !/^[A-Z][A-Z0-9_]*$/.test(token)) return true;
+  }
+  for (const match of text.matchAll(BASE64_40)) {
+    if (isAwsLikeSecret(match[0])) return true;
   }
   return false;
 }
@@ -276,12 +316,13 @@ export interface LaunchPlan {
 
 /** ChatGPT agent-mode URL, prefilled only when short enough and free of secret-looking values. */
 export function planChatGptLaunch(prompt: string): LaunchPlan {
-  if (looksLikeSecret(prompt)) {
-    return { url: CHATGPT_AGENT_URL, prefilled: false, reason: "possible-secret" };
-  }
+  // Too long is decided first: such a prompt is never put in the URL, so it needs no secret scan.
   const url = `${CHATGPT_AGENT_URL}&q=${encodeURIComponent(prompt)}`;
   if (url.length > MAX_URL_LENGTH) {
     return { url: CHATGPT_AGENT_URL, prefilled: false, reason: "too-long" };
+  }
+  if (looksLikeSecret(prompt)) {
+    return { url: CHATGPT_AGENT_URL, prefilled: false, reason: "possible-secret" };
   }
   return { url, prefilled: true };
 }
