@@ -228,6 +228,11 @@ export function createReportBack(options: ReportBackOptions) {
 
   /** Per run: its latest turn, so an archive waiting on an older turn gives up. Oldest dropped first. */
   const latestTurns = new Map<string, { seq: number; turnId: string | null }>();
+  /**
+   * Per run: the turns read so far (turn id, else last message id), oldest first. A question is out of
+   * date once a later turn was read; a repeated event of its own turn does not count.
+   */
+  const seenTurns = new Map<string, string[]>();
   /** Runs that already had a final or stopped turn: a follow-up turn is the owner's, so it stays open. */
   const concluded = new Set<string>();
   const archived: string[] = [];
@@ -426,7 +431,6 @@ export function createReportBack(options: ReportBackOptions) {
     question: string,
     messageId: string | null,
     signal: AbortSignal,
-    superseded: () => boolean,
     leave: () => void,
   ): Promise<ReportResult | null> {
     const runId = event.agent.id;
@@ -470,19 +474,22 @@ export function createReportBack(options: ReportBackOptions) {
     const message = buildQuestionMessage({ title: event.agent.title, runId, question, index: asked + 1, max });
     const deadline = Date.now() + busyWaitMs;
     // The turn is handled from here on (its key guards a repeated event), so a later turn of the run
-    // may report while this one waits.
+    // may report while this one waits. A turn with neither a turn id nor a message id keeps the run
+    // held: nothing else would stop a repeated event from forwarding the question twice.
     if (turnKey) leave();
     const delivered = await enqueue(sourceId, async () => {
       const settled = await waitUntilSettled(source, deadline, signal);
       if (typeof settled === "string") return settled;
       if (signal.aborted) throw new AbortedError();
       // The owner answered the run in the meantime: the question is out of date.
-      if (superseded()) return "stale" as const;
+      if (movedPast(runId, turnKey)) return "stale" as const;
       await source.send(message, { activeTurnBehavior: "steer" });
       return "sent" as const;
     });
     // Neither the chat nor the run is told about a question the run has moved past.
-    if (delivered === "stale" || (delivered !== "sent" && superseded())) {
+    if (delivered === "stale" || (delivered !== "sent" && movedPast(runId, turnKey))) {
+      // Not forwarded, so it does not count against the run's questions.
+      if (questionCounts.get(runId) === asked + 1) questionCounts.set(runId, asked);
       log(`question of run ${runId} not forwarded; the run went on in the meantime`);
       return "question-stale";
     }
@@ -509,6 +516,22 @@ export function createReportBack(options: ReportBackOptions) {
     return seq;
   }
 
+  function noteSeen(runId: string, turn: string) {
+    const list = seenTurns.get(runId) ?? [];
+    if (!list.includes(turn)) list.push(turn);
+    if (list.length > 20) list.shift();
+    seenTurns.delete(runId);
+    seenTurns.set(runId, list);
+    if (seenTurns.size > MAX_TRACKED_RUNS) seenTurns.delete(seenTurns.keys().next().value as string);
+  }
+
+  /** Whether a turn of the run after `turn` was read. Unknown (never seen, or forgotten): no. */
+  function movedPast(runId: string, turn: string | null): boolean {
+    const list = turn ? seenTurns.get(runId) : undefined;
+    const index = list ? list.indexOf(turn!) : -1;
+    return index >= 0 && index < list!.length - 1;
+  }
+
   function markConcluded(runId: string) {
     concluded.add(runId);
     if (concluded.size > MAX_TRACKED_RUNS) concluded.delete(concluded.values().next().value as string);
@@ -517,7 +540,7 @@ export function createReportBack(options: ReportBackOptions) {
   function onTurnEnded(event: TurnEndedEvent, paseo: ReportBackPaseo): Promise<ReportResult> {
     const seq = noteTurn(event);
     const verdict = { succeeded: false };
-    const task = handle(event, paseo, verdict, seq).then(async (result) => {
+    const task = handle(event, paseo, verdict).then(async (result) => {
       if (verdict.succeeded) await archiveIfSucceeded(event, paseo, result, seq);
       return result;
     });
@@ -526,10 +549,9 @@ export function createReportBack(options: ReportBackOptions) {
     return task;
   }
 
-  async function handle(event: TurnEndedEvent, paseo: ReportBackPaseo, verdict: { succeeded: boolean }, seq: number): Promise<ReportResult> {
+  async function handle(event: TurnEndedEvent, paseo: ReportBackPaseo, verdict: { succeeded: boolean }): Promise<ReportResult> {
     const runId = event.agent.id;
     const signal = lifetime.signal;
-    const superseded = () => latestTurns.get(runId)?.seq !== seq;
     // A stopped run is not a report; a later turn of the same agent may still report.
     if (event.outcome.kind === "canceled") {
       markConcluded(runId);
@@ -566,10 +588,15 @@ export function createReportBack(options: ReportBackOptions) {
       const closedRun = ended && !final;
       if (closedRun) log(`run ${runId} is closed or archived; its report is not read`);
       const finalText = final?.text ?? "";
+      const seenKey = event.turnId ? `${runId}:t:${event.turnId}` : final?.messageId ? `${runId}:m:${final.messageId}` : null;
+      if (seenKey) noteSeen(runId, seenKey);
       const question = event.outcome.kind === "completed" ? parseQuestion(stripRunSuccessMarker(finalText)) : null;
       if (question !== null) {
-        const handled = await handleQuestion(event, paseo, labels, runSnapshot, question, final?.messageId ?? null, signal, superseded, leave);
+        const handled = await handleQuestion(event, paseo, labels, runSnapshot, question, final?.messageId ?? null, signal, leave);
         if (handled !== null) return handled;
+        // Handled as the report from here: hold the run again, unless a later turn of it took over.
+        if (inFlight.has(runId) && inFlight.get(runId) !== holder) return "duplicate";
+        inFlight.set(runId, holder);
         // Past its redirects: fall through and handle this turn as the run's report.
       }
       // Only the run's first final turn, with a report left next to the line and no question in it.
