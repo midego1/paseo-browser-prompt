@@ -1,6 +1,7 @@
 import { enforceRunMode, type ModeGuardAgent } from "../shared/mode-guard.ts";
-import { reportTarget } from "../shared/report-back.ts";
+import { isBrowserRun, reportTarget } from "../shared/report-back.ts";
 import { addLifecycleHook, type HookServer } from "./hooks.ts";
+import { NOT_A_RUN_TTL_MS } from "./report-back.ts";
 import { readRecordedRun, type SettingsReader } from "./report-back-hook.ts";
 
 type GuardHandle = Omit<ModeGuardAgent, "refresh"> & {
@@ -13,6 +14,8 @@ export interface ModeGuardOptions {
   /** How long to wait for the card to record a new run (it saves the record right after create). */
   recordWaitMs?: number;
   recordPollMs?: number;
+  /** How long an agent without browser run labels is skipped before its labels are read again. */
+  notARunTtlMs?: number;
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -28,6 +31,8 @@ export function registerModeGuard(server: HookServer, settings: SettingsReader, 
   const log = options.log ?? ((m: string) => console.log(`[browser-prompt] ${m}`));
   const recordWaitMs = options.recordWaitMs ?? 10_000;
   const recordPollMs = options.recordPollMs ?? 500;
+  const notARunTtlMs = options.notARunTtlMs ?? NOT_A_RUN_TTL_MS;
+  const notRuns = new Map<string, number>();
   const stopped = new Set<string>();
   const checking = new Set<string>();
   let disposed = false;
@@ -43,12 +48,24 @@ export function registerModeGuard(server: HookServer, settings: SettingsReader, 
 
   async function check(agent: { id: string; provider: string }, paseo: GuardPaseo) {
     if (disposed || stopped.has(agent.id) || checking.has(agent.id)) return;
+    if ((notRuns.get(agent.id) ?? 0) > Date.now()) return;
     checking.add(agent.id);
     try {
       const handle = paseo.agents.ref(agent.id);
-      const labels = (await handle.refresh())?.agent.labels ?? null;
+      const snapshotLabels = (await handle.refresh())?.agent.labels;
+      const labels = snapshotLabels ?? null;
       const target = reportTarget(agent.id, labels);
-      if (!target) return;
+      if (!target) {
+        // Only labels that were read and lack the run label mark a non-run; a missing snapshot or
+        // labels are checked again on the next turn. Labels can change, so the skip is short.
+        if (snapshotLabels && typeof snapshotLabels === "object" && !isBrowserRun(snapshotLabels)) {
+          const now = Date.now();
+          if (notRuns.size >= 1000) for (const [id, until] of notRuns) if (until <= now) notRuns.delete(id);
+          if (notRuns.size < 1000) notRuns.set(agent.id, now + notARunTtlMs);
+        }
+        return;
+      }
+      notRuns.delete(agent.id);
       if (!(await isRecorded({ ...target, runId: agent.id }))) {
         log(`agent ${agent.id} has browser run labels but no card record; mode not checked`);
         return;
