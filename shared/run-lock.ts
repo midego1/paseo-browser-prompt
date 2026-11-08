@@ -99,3 +99,60 @@ export function createRunLocks(options: { now?: () => number; token?: () => stri
 }
 
 export type RunLocks = ReturnType<typeof createRunLocks>;
+
+/**
+ * Asks for the lock, waiting at most `timeoutMs`. "unavailable": no answer in time or an error, so
+ * the card starts without the lock. A grant that arrives after the timeout is handed to
+ * `releaseLate` at once, so it does not hold every start of the block for RUN_LOCK_TTL_MS.
+ */
+export async function acquireWithin(
+  acquire: () => Promise<AcquireResult>,
+  timeoutMs: number,
+  releaseLate: (token: string) => void,
+): Promise<AcquireResult | { unavailable: string }> {
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const request = Promise.resolve().then(acquire);
+  // Kept after a timeout: a late grant is handed back, a late refusal or error is dropped.
+  void request.then(
+    (result) => {
+      if (timedOut && result.ok) releaseLate(result.token);
+    },
+    () => undefined,
+  );
+  try {
+    return await Promise.race([
+      request,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new Error("no answer from the daemon"));
+        }, timeoutMs);
+      }),
+    ]);
+  } catch (error) {
+    return { unavailable: error instanceof Error ? error.message : String(error) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Hands a lock back; a failed call is tried once more after `retryMs`. True once one went through. */
+export async function finishWithRetry(
+  finish: () => Promise<unknown>,
+  options: { retryMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<boolean> {
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  try {
+    await finish();
+    return true;
+  } catch {
+    await sleep(options.retryMs ?? 1000);
+    try {
+      await finish();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}

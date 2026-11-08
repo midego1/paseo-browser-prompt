@@ -74,6 +74,8 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
   const [maxQuestionsDraft, setMaxQuestionsDraft] = useState<string | null>(null);
   const chromeProviderInput = useRef<SettingsInputHandle>(null);
   const [chromeProviderDraft, setChromeProviderDraft] = useState<string | null>(null);
+  // Clearing the agent links asks once more: runs may still be going.
+  const [confirmClearRuns, setConfirmClearRuns] = useState(false);
 
   if (settings.status !== "ready") {
     const message = settings.status === "loading" ? "Loading..." : `Settings unavailable: ${settings.error}`;
@@ -119,7 +121,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
         <SettingsCard>
           <SettingsSelect
             label="Usual way to start (desktop)"
-            hint="Highlighted on the card. The card always offers every way. The Command Center opens ChatGPT as chosen here, or the ChatGPT app when this is a Paseo agent."
+            hint="Highlighted on the card; the other ways stay one press away (the Chrome tab button only with a Claude provider). The Command Center opens ChatGPT as chosen here, or the ChatGPT app when this is a Paseo agent."
             value={values.startMode}
             options={DESKTOP_OPTIONS}
             onValueChange={(startMode) => void settings.save({ ...values, startMode }, revision)}
@@ -300,7 +302,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
           <SettingsInput
             ref={chromeProviderInput}
             label="Claude in Chrome provider"
-            hint="Paseo provider for the agent's Chrome button (Claude in Chrome). The extension only connects when the agent uses its Claude account, so add a provider for that account to the daemon's config.json (see the README) and name it here. Empty: claude-chrome when the daemon has that provider, else the Provider above."
+            hint="Paseo provider for the card's Chrome tab button (Claude in Chrome). The extension only connects when the agent uses its Claude account, so add a provider for that account to the daemon's config.json (see the README) and name it here. Empty: claude-chrome when the daemon has that provider, else the Provider above."
             error={chromeProviderError ?? undefined}
             initialValue={values.chromeProvider}
             placeholder="claude-chrome"
@@ -341,10 +343,21 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
           />
           <SettingsAction
             label="Agent links on cards"
-            hint={`Cards on this host remember ${values.runs.length} started agent(s).`}
-            actionLabel="Clear"
+            hint={
+              confirmClearRuns
+                ? `Runs may still be going. Their cards lose the link, status and Run guard; until the daemon restarts, a run it already saw keeps its mode guard and report back. Press Clear anyway to clear ${values.runs.length} link(s).`
+                : `Cards on this host remember ${values.runs.length} started agent(s).`
+            }
+            actionLabel={confirmClearRuns ? "Clear anyway" : "Clear"}
             disabled={values.runs.length === 0}
-            onPress={() => void settings.save({ ...values, runs: [] }, revision)}
+            onPress={async () => {
+              if (!confirmClearRuns) {
+                setConfirmClearRuns(true);
+                return;
+              }
+              setConfirmClearRuns(false);
+              await settings.save({ ...values, runs: [] }, revision);
+            }}
           />
         </SettingsCard>
       </SettingsSection>

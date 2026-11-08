@@ -15,16 +15,17 @@ Do not include real secrets, tokens or private prompts in a report; describe the
 | --- | --- | --- |
 | Prompt text (card steps plus a fixed header) | Clipboard of the device you use | ChatGPT Desktop and Web, Claude Desktop, Copy |
 | Prompt text | `https://chatgpt.com/?hints=agent&q=...` in your browser (OpenAI, browser history) | ChatGPT web mode, only when the prompt is short and has nothing that looks like a credential |
-| Prompt text | Plugin memory on your Paseo daemon, under a random one-time id, at most 10 minutes; then the ChatGPT app via its `codex://` deep link | ChatGPT app mode |
-| Launcher URL `http://<own Tailscale IP or 127.0.0.1>:5299/open?id=<id>` | Your browser; contains no prompt text | ChatGPT app mode |
+| Prompt text | Plugin memory on your Paseo daemon, under a random one-time id, at most 10 minutes; then the ChatGPT app via its `codex://` deep link, or the Claude app via its `claude://` deep link | ChatGPT desktop and Claude desktop |
+| Launcher URL `http://<own Tailscale IP or 127.0.0.1>:5299/open?id=<id>` | Your browser; contains no prompt text | ChatGPT desktop and Claude desktop |
 | Card steps plus a fixed safety preamble | A new agent on your own Paseo daemon, and that agent's model provider (Anthropic by default); with Claude in Chrome also Anthropic's bridge to your Chrome | Paseo browser, Claude in Chrome |
 | The browser agent's final report (up to 4,000 characters), escaped and framed as untrusted output | The agent whose chat showed the card, and that agent's model provider | Report back to chat: Auto (default) only when that chat runs in an ask-first mode, or Always |
 | Title, outcome and run agent id only | The agent whose chat showed the card | Report back to chat: Auto, when that chat runs in any other mode |
 | Browser screenshots (viewport PNG after each step) | The browser agent's model provider, as tool output; a private copy kept by Paseo on the daemon host; shown as a thumbnail on the card in your Paseo app | Show live screenshot (on by default) |
 | A browser agent's question for the chat (up to 1,500 characters), escaped and framed as untrusted text by the plugin | The agent whose chat showed the card, and that agent's model provider, in any permission mode | Talk to the chat (on by default, at most 10 per run by default) |
 | Ids of runs that already reported | `reported-runs.json` in the state directory below | Report back to chat |
+| Ids of runs the plugin archived after a successful run | `archived-runs.json` in the state directory below | Archive the agent after a successful run |
 | Settings, done marks, card-to-agent links | Paseo host settings on your daemon | Always |
-| Updater state, log, commit-only Git history | `~/.local/state/paseo-plugin-browser-prompt/` on the daemon host | Git installs, once a check or update ran |
+| Updater state, log, commit-only Git history | The state directory on the daemon host: `$XDG_STATE_HOME/paseo-plugin-browser-prompt/` when `XDG_STATE_HOME` is set, else `~/.local/state/paseo-plugin-browser-prompt/` | Git installs, once a check or update ran |
 | The chat's own timeline (assistant messages and their ids) | Read by the card in your Paseo app, kept in memory to recognize repeated blocks; not sent anywhere | A chat with browser-prompt cards |
 | `git ls-remote` / `git fetch` | The `https://` remote the plugin was installed from | Git installs: automatically only after the owner enabled auto-update for that remote; otherwise only when the owner presses Check now or Update now |
 
@@ -98,9 +99,9 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
   yourself. Steps and page content can go through Anthropic's bridge (`bridge.claudeusercontent.com`).
 - Close tabs after a successful run (on by default) tells the agent to close only the tabs it opened
   itself, and only after a fully successful run. That is an instruction to a model, not an enforced
-  control: the plugin does not check which tab a `browser_close_tab` call closes, so a model may
-  close the wrong tab (for example one you had open with unsaved work) or none. In Always Ask mode
-  you approve each new tool, including the close. Turn the setting off to keep every tab open.
+  control: the plugin does not check which tab a `browser_close_tab` call (or, in a Chrome tab run,
+  a `tabs_close_mcp` call) closes, so a model may close the wrong tab (for example one you had open
+  with unsaved work) or none. In Always Ask mode you approve each new tool, including the close. Turn the setting off to keep every tab open.
 - Questions and permission requests the browser agent puts to the owner (AskUserQuestion, tool
   approvals) stay with the owner. The card shows them and sends the answer the owner clicks with
   Paseo's `respondToPermission`, the same as answering in the run. Nothing answers them

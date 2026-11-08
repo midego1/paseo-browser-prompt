@@ -137,6 +137,21 @@ export function sharedRunRecord<Entry extends readonly string[]>(
   return null;
 }
 
+/** Whether a record of the chat names this run. */
+export function runIsRecorded(runs: readonly (readonly string[])[], runId: string): boolean {
+  return runs.some((record) => record[1] === runId);
+}
+
+/**
+ * The run a card shows. A run this card just started (or was handed by the run lock) shows only
+ * until its record is saved; from then on the newest shared record does, so a later run of the
+ * block started from another copy shows here too and holds this copy's Run while it goes.
+ */
+export function cardRun(localRun: string | null, storedRun: string | null, runs: readonly (readonly string[])[]): string | null {
+  if (localRun && !runIsRecorded(runs, localRun)) return localRun;
+  return storedRun ?? localRun;
+}
+
 /** Records kept per card key: an earlier run that is still going keeps its record. */
 export const MAX_RUNS_PER_CARD = 5;
 

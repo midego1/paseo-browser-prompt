@@ -523,8 +523,10 @@ export function createReportBack(options: ReportBackOptions) {
     // Neither the chat nor the run is told about a question the run has moved past. A closed run is
     // left to redirect(), which sends it nothing.
     if (delivered === "stale" || (delivered !== "sent" && (movedPast(runId, turnKey) || state === "busy"))) {
-      // Not forwarded, so it does not count against the run's questions.
-      if (questionCounts.get(runId) === asked + 1) questionCounts.set(runId, asked);
+      // Not forwarded, so it does not count against the run's questions: it gives back its own slot,
+      // also when a later question of the run was counted in the meantime.
+      const count = questionCounts.get(runId);
+      if (count !== undefined && count > 0) questionCounts.set(runId, count - 1);
       log(`question of run ${runId} not forwarded; the run went on in the meantime`);
       return "question-stale";
     }
@@ -534,10 +536,6 @@ export function createReportBack(options: ReportBackOptions) {
     return "question-sent";
   }
 
-  /**
-   * Handles one ended turn. Can wait for hours on a busy source, so callers must not await it inside
-   * a hook handler: Paseo cancels hook requests after 30 seconds. `dispose()` aborts every wait.
-   */
   /** Counts a new turn of a run; a repeated event for the same turn keeps its number. */
   function noteTurn(event: TurnEndedEvent): number {
     const runId = event.agent.id;
@@ -572,6 +570,10 @@ export function createReportBack(options: ReportBackOptions) {
     if (concluded.size > MAX_TRACKED_RUNS) concluded.delete(concluded.values().next().value as string);
   }
 
+  /**
+   * Handles one ended turn. Can wait for hours on a busy source, so callers must not await it inside
+   * a hook handler: Paseo cancels hook requests after 30 seconds. `dispose()` aborts every wait.
+   */
   function onTurnEnded(event: TurnEndedEvent, paseo: ReportBackPaseo): Promise<ReportResult> {
     const seq = noteTurn(event);
     const verdict = { succeeded: false };

@@ -2,7 +2,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { archivedAfterSuccess } from "./shared/archive-rpc";
 import { createLauncher } from "./server/launcher";
 import { registerModeGuard } from "./server/mode-guard-hook";
-import { registerReportBack } from "./server/report-back-hook";
+import { createSeenRuns, registerReportBack } from "./server/report-back-hook";
 import { fileReportedStore } from "./server/reported-store";
 import { createServerUpdater, currentUpdateStatus } from "./server/updater";
 import { CLAUDE_DESKTOP_LINK_TEMPLATE, DEFAULT_APP_LINK_TEMPLATE } from "./shared/browser-prompt";
@@ -36,6 +36,8 @@ export default function contribute(server: PluginServerContext) {
   server.handle(getUpdateStatus, () => currentUpdateStatus());
 
   server.handle(stashPrompt, async ({ prompt, target }) => {
+    // An off launcher (no Tailscale yet, port taken) is tried again, with backoff.
+    await launcher.retry();
     if (target === "claude") return launcher.stash(prompt, CLAUDE_DESKTOP_LINK_TEMPLATE);
     const current = await settings.read();
     const template = current.status === "ready" ? current.values.appLinkTemplate : DEFAULT_APP_LINK_TEMPLATE;
@@ -53,14 +55,17 @@ export default function contribute(server: PluginServerContext) {
     return { ok: agentId ? runLocks.started(lockKey, token, agentId) : runLocks.release(lockKey, token) };
   });
 
+  // Runs seen recorded by a card: they keep report back and the mode guard if their record drops out.
+  const seenRuns = createSeenRuns();
   // Report back to chat: a finished browser run reports to the agent whose card started it.
   const reportBack = registerReportBack(server, settings, {
+    seen: seenRuns,
     store: fileReportedStore(),
     archivedStore: fileReportedStore(undefined, undefined, "archived-runs.json"),
   });
   server.handle(archivedAfterSuccess, async ({ agentId }) => ({ archived: await reportBack.reportBack.wasArchived(agentId) }));
   // Mode guard: a browser run that leaves its allowed permission mode is set back or stopped.
-  const modeGuard = registerModeGuard(server, settings);
+  const modeGuard = registerModeGuard(server, settings, { seen: seenRuns });
 
   return async () => {
     modeGuard.dispose();

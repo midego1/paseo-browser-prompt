@@ -10,6 +10,8 @@ import {
   createChatIndex,
   markRepeatsInMessage,
   canStartRun,
+  cardRun,
+  runIsRecorded,
   runKeyMarker,
   sharedRunRecord,
   addRunRecord,
@@ -23,7 +25,7 @@ import {
   repeatView,
 } from "../shared/repeats.ts";
 import { migratePreferences } from "../shared/settings-migrate.ts";
-import { saveWithRetries, withDoneMark } from "../shared/settings-save.ts";
+import { createSettingsMirror, saveWithRetries, withDoneMark } from "../shared/settings-save.ts";
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const steps = "1. Open https://example.com\n2. Read the first paragraph.\n3. Report it.";
@@ -201,7 +203,8 @@ test("with collapsing off, the chat is read only while the shared run is going; 
   for (const state of ["done", "failed", "stopped", "unknown"]) assert.equal(canStartRun({ repeat: true, runState: state }), true, state);
   // Done marks and the shared run are keyed by content, not by the chat index.
   assert.match(card, /const doneMark = `\$\{agentId\}:\$\{key\}`;/);
-  assert.match(card, /sharedRunRecord\(settings\.values\.runs, agentId, runKey, key\)/);
+  assert.match(card, /sharedRunRecord\(storedRuns, agentId, runKey, key\)/);
+  assert.match(card, /const storedRuns = settings\.status === "ready" \? settings\.values\.runs : null;/);
   assert.equal(repeatView({ collapse: false, first: { state: "first" }, done: true, expanded: false }), "full");
   const index = read("client/chat-index.ts");
   assert.match(index, /if \(!enabled \|\| !messageId\) return;/, "a disabled card does not read the chat");
@@ -241,7 +244,7 @@ test("a done-mark save that loses a race is retried against reloaded settings", 
 
   const card = read("client/card.tsx");
   const body = card.slice(card.indexOf("async function toggleDone()"), card.indexOf("const displayTitle ="));
-  assert.match(body, /saveWithRetries\(\n\s+\(\) => latestSettings\.current,/, "reads the newest settings on each try");
+  assert.match(body, /saveWithRetries\(\n\s+newestSettings,/, "reads the newest settings on each try");
   assert.match(body, /setLocalDone\(null\);\n\s+if \(!saved\) toast\.error\(/, "after the retries the local mark is reset and an error shown");
 });
 
@@ -304,4 +307,67 @@ test("running a card again keeps the earlier run's record, so its mode is still 
   assert.equal(many.filter(([key]) => key === "agent:card").length, MAX_RUNS_PER_CARD, "a card keeps its newest runs only");
   assert.equal(many.at(-2)[1], `run-${MAX_RUNS_PER_CARD + 2}`);
   assert.equal(addRunRecord(many, ["agent:third", "run-y"], 3).length, 3, "the total cap still applies");
+});
+
+test("a card follows a newer shared run once its own run is recorded, so a repeat cannot start a second run", () => {
+  const agentId = "chat";
+  const key = blockKey("Check", "1. Open https://example.com");
+  const marker = runKeyMarker(key);
+  // The repeat copy started run X (its own card id); X finished. The first copy then started Y.
+  const runs = [
+    [`${agentId}:repeat-card`, "run-x", marker],
+    [`${agentId}:first-card`, "run-y", marker],
+  ];
+  const stored = sharedRunRecord(runs, agentId, `${agentId}:repeat-card`, key)?.[1] ?? null;
+  assert.equal(stored, "run-y", "the newest record of the block");
+  assert.equal(runIsRecorded(runs, "run-x"), true);
+  // More than RUN_LOCK_HOLD_MS later, while Y runs, the repeat copy still remembers X locally.
+  const shown = cardRun("run-x", stored, runs);
+  assert.equal(shown, "run-y", "the newer shared run wins over the card's own, already recorded run");
+  assert.equal(canStartRun({ repeat: true, runState: "running" }), false, "so Run on the repeat waits for Y");
+  // Before its record is saved, the card's own new run shows (the record is about a second behind).
+  assert.equal(cardRun("run-z", stored, runs), "run-z");
+  assert.equal(cardRun(null, stored, runs), "run-y");
+  assert.equal(cardRun("run-z", null, []), "run-z");
+
+  const card = read("client/card.tsx");
+  assert.match(card, /const runAgentId = cardRun\(localRun, storedRun, storedRuns \?\? \[\]\);/);
+  assert.match(card, /if \(localRecorded\) setLocalRun\(null\);/, "the local run is dropped once recorded");
+  assert.match(card, /useRunState\(runAgentId, startedHere !== null && startedHere === runAgentId\)/, "'starting' stays tied to the run started here");
+});
+
+test("a retried save of a card that unmounted uses the newest settings another card rendered", async () => {
+  const mirror = createSettingsMirror();
+  const saved = [];
+  const handle = (revision, values, reloads) => ({
+    status: "ready",
+    revision,
+    values,
+    save: async (next, rev) => {
+      saved.push([next, rev]);
+      return rev === "2";
+    },
+    reload: async () => void reloads.push(revision),
+  });
+  const reloads = [];
+  // This card rendered revision 1 and then unmounted: its own handle never changes again.
+  const stale = handle("1", { runs: [["a", "old"]] }, reloads);
+  mirror.publish(stale);
+  const update = (values) => ({ ...values, runs: [...values.runs, ["a", "new"]] });
+  const tries = [];
+  const latest = () => {
+    tries.push(tries.length);
+    // After the first failed save, another mounted card renders the reloaded revision 2.
+    if (tries.length === 2) mirror.publish(handle("2", { runs: [["a", "old"], ["b", "other"]] }, reloads));
+    return mirror.latest(stale);
+  };
+  assert.equal(await saveWithRetries(latest, update, { sleep: async () => {} }), true);
+  assert.deepEqual(saved.at(-1), [{ runs: [["a", "old"], ["b", "other"], ["a", "new"]] }, "2"], "built from revision 2, keeping the other card's record");
+  assert.equal(createSettingsMirror().latest(stale), stale, "nothing published: the card's own handle");
+
+  const card = read("client/card.tsx");
+  const remember = card.slice(card.indexOf("async function rememberRun("), card.indexOf("async function takeRunLock("));
+  assert.match(remember, /saveWithRetries\(newestSettings, \(values\) => \(\{ \.\.\.values, runs: addRunRecord\(values\.runs, entry, MAX_RUNS\) \}\)\)/);
+  assert.doesNotMatch(remember, /latestSettings\.current/, "no retry loop on the card's own, possibly stale handle");
+  assert.match(card, /settingsMirror\.publish\(settings as RetrySettings<PreferenceValues>\);/);
 });

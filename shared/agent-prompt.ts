@@ -29,7 +29,7 @@ export const DEFAULT_AGENT_SETTINGS = {
   closeTabsOnSuccess: true,
   /** After a fully successful run, the plugin archives the agent once its report went out. */
   archiveAgentOnSuccess: false,
-  /** Provider for Claude in Chrome runs; empty = the Provider setting. */
+  /** Provider for Claude in Chrome runs. Empty: `claude-chrome` when the daemon has it, else the Provider setting. */
   chromeProvider: "",
 } as const;
 
@@ -105,7 +105,25 @@ export function describeLaunch(config: ResolvedAgentConfig, browser: BrowserAgen
   } else {
     approval = `${runs}, starting in ${mode === "default" ? "Always Ask" : `"${mode}"`} mode: it asks you before every new tool.`;
   }
-  return `${where} ${approval} It can move between Auto, Always Ask and Plan later; other modes are stopped. It is told to ask you, as a question, before secrets or anything destructive.`;
+  return `${where} ${approval} ${modeDrift(providerOf(config.provider))} It is told to ask you, as a question, before secrets or anything destructive.`;
+}
+
+/** A mode's name as the provider's mode picker shows it (Claude's), else the quoted mode id. */
+function modeName(provider: string, mode: string): string {
+  if (providerFamily(provider) === "claude") {
+    if (mode === "auto") return "Auto";
+    if (mode === "default") return "Always Ask";
+    if (mode === "plan") return "Plan";
+  }
+  return `"${mode}"`;
+}
+
+/** Which modes the run may move between later, for this provider (see `runModeAllowed`). */
+export function modeDrift(provider: string): string {
+  const allowed = [...classifierModes(provider), ...(askFirstModes(provider) ?? [])].map((mode) => modeName(provider, mode));
+  if (allowed.length === 0) return "Any mode change stops it.";
+  if (allowed.length === 1) return `It must stay in ${allowed[0]} mode; other modes are stopped.`;
+  return `It can move between ${allowed.slice(0, -1).join(", ")} and ${allowed.at(-1)} later; other modes are stopped.`;
 }
 
 /** Whether a run with these settings can use Claude in Chrome, by the same rules as the launch. */

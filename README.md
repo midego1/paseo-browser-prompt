@@ -155,8 +155,9 @@ installed when the plugin is used) or **Not now**; **Check now** and **Update no
 
 `paseo plugin add` and `paseo plugin install` are aliases. The plugin has no runtime npm
 dependencies and no build step. Paseo 0.11.4 or later; thumbnails need a Paseo 0.13 or later app.
-Tailscale on the daemon host is needed only for the ChatGPT desktop app launcher; everything else
-works without it.
+Tailscale on the daemon host is needed only for the launcher that the ChatGPT and Claude desktop
+app buttons use (or set its bind address to 127.0.0.1 when the app runs on the daemon host);
+everything else works without it.
 
 ## Settings
 
@@ -167,8 +168,8 @@ connected app shares them.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Usual way to start (desktop) | ChatGPT desktop | The button highlighted on the card: ChatGPT desktop (through the launcher), ChatGPT web, Claude desktop, Paseo browser, Claude Chrome tab or Copy only. The card always offers every way. The Command Center opens ChatGPT this way, or the ChatGPT desktop app for any other choice. |
-| Usual way to start (iOS and Android) | Copy only | Copy only, ChatGPT web, Paseo browser or Claude in Chrome. There is no ChatGPT app or extension button on phones: ChatGPT documents no mobile deep link for a new prompt. |
+| Usual way to start (desktop) | ChatGPT desktop | The button highlighted on the card: ChatGPT desktop or Claude desktop (both through the launcher), ChatGPT web, Paseo browser, Claude Chrome tab or Copy only. The other ways stay on the card, except the Chrome tab button, which shows only when the Provider (or Claude in Chrome provider) is a Claude provider. The Command Center opens ChatGPT this way, or the ChatGPT desktop app for any other choice. |
+| Usual way to start (iOS and Android) | Copy only | Copy only, ChatGPT web, Paseo browser or Claude in Chrome. Phones get no Desktop buttons (ChatGPT or Claude): ChatGPT documents no mobile deep link for a new prompt. |
 | ChatGPT app deep link | `codex://new?prompt={prompt}` | `{prompt}` is replaced by the encoded prompt; only `codex:` and `https:` are accepted. Save and Reset to default. |
 | Collapse repeated blocks that are done | on | A later copy of a block in the chat is a full card with "Also shown earlier in this chat"; once done, copies collapse to "✓ Already done · Show". Off: every copy is a plain full card. |
 | Done marks | – | How many cards are marked done on this host; Clear removes all marks. |
@@ -182,7 +183,7 @@ connected app shares them.
 | Show step progress | on | The agent marks each numbered step as it starts it (`[browser-prompt step N/M] …`); the card shows "Step N of M · …" with a progress bar. |
 | Show live screenshot | on | The agent takes a viewport screenshot after each numbered step (never of pages showing secrets); the card shows them as thumbnails under the progress bar. Needs a Paseo 0.13+ app to show them. |
 | Thumbnails | All steps | All steps: one thumbnail per step with "Step N" above it and the latest highlighted, side by side when the card is wide enough, a horizontal strip otherwise, the latest alone on very narrow screens. Latest only: just the newest screenshot. |
-| Close tabs after a successful run | on | When every step succeeded, the agent closes the browser tabs it opened itself (with `browser_new_tab`) as its last action and names their hosts in its report. Tabs that were open before the run, tabs a step says to leave open and tabs it is unsure about stay open; a run that fails, stops or needs you leaves every tab open. In Always Ask mode you approve the close like any other new tool. An instruction in the agent's prompt, not enforced: it depends on the provider and model, which may close the wrong tab or none. |
+| Close tabs after a successful run | on | When every step succeeded, the agent closes the browser tabs it opened itself (with `browser_new_tab`, or in a Chrome tab run with `tabs_create_mcp`, closed with `tabs_close_mcp`) as its last action and names their hosts in its report. Tabs that were open before the run, tabs a step says to leave open and tabs it is unsure about stay open; a run that fails, stops or needs you leaves every tab open. In Always Ask mode you approve the close like any other new tool. An instruction in the agent's prompt, not enforced: it depends on the provider and model, which may close the wrong tab or none. |
 | Archive the agent after a successful run | off | When every step succeeded, the agent ends its report with a fixed last line and the plugin archives it, once the chat got the report or notice (with Report back to chat off, right away). Any other run stays open, and so does one you gave a follow-up. The card keeps showing it as done; its screenshots, time and tokens show until the card reloads. Applies to runs started after you turn it on. |
 | Talk to the chat | on | The agent may ask the chat that showed the card about the task; the plugin forwards each question framed as untrusted text (see below). |
 | Max questions to the chat per run | `10` | Whole number from 0 to 50; 0 works like Talk to the chat off. After the limit the agent asks you. |
@@ -190,10 +191,10 @@ connected app shares them.
 | Provider | `claude` | Paseo provider id; only providers with a known ask-first mode are started. |
 | Model | `claude-sonnet-5-5` | Model id, or `provider/model`. |
 | Permission mode | `auto` | Claude: `auto` (Auto mode, a model classifier reviews tool calls; the default), `default` (Always Ask) or `plan`. Oh My Pi: `ask`. Bypass, accept-edits and other modes are refused and fall back to the default mode. |
+| Claude in Chrome provider | empty | Paseo provider for the Chrome tab button, on the extension's Claude account. Empty: `claude-chrome` when the daemon has it, else Provider. |
 | Thinking | `high` | Thinking level passed to the provider. |
-| Claude in Chrome provider | empty | Paseo provider for the Claude in Chrome button, on the extension's Claude account. Empty: `claude-chrome` when the daemon has it, else Provider. |
 | Reset agent settings to default | – | Provider, model, mode and thinking back to the defaults above. |
-| Agent links on cards | – | How many cards remember a started agent; Clear forgets them. |
+| Agent links on cards | – | How many started runs cards remember (at most 5 per card and 200 in total, oldest dropped first); Clear forgets them after a second press (Clear anyway), since runs may still be going. A run whose link drops out keeps its mode guard and report back while the daemon runs, if the server already saw its link; its card no longer shows it. |
 
 **ChatGPT launcher**
 
@@ -241,8 +242,10 @@ Rules:
 ## Safe defaults
 
 - The ChatGPT launcher binds only to this machine's own Tailscale address (100.64.0.0/10) or, when
-  set explicitly, 127.0.0.1. Wildcards, LAN, public addresses and host names are refused; without a
-  usable address the launcher stays off and the ChatGPT app button only copies.
+  set explicitly, 127.0.0.1. It serves both the ChatGPT and the Claude desktop app buttons.
+  Wildcards, LAN, public addresses and host names are refused; without a usable address the
+  launcher stays off and those buttons only copy. An off launcher (no Tailscale yet, port in use)
+  is set up again when a button needs it, at most every 5 s, doubling to every 5 minutes.
 - Launcher links carry a random one-time id (18 bytes), expire after 10 minutes and are deleted on
   first fetch. The prompt is never in the launcher URL, and prompt text is never logged.
 - ChatGPT web mode puts the prompt in the `chatgpt.com` URL only when it is short and has nothing
@@ -664,6 +667,11 @@ model, frames what reaches the chat:
 - Questions are independent of the Report back setting and reach chats in any mode, framed (a
   status-only notice cannot carry a question). Questions per run are counted in memory (a plugin
   reload resets the count) and the same turn is forwarded once.
+- Stale questions: a question waits for the chat to be idle. If the run went on in the meantime
+  (the owner answered it directly, it ended a later turn, it is busy with a new turn or waits for
+  a permission, or it was closed), the question is dropped: the chat gets nothing and the run gets
+  no notice. A dropped question gives its slot back, also when a later question of the run was
+  counted while it waited.
 - With talking off (setting off, cap 0, or unreadable settings, which fail closed), after the cap,
   or when the chat is gone, archived, itself a browser run, in another workspace or busy for 2 hours,
   the server sends the run `[browser-prompt] Your question was not forwarded to the chat: ...` so it
@@ -706,6 +714,8 @@ No cron, and nothing is downloaded or installed without the owner's consent.
   Paseo stores only the installed commit, not the ref, so the followed branch is inferred: the
   branch whose tip is the installed commit (previous choice, then default branch), else the
   previously followed branch, else the default branch. "Follow branch" in settings overrides it.
+- State directory: `$XDG_STATE_HOME/paseo-plugin-browser-prompt/` when `XDG_STATE_HOME` is set,
+  else `~/.local/state/paseo-plugin-browser-prompt/` (written as `~/.local/state/...` below).
 - Fast-forward only: a commit-only (`--filter=tree:0`) bare copy of the remote in
   `~/.local/state/paseo-plugin-browser-prompt/history.git` is fetched for the tracked branch and
   `git merge-base --is-ancestor <installed> <latest>` must succeed; otherwise the result is
@@ -721,4 +731,4 @@ No cron, and nothing is downloaded or installed without the owner's consent.
 
 Switch an install to follow another branch: `paseo plugin update browser-prompt --ref <branch> --yes`
 (the updater then follows that branch).
-Update log: `~/.local/state/paseo-plugin-browser-prompt/update.log`.
+Update log: `~/.local/state/paseo-plugin-browser-prompt/update.log` (or under `$XDG_STATE_HOME`).

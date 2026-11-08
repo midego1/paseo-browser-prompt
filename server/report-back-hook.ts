@@ -3,7 +3,7 @@ import type { preferences } from "../shared/settings";
 import { DEFAULT_REPORT_MODE, MOST_RECENT_FALLBACK, parseReportMode, runKey, type ReportMode } from "../shared/report-back.ts";
 import { chatQuestionBudget } from "../shared/agent-prompt.ts";
 import { addLifecycleHook, type HookServer } from "./hooks.ts";
-import { createReportBack, type ReportBackOptions, type ReportBackPaseo, type TalkSettings } from "./report-back.ts";
+import { createReportBack, type RecordedRun, type ReportBackOptions, type ReportBackPaseo, type TalkSettings } from "./report-back.ts";
 
 type PreferencesState = PluginSettingsState<(typeof preferences)["schema"]>;
 export type SettingsReader = { read(): Promise<PreferencesState> };
@@ -42,13 +42,51 @@ export async function readArchiveOnSuccess(settings: SettingsReader): Promise<bo
   }
 }
 
-/** The card's `runs` entry for this run, if any. */
-export async function readRecordedRun(settings: SettingsReader, query: { sourceId: string; cardId: string; runId: string }) {
+/** Runs remembered as recorded, per daemon process. */
+const MAX_SEEN_RUNS = 1000;
+
+/**
+ * Runs this process has seen recorded by a card. A record can drop out of `runs` while its run still
+ * goes (a sixth run of the card, past the total cap, or Clear on "Agent links on cards"); the run
+ * keeps its mode guard and report back. Bounded: the oldest entries go first.
+ */
+export function createSeenRuns(max = MAX_SEEN_RUNS) {
+  const seen = new Map<string, RecordedRun>();
+  const key = (query: { sourceId: string; cardId: string; runId: string }) => `${runKey(query.sourceId, query.cardId)}\u0000${query.runId}`;
+  return {
+    get: (query: { sourceId: string; cardId: string; runId: string }) => seen.get(key(query)) ?? null,
+    add(query: { sourceId: string; cardId: string; runId: string }, record: RecordedRun) {
+      const k = key(query);
+      seen.delete(k);
+      seen.set(k, record);
+      if (seen.size > max) seen.delete(seen.keys().next().value!);
+    },
+    size: () => seen.size,
+  };
+}
+
+export type SeenRuns = ReturnType<typeof createSeenRuns>;
+
+/**
+ * The card's `runs` entry for this run, if any; with `seen`, also a run whose record this process
+ * read before (see `createSeenRuns`).
+ */
+export async function readRecordedRun(
+  settings: SettingsReader,
+  query: { sourceId: string; cardId: string; runId: string },
+  seen?: SeenRuns,
+): Promise<RecordedRun | null> {
   const state = await settings.read().catch(() => null);
-  if (state?.status !== "ready") return null;
-  const key = runKey(query.sourceId, query.cardId);
-  const entry = state.values.runs.find(([k, id]) => k === key && id === query.runId);
-  return entry ? { fallback: entry[2] === MOST_RECENT_FALLBACK } : null;
+  if (state?.status === "ready") {
+    const key = runKey(query.sourceId, query.cardId);
+    const entry = state.values.runs.find(([k, id]) => k === key && id === query.runId);
+    if (entry) {
+      const record = { fallback: entry[2] === MOST_RECENT_FALLBACK };
+      seen?.add(query, record);
+      return record;
+    }
+  }
+  return seen?.get(query) ?? null;
 }
 
 /**
@@ -60,14 +98,18 @@ export async function readRecordedRun(settings: SettingsReader, query: { sourceI
 export function registerReportBack(
   server: HookServer,
   settings: SettingsReader,
-  extra: Partial<Pick<ReportBackOptions, "store" | "archivedStore" | "log" | "busyWaitMs" | "permissionPollMs" | "recordWaitMs" | "recordPollMs">> = {},
+  extra: Partial<Pick<ReportBackOptions, "store" | "archivedStore" | "log" | "busyWaitMs" | "permissionPollMs" | "recordWaitMs" | "recordPollMs">> & {
+    /** Shared with the mode guard, so both keep a run whose record dropped out. */
+    seen?: SeenRuns;
+  } = {},
 ) {
+  const { seen = createSeenRuns(), ...rest } = extra;
   const reportBack = createReportBack({
     mode: () => readReportMode(settings),
     talk: () => readTalkSettings(settings),
     archiveOnSuccess: () => readArchiveOnSuccess(settings),
-    recordedRun: (query) => readRecordedRun(settings, query),
-    ...extra,
+    recordedRun: (query) => readRecordedRun(settings, query, seen),
+    ...rest,
   });
   const off = addLifecycleHook(server, "agent.turn_ended", async (event, { paseo }) => {
     void reportBack.onTurnEnded(event, paseo as ReportBackPaseo);

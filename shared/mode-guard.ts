@@ -27,11 +27,21 @@ async function readMode(agent: ModeGuardAgent): Promise<string | null> {
   return typeof mode === "string" && mode.trim() ? mode.trim() : null;
 }
 
+/** A failed read counts as "not readable yet", so one refresh error does not end the check. */
+async function tryReadMode(agent: ModeGuardAgent): Promise<string | null> {
+  try {
+    return await readMode(agent);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Checks the run's actual permission mode. Ask-first and classifier modes (Claude `default`, `plan`,
  * `auto`) are all fine, so drift between them is ignored. A refused mode (bypass, accept-edits, ...)
  * is set back when the SDK can (the 0.11 to 0.14 plugin SDK cannot), else the run is stopped by
- * archiving it. A mode that never becomes readable is reported as unverified, not as a violation.
+ * archiving it. A mode that never becomes readable (also when every read fails) is reported as
+ * unverified (`actualMode` null), not as a violation; it never throws.
  */
 export async function enforceRunMode(
   agent: ModeGuardAgent,
@@ -42,7 +52,7 @@ export async function enforceRunMode(
   const sleep = options.sleep ?? defaultSleep;
   let actual: string | null = null;
   for (let attempt = 0; attempt < attempts; attempt++) {
-    actual = await readMode(agent);
+    actual = await tryReadMode(agent);
     if (actual) break;
     if (attempt < attempts - 1) await sleep(options.delayMs ?? 500);
   }

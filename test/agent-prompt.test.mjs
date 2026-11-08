@@ -20,6 +20,7 @@ import {
 } from "../shared/agent-prompt.ts";
 import { enforceRunMode } from "../shared/mode-guard.ts";
 import { registerModeGuard } from "../server/mode-guard-hook.ts";
+import { createSeenRuns, readRecordedRun } from "../server/report-back-hook.ts";
 import { runLabels, sourceAllowsFullReport } from "../shared/report-back.ts";
 
 const steps = [
@@ -458,4 +459,77 @@ test("the settings screen cannot save a refused permission mode", () => {
   assert.match(screen, /const modeError = agentModeError\(/);
   assert.match(screen, /disabled=\{!agentDirty \|\| modeError !== null\}/, "Save is disabled while the mode is refused");
   assert.match(screen, /if \(modeError !== null\) return; \/\/ never store a refused mode/, "and the handler checks again");
+});
+
+test("mode guard: a failed mode read is retried and counted as unverified, never thrown", async () => {
+  // One refresh fails, then the run reads as bypass: still caught and stopped.
+  let reads = 0;
+  const archived = [];
+  const flaky = {
+    async refresh() {
+      if (reads++ === 0) throw new Error("timeout");
+      return { agent: { currentModeId: "bypassPermissions" } };
+    },
+    async archive() {
+      archived.push(true);
+    },
+  };
+  const result = await enforceRunMode(flaky, "claude", noSleep);
+  assert.equal(result.ok, false);
+  assert.equal(result.stopped, true);
+  assert.equal(archived.length, 1);
+  // Every read fails: unverified (the server guard checks again on each turn), not an error.
+  const down = { refresh: async () => Promise.reject(new Error("rpc")), archive: async () => assert.fail("must not stop an unread run") };
+  assert.deepEqual(await enforceRunMode(down, "claude", noSleep), { ok: true, actualMode: null, corrected: false });
+
+  // The card records the run as soon as it exists, before the mode check, and a check never throws.
+  const run = readFileSync(new URL("../client/agent-run.ts", import.meta.url), "utf8");
+  const created = run.indexOf("const recording = input.onCreated?.(agent.id, source)");
+  assert.ok(created > run.indexOf("agents.create(") && created < run.indexOf("await enforceRunMode("), "recorded before the mode check");
+  assert.match(run, /\}\)\.catch\(\(\): ModeCheck => \(\{ ok: true, actualMode: null, corrected: false \}\)\);/);
+  assert.ok(run.indexOf("await recording;") > run.indexOf("await enforceRunMode("), "the record is awaited after the check started");
+});
+
+test("a run seen recorded keeps its mode guard when its record drops out of runs", async () => {
+  let runs = [["src:c1", "run-1"]];
+  const settings = { read: async () => ({ status: "ready", revision: "1", values: { runs, reportBack: "auto" } }) };
+  const seen = createSeenRuns();
+  const query = { sourceId: "src", cardId: "c1", runId: "run-1" };
+  assert.deepEqual(await readRecordedRun(settings, query, seen), { fallback: false });
+  runs = [];
+  assert.equal(await readRecordedRun(settings, query), null, "without the memory a dropped record is gone");
+  assert.deepEqual(await readRecordedRun(settings, query, seen), { fallback: false }, "with it the run still counts");
+  assert.equal(await readRecordedRun(settings, { ...query, runId: "never-seen" }, seen), null, "only runs that were recorded");
+  const small = createSeenRuns(2);
+  for (const id of ["a", "b", "c"]) small.add({ ...query, runId: id }, { fallback: false });
+  assert.equal(small.size(), 2, "bounded");
+  assert.equal(small.get({ ...query, runId: "a" }), null, "oldest first");
+
+  // The guard: checked once while recorded, then the record is cleared and the run turns to bypass.
+  runs = [["src:c1", "run-1"]];
+  const logs = [];
+  const { handlers, server } = captureHooks();
+  const guard = registerModeGuard(server, settings, { log: (m) => logs.push(m), recordWaitMs: 0 });
+  // Each check reads the labels, then the mode: auto on the first check, bypass on the second.
+  const live = fakeRun({ modes: ["auto", "auto", "auto", "bypassPermissions"], labels: runLabels("src", "c1") });
+  const paseo = { agents: { ref: () => live.handle } };
+  await guard.check({ id: "run-1", provider: "claude" }, paseo);
+  assert.equal(live.calls.archive, 0);
+  runs = []; // Clear on "Agent links on cards", or a sixth run of the card
+  await guard.check({ id: "run-1", provider: "claude" }, paseo);
+  assert.equal(live.calls.archive, 1, "still stopped in a refused mode");
+  assert.deepEqual(logs, ["run run-1 was in mode bypassPermissions; stopped (archived)"]);
+  guard.dispose();
+  assert.equal(handlers.size, 0);
+
+  const index = readFileSync(new URL("../index.server.ts", import.meta.url), "utf8");
+  assert.match(index, /registerModeGuard\(server, settings, \{ seen: seenRuns \}\)/, "report back and the guard share one memory");
+  const screen = readFileSync(new URL("../client/settings-screen.tsx", import.meta.url), "utf8");
+  assert.match(screen, /actionLabel=\{confirmClearRuns \? "Clear anyway" : "Clear"\}/, "Clear asks again: runs may still be going");
+  assert.match(screen, /if \(!confirmClearRuns\) \{\s+setConfirmClearRuns\(true\);\s+return;\s+\}/);
+});
+
+test("an unverified start is logged with the agent id only", () => {
+  const run = readFileSync(new URL("../client/agent-run.ts", import.meta.url), "utf8");
+  assert.match(run, /if \(modeCheck\.ok && modeCheck\.actualMode === null\) \{\s+console\.warn\(`\[browser-prompt\] could not read the permission mode of run \$\{agent\.id\}; [^`$]*`\);/);
 });

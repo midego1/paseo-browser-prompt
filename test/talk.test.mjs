@@ -463,3 +463,22 @@ test("without a turn id, the same turn is recognized by its last assistant messa
   assert.equal(await reportBack.onTurnEnded(ended(undefined), w.paseo), "question-sent", "a new turn has a new message id");
   assert.equal(w.sent.length, 2);
 });
+
+test("a stale question gives back exactly its own slot, also when a later question was counted meanwhile", async () => {
+  const w = world({ source: { status: "running" }, finals: [QUESTION] });
+  const reportBack = createReportBack(options({ talk: async () => ({ maxQuestions: 2 }) }));
+  // Question 1 waits on the busy chat; the owner answers the run, which asks question 2.
+  const first = reportBack.onTurnEnded(ended("t1"), w.paseo);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  w.next();
+  const second = reportBack.onTurnEnded(ended("t2"), w.paseo);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  w.agents[SOURCE].status = "idle";
+  assert.equal(await first, "question-stale", "question 1 went out of date");
+  assert.equal(await second, "question-sent");
+  // One question was forwarded, so one of the two slots is left.
+  w.next();
+  assert.equal(await reportBack.onTurnEnded(ended("t3"), w.paseo), "question-sent", "the stale question's slot came back");
+  w.next();
+  assert.equal(await reportBack.onTurnEnded(ended("t4"), w.paseo), "question-redirected", "and only that one");
+});

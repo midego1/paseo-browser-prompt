@@ -10,8 +10,8 @@ export const MAX_URL_LENGTH = 1500;
 export const CHATGPT_AGENT_URL = "https://chatgpt.com/?hints=agent";
 
 /**
- * Header for ChatGPT desktop and web: ChatGPT uses its own computer use (@Computer), not the Chrome
- * extension, which has its own button and header below.
+ * Header for ChatGPT desktop and web: ChatGPT uses its own computer use (@Computer). The Claude
+ * desktop app has its own header below.
  */
 export const CHATGPT_HEADER =
   "Use computer use (@Computer) to carry out the following steps for me in my web browser, " +
@@ -215,13 +215,13 @@ export function explodeMessage(
   return items;
 }
 
-/** The full text placed on the clipboard and in the ChatGPT URL. */
 /** Header for the Claude desktop app: it should carry the steps out in Chrome through Claude in Chrome. */
 export const CLAUDE_DESKTOP_HEADER =
   "Use Claude in Chrome to carry out the following steps for me in my Chrome browser, where I am already signed in. " +
   "Stop and ask me before entering any password, token, or other secret, and before confirming any destructive " +
   "or irreversible action.";
 
+/** The full text placed on the clipboard, in the ChatGPT URL and in the app deep links. */
 export function composePrompt(title: string, body: string, header: string = CHATGPT_HEADER): string {
   const heading = title ? `Task: ${title}\n\n` : "";
   return `${header}\n\n${heading}${body.trim()}\n`;
@@ -338,15 +338,15 @@ export function planChatGptLaunch(prompt: string): LaunchPlan {
 export const DEFAULT_APP_LINK_TEMPLATE = "codex://new?prompt={prompt}";
 
 /**
- * Schemes the app deep-link template may use: the ChatGPT desktop app's documented `codex:` scheme,
- * and `https:` for a web fallback. Everything else (javascript:, file:, other apps) is refused.
- */
-/**
  * Documented deep link of the Claude desktop app (macOS, Windows, Linux): opens a new chat with `q`
  * in the prompt field, not sent (https://support.claude.com/en/articles/14729294). Fixed, not a setting.
  */
 export const CLAUDE_DESKTOP_LINK_TEMPLATE = "claude://claude.ai/new?q={prompt}";
 
+/**
+ * Schemes the app deep-link template may use: the ChatGPT desktop app's documented `codex:` scheme,
+ * and `https:` for a web fallback. Everything else (javascript:, file:, other apps) is refused.
+ */
 export const ALLOWED_APP_LINK_SCHEMES: readonly string[] = ["codex", "https"];
 
 /** Returns an error message, or null when the template is usable. */
