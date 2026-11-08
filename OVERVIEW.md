@@ -68,7 +68,7 @@ By default the agent starts in the background: the card shows its state (running
 - **Always send the full report**: also to chats that act without your approval. The report can contain text from web pages, so a page could try to steer that agent.
 - **Off**: nothing is sent.
 
-The report is escaped, fenced and marked as the browser agent's untrusted output, not your instructions. It is sent once per run, only for runs a card recorded, never to a browser agent itself, and not at all when the original chat no longer exists. When that chat's agent is busy or waiting for your answer, the report waits up to two hours for it to be idle and is dropped after that. Only the latest run of a card reports.
+The report is escaped, fenced and marked as the browser agent's untrusted output, not your instructions. It is sent once per run, only for runs a card recorded, never to a browser agent itself, and not at all when the original chat no longer exists. When that chat's agent is busy or waiting for your answer, the report waits up to two hours for it to be idle and is dropped after that. When you run a card again, an earlier run that is still going still reports (the newest 5 runs per card are kept).
 
 ## Updates
 

@@ -119,6 +119,7 @@ export type ReportResult =
   | "sent-status"
   | "sent-closed"
   | "not-forwarded-closed"
+  | "question-stale"
   | "canceled"
   | "aborted"
   | "duplicate"
@@ -203,7 +204,11 @@ export function createReportBack(options: ReportBackOptions) {
   const reported: string[] = [];
   /** Runs whose delivery failed once; a second failure keeps them claimed. */
   const retried = new Set<string>();
-  const inFlight = new Set<string>();
+  /**
+   * Runs whose turn is being read or claimed, with the handler that holds them. Released before a long
+   * wait for a busy chat, so a later turn of the same run is not taken for a duplicate.
+   */
+  const inFlight = new Map<string, symbol>();
   /** Questions each run sent to the chat (in memory; a plugin reload resets the count). */
   const questionCounts = new Map<string, number>();
   /** Turns whose question was already handled, so a repeated event is not forwarded twice. */
@@ -223,6 +228,11 @@ export function createReportBack(options: ReportBackOptions) {
 
   /** Per run: its latest turn, so an archive waiting on an older turn gives up. Oldest dropped first. */
   const latestTurns = new Map<string, { seq: number; turnId: string | null }>();
+  /**
+   * Per run: the turns read so far (turn id, else last message id), oldest first. A question is out of
+   * date once a later turn was read; a repeated event of its own turn does not count.
+   */
+  const seenTurns = new Map<string, string[]>();
   /** Runs that already had a final or stopped turn: a follow-up turn is the owner's, so it stays open. */
   const concluded = new Set<string>();
   const archived: string[] = [];
@@ -384,19 +394,31 @@ export function createReportBack(options: ReportBackOptions) {
    * Tells the run its question did not reach the chat, so it asks the owner instead. Returns null,
    * sending nothing, once the run had MAX_REDIRECTS notices: the caller then treats the turn as the
    * run's report. A run closed by now (the wait for a busy chat can take hours) gets no notice: a send
-   * would load it and start a turn.
+   * would load it and start a turn. A caller that just read the run passes what it found (`known`).
    */
-  async function redirect(run: ReturnType<ReportBackPaseo["agents"]["ref"]>, runId: string, reason: RedirectReason, max: number) {
+  async function redirect(
+    run: ReturnType<ReportBackPaseo["agents"]["ref"]>,
+    runId: string,
+    reason: RedirectReason,
+    max: number,
+    known?: Awaited<ReturnType<typeof runState>>,
+  ) {
     const count = redirectCounts.get(runId) ?? 0;
     if (count >= MAX_REDIRECTS) {
       log(`run ${runId} kept asking after ${count} redirects; handling its turn as the report`);
       return null;
     }
-    const fresh = await run.refresh().catch(() => {
-      log(`could not read the status of run ${runId}; sending its redirect notice anyway`);
-      return null;
-    });
-    if (fresh && !mayLoadRun(fresh.agent)) {
+    const closed =
+      known !== undefined
+        ? known === "closed"
+        : await run.refresh().then(
+            (fresh) => !!fresh && !mayLoadRun(fresh.agent),
+            () => {
+              log(`could not read the status of run ${runId}; sending its redirect notice anyway`);
+              return false;
+            },
+          );
+    if (closed) {
       log(`question of run ${runId} not forwarded; the run is closed or archived, so it is not told`);
       return "not-forwarded-closed" as const;
     }
@@ -405,6 +427,24 @@ export function createReportBack(options: ReportBackOptions) {
     await run.send(buildQuestionRedirect(reason, max), { activeTurnBehavior: "steer" });
     log(`question of run ${runId} not forwarded (${reason}); run told to ask the owner`);
     return "question-redirected" as const;
+  }
+
+  /**
+   * The run's state while its question waits: "busy" with a turn after the question's (an active turn
+   * with another turn id, or a pending permission), "closed" when closed, archived or gone, else
+   * "waiting". An active turn with the question's own id, or any while that id is unknown, is the
+   * question turn still settling. Null, logged, when the status could not be read.
+   */
+  async function runState(run: ReturnType<ReportBackPaseo["agents"]["ref"]>, event: TurnEndedEvent) {
+    const fresh = await run.refresh().catch(() => undefined);
+    if (fresh === undefined) {
+      log(`could not read the status of run ${event.agent.id}; its question is handled as still open`);
+      return null;
+    }
+    if (!fresh || !mayLoadRun(fresh.agent)) return "closed" as const;
+    const active = fresh.agent.activeTurn as { turnId?: unknown } | null | undefined;
+    const newTurn = !!active && !!event.turnId && typeof active.turnId === "string" && active.turnId !== event.turnId;
+    return newTurn || (fresh.agent.pendingPermissions?.length ?? 0) > 0 ? ("busy" as const) : ("waiting" as const);
   }
 
   /**
@@ -421,6 +461,7 @@ export function createReportBack(options: ReportBackOptions) {
     question: string,
     messageId: string | null,
     signal: AbortSignal,
+    leave: () => void,
   ): Promise<ReportResult | null> {
     const runId = event.agent.id;
     const run = paseo.agents.ref(runId);
@@ -462,15 +503,33 @@ export function createReportBack(options: ReportBackOptions) {
     if (questionCounts.size > 1000) questionCounts.delete(questionCounts.keys().next().value!);
     const message = buildQuestionMessage({ title: event.agent.title, runId, question, index: asked + 1, max });
     const deadline = Date.now() + busyWaitMs;
+    // The turn is handled from here on (its key guards a repeated event), so a later turn of the run
+    // may report while this one waits. A turn with neither a turn id nor a message id keeps the run
+    // held: nothing else would stop a repeated event from forwarding the question twice.
+    if (turnKey) leave();
     const delivered = await enqueue(sourceId, async () => {
       const settled = await waitUntilSettled(source, deadline, signal);
       if (typeof settled === "string") return settled;
       if (signal.aborted) throw new AbortedError();
+      // The owner answered the run in the meantime: the question is out of date.
+      if (movedPast(runId, turnKey)) return "stale" as const;
+      const state = await runState(run, event);
+      if (state === "busy" || state === "closed") return "stale" as const;
       await source.send(message, { activeTurnBehavior: "steer" });
       return "sent" as const;
     });
-    if (delivered === "missing") return redirect(run, runId, "chat-unavailable", max);
-    if (delivered === "timeout") return redirect(run, runId, "chat-busy", max);
+    // Before a redirect, one read of the run covers both the busy check here and redirect()'s closed check.
+    const state = delivered === "timeout" || delivered === "missing" ? await runState(run, event) : undefined;
+    // Neither the chat nor the run is told about a question the run has moved past. A closed run is
+    // left to redirect(), which sends it nothing.
+    if (delivered === "stale" || (delivered !== "sent" && (movedPast(runId, turnKey) || state === "busy"))) {
+      // Not forwarded, so it does not count against the run's questions.
+      if (questionCounts.get(runId) === asked + 1) questionCounts.set(runId, asked);
+      log(`question of run ${runId} not forwarded; the run went on in the meantime`);
+      return "question-stale";
+    }
+    if (delivered === "missing") return redirect(run, runId, "chat-unavailable", max, state);
+    if (delivered === "timeout") return redirect(run, runId, "chat-busy", max, state);
     log(`forwarded question ${asked + 1} of run ${runId} to agent ${sourceId}`);
     return "question-sent";
   }
@@ -490,6 +549,22 @@ export function createReportBack(options: ReportBackOptions) {
     latestTurns.set(runId, { seq, turnId });
     if (latestTurns.size > MAX_TRACKED_RUNS) latestTurns.delete(latestTurns.keys().next().value as string);
     return seq;
+  }
+
+  function noteSeen(runId: string, turn: string) {
+    const list = seenTurns.get(runId) ?? [];
+    if (!list.includes(turn)) list.push(turn);
+    if (list.length > 20) list.shift();
+    seenTurns.delete(runId);
+    seenTurns.set(runId, list);
+    if (seenTurns.size > MAX_TRACKED_RUNS) seenTurns.delete(seenTurns.keys().next().value as string);
+  }
+
+  /** Whether a turn of the run after `turn` was read. Unknown (never seen, or forgotten): no. */
+  function movedPast(runId: string, turn: string | null): boolean {
+    const list = turn ? seenTurns.get(runId) : undefined;
+    const index = list ? list.indexOf(turn!) : -1;
+    return index >= 0 && index < list!.length - 1;
   }
 
   function markConcluded(runId: string) {
@@ -521,7 +596,11 @@ export function createReportBack(options: ReportBackOptions) {
     if ((notRuns.get(runId) ?? 0) > Date.now()) return "not-a-run";
     await loaded;
     if (inFlight.has(runId)) return "duplicate";
-    inFlight.add(runId);
+    const holder = Symbol(runId);
+    inFlight.set(runId, holder);
+    const leave = () => {
+      if (inFlight.get(runId) === holder) inFlight.delete(runId);
+    };
     let claimed = false;
     try {
       const run = paseo.agents.ref(runId);
@@ -544,10 +623,15 @@ export function createReportBack(options: ReportBackOptions) {
       const closedRun = ended && !final;
       if (closedRun) log(`run ${runId} is closed or archived; its report is not read`);
       const finalText = final?.text ?? "";
+      const seenKey = event.turnId ? `${runId}:t:${event.turnId}` : final?.messageId ? `${runId}:m:${final.messageId}` : null;
+      if (seenKey) noteSeen(runId, seenKey);
       const question = event.outcome.kind === "completed" ? parseQuestion(stripRunSuccessMarker(finalText)) : null;
       if (question !== null) {
-        const handled = await handleQuestion(event, paseo, labels, runSnapshot, question, final?.messageId ?? null, signal);
+        const handled = await handleQuestion(event, paseo, labels, runSnapshot, question, final?.messageId ?? null, signal, leave);
         if (handled !== null) return handled;
+        // Handled as the report from here: hold the run again, unless a later turn of it took over.
+        if (inFlight.has(runId) && inFlight.get(runId) !== holder) return "duplicate";
+        inFlight.set(runId, holder);
         // Past its redirects: fall through and handle this turn as the run's report.
       }
       // Only the run's first final turn, with a report left next to the line and no question in it.
@@ -617,6 +701,8 @@ export function createReportBack(options: ReportBackOptions) {
       // from here, so waiting behind other reports for the same source counts against it.
       claim(runId);
       claimed = true;
+      // The claim now guards against a second report; the wait below can take hours.
+      leave();
       const deadline = Date.now() + busyWaitMs;
       const delivered = await enqueue(sourceId, async () => {
         const settled = await waitUntilSettled(source, deadline, signal);
@@ -657,7 +743,7 @@ export function createReportBack(options: ReportBackOptions) {
       if (claimed) release(runId);
       return "failed";
     } finally {
-      inFlight.delete(runId);
+      leave();
     }
   }
 

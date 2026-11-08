@@ -12,6 +12,8 @@ import {
   canStartRun,
   runKeyMarker,
   sharedRunRecord,
+  addRunRecord,
+  MAX_RUNS_PER_CARD,
   sameBlock,
   withinMessage,
   KEY_PREFIX,
@@ -221,4 +223,24 @@ test("a failed whole-chat read is retried with backoff", () => {
   assert.match(index, /READ_RETRY_DELAYS_MS = \[2000, 8000, 30000\]/);
   assert.match(index, /if \(result\.error\) throw new Error\(result\.error\);/);
   assert.match(index, /const delay = READ_RETRY_DELAYS_MS\[attempt\];\n\s+if \(delay === undefined\) return;/);
+});
+
+test("running a card again keeps the earlier run's record, so its mode is still checked and it still reports", async () => {
+  const { readRecordedRun } = await import("../server/report-back-hook.ts");
+  const a = ["agent:card", "run-a", "key:k"];
+  const b = ["agent:card", "run-b", "key:k"];
+  const runs = addRunRecord(addRunRecord([], a, 200), b, 200);
+  assert.deepEqual(runs, [a, b]);
+  assert.equal(sharedRunRecord(runs, "agent", "agent:card", "k")[1], "run-b", "the card shows the newest run");
+  const settings = { read: async () => ({ status: "ready", values: { runs } }) };
+  assert.ok(await readRecordedRun(settings, { sourceId: "agent", cardId: "card", runId: "run-a" }), "run A is still recorded");
+  assert.ok(await readRecordedRun(settings, { sourceId: "agent", cardId: "card", runId: "run-b" }));
+
+  assert.deepEqual(addRunRecord(runs, a, 200), [b, a], "the same run is recorded once, newest last");
+  let many = [];
+  for (let i = 0; i < MAX_RUNS_PER_CARD + 3; i++) many = addRunRecord(many, ["agent:card", `run-${i}`], 200);
+  many = addRunRecord(many, ["agent:other", "run-x"], 200);
+  assert.equal(many.filter(([key]) => key === "agent:card").length, MAX_RUNS_PER_CARD, "a card keeps its newest runs only");
+  assert.equal(many.at(-2)[1], `run-${MAX_RUNS_PER_CARD + 2}`);
+  assert.equal(addRunRecord(many, ["agent:third", "run-y"], 3).length, 3, "the total cap still applies");
 });
