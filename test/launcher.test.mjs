@@ -196,3 +196,23 @@ test("a port that was in use is tried again after the backoff", async () => {
   const index = readFileSync(new URL("../index.server.ts", import.meta.url), "utf8");
   assert.match(index, /server\.handle\(stashPrompt, async \(\{ prompt, target \}\) => \{\s*\/\/[^\n]*\n\s*await launcher\.retry\(\);/);
 });
+
+test("a retry queued behind a setting change applies the new setting, never the old one", async () => {
+  const started = [];
+  // Port 6001 is taken; 6002 listens.
+  const fake = (host, port) => {
+    started.push(port);
+    const listening = port !== 6001;
+    return { ready: Promise.resolve(), state: () => ({ listening, failure: listening ? undefined : "EADDRINUSE" }), stash: () => "http://x/open?id=1", close: async () => {} };
+  };
+  const launcher = createLauncher(noTailscale, fake, { now: () => 0 });
+  await launcher.configure({ trampolineHost: "127.0.0.1", trampolinePort: 6001 });
+  assert.equal(launcher.status().state, "port-in-use");
+  // The owner moves to port 6002; before that change applies, a stash asks for a retry.
+  const change = launcher.configure({ trampolineHost: "127.0.0.1", trampolinePort: 6002 });
+  const retried = launcher.retry();
+  await Promise.all([change, retried]);
+  assert.deepEqual(launcher.status(), { state: "listening", host: "127.0.0.1", port: 6002, source: "setting" }, "the retry did not bring back port 6001");
+  assert.deepEqual(started, [6001, 6002], "and did not start the old port again");
+  await launcher.close();
+});

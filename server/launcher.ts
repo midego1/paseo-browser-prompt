@@ -84,7 +84,8 @@ export function createLauncher(probes: HostProbes = systemProbes, start: Start =
   let applied: string | null = null;
   let generation = 0;
   let pending: Promise<void> = Promise.resolve();
-  let lastConfig: LauncherConfig | null = null;
+  /** The newest configuration asked for (set when `configure` is called, not when it applies). */
+  let requested: LauncherConfig | null = null;
   let retryAt = 0;
   let retryDelay = LAUNCHER_RETRY_MIN_MS;
 
@@ -103,7 +104,6 @@ export function createLauncher(probes: HostProbes = systemProbes, start: Start =
       retryDelay = LAUNCHER_RETRY_MIN_MS;
     }
     applied = key;
-    lastConfig = config;
     const mine = ++generation;
     await stop();
     status = { state: "starting", host: null, port, source: "none" };
@@ -136,8 +136,8 @@ export function createLauncher(probes: HostProbes = systemProbes, start: Start =
     }
   }
 
-  function enqueue(config: LauncherConfig, again: boolean): Promise<void> {
-    pending = pending.then(() => apply(config, again)).catch((error) => {
+  function enqueue(config: () => LauncherConfig, again: boolean): Promise<void> {
+    pending = pending.then(() => apply(config(), again)).catch((error) => {
       console.error(`[browser-prompt] trampoline setup failed: ${error instanceof Error ? error.message : String(error)}`);
       status = { ...status, state: "error" };
     });
@@ -147,19 +147,22 @@ export function createLauncher(probes: HostProbes = systemProbes, start: Start =
   return {
     /** Applies a configuration; calls are serialized. */
     configure(config: LauncherConfig): Promise<void> {
-      return enqueue(config, false);
+      requested = config;
+      return enqueue(() => config, false);
     },
     /**
-     * Before a stash: a launcher that is off is set up again with the last configuration, once the
-     * backoff since the previous retry has passed. Resolves when that attempt (if any) is done.
+     * Before a stash: a launcher that is off is set up again with the newest configuration, once the
+     * backoff since the previous retry has passed. Resolves when that attempt (if any) is done. The
+     * configuration is read when the retry's turn comes, so a retry queued behind a setting change
+     * never brings back the old host or port.
      */
     retry(): Promise<void> {
-      if (!lastConfig || status.state === "listening" || status.state === "starting") return pending;
+      if (!requested || status.state === "listening" || status.state === "starting") return pending;
       const at = now();
       if (at < retryAt) return pending;
       retryAt = at + retryDelay;
       retryDelay = Math.min(retryDelay * 2, LAUNCHER_RETRY_MAX_MS);
-      return enqueue(lastConfig, true);
+      return enqueue(() => requested!, true);
     },
     status: (): LauncherStatus => ({ ...status }),
     stash(prompt: string, template: string): StashOutcome {

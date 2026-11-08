@@ -486,7 +486,8 @@ test("mode guard: a failed mode read is retried and counted as unverified, never
   const run = readFileSync(new URL("../client/agent-run.ts", import.meta.url), "utf8");
   const created = run.indexOf("const recording = input.onCreated?.(agent.id, source)");
   assert.ok(created > run.indexOf("agents.create(") && created < run.indexOf("await enforceRunMode("), "recorded before the mode check");
-  assert.match(run, /\}\)\.catch\(\(\): ModeCheck => \(\{ ok: true, actualMode: null, corrected: false \}\)\);\n\s+await recording;/);
+  assert.match(run, /\}\)\.catch\(\(\): ModeCheck => \(\{ ok: true, actualMode: null, corrected: false \}\)\);/);
+  assert.ok(run.indexOf("await recording;") > run.indexOf("await enforceRunMode("), "the record is awaited after the check started");
 });
 
 test("a run seen recorded keeps its mode guard when its record drops out of runs", async () => {
@@ -526,4 +527,9 @@ test("a run seen recorded keeps its mode guard when its record drops out of runs
   const screen = readFileSync(new URL("../client/settings-screen.tsx", import.meta.url), "utf8");
   assert.match(screen, /actionLabel=\{confirmClearRuns \? "Clear anyway" : "Clear"\}/, "Clear asks again: runs may still be going");
   assert.match(screen, /if \(!confirmClearRuns\) \{\s+setConfirmClearRuns\(true\);\s+return;\s+\}/);
+});
+
+test("an unverified start is logged with the agent id only", () => {
+  const run = readFileSync(new URL("../client/agent-run.ts", import.meta.url), "utf8");
+  assert.match(run, /if \(modeCheck\.ok && modeCheck\.actualMode === null\) \{\s+console\.warn\(`\[browser-prompt\] could not read the permission mode of run \$\{agent\.id\}; [^`$]*`\);/);
 });

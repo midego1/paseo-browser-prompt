@@ -152,6 +152,10 @@ export async function startBrowserAgent(
   const modeCheck = await enforceRunMode(agent as unknown as ModeGuardAgent, providerOf(config.provider), {
     restoreMode: config.modeId,
   }).catch((): ModeCheck => ({ ok: true, actualMode: null, corrected: false }));
+  // Logged with the agent id only, so an unverified start is visible.
+  if (modeCheck.ok && modeCheck.actualMode === null) {
+    console.warn(`[browser-prompt] could not read the permission mode of run ${agent.id}; the server's mode guard checks it on its next turn`);
+  }
   await recording;
   return { agentId: agent.id, workspaceId, workspaceSource: source, modeCheck };
 }
