@@ -391,6 +391,63 @@ test("server mode guard waits briefly for the card to record a new run", async (
   assert.equal(run.calls.archive, 1, "checked once the record appeared");
 });
 
+test("server mode guard skips agents without run labels for a while, then reads their labels again", async () => {
+  const { handlers, server } = captureHooks();
+  const settings = recordedRuns([["src:c1", "worker"]]);
+  const guard = registerModeGuard(server, settings, { log: () => {}, recordWaitMs: 0, notARunTtlMs: 40 });
+  let labels = {};
+  const worker = fakeRun({ modes: ["bypassPermissions"] });
+  const refresh = worker.handle.refresh;
+  worker.handle.refresh = async () => {
+    const snapshot = await refresh();
+    return { agent: { ...snapshot.agent, labels } };
+  };
+  const paseo = { agents: { ref: () => worker.handle } };
+  const agent = { id: "worker", provider: "claude" };
+  await guard.check(agent, paseo);
+  assert.equal(worker.calls.refresh, 1);
+  for (let i = 0; i < 5; i++) await guard.check(agent, paseo);
+  assert.equal(worker.calls.refresh, 1, "an ordinary agent is not refreshed on every turn and permission request");
+  assert.equal(worker.calls.archive, 0);
+
+  // Labels can change, so the skip ends: once it carries recorded run labels it is checked again.
+  labels = runLabels("src", "c1");
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  await guard.check(agent, paseo);
+  assert.ok(worker.calls.refresh >= 2, "labels are read again after the skip");
+  assert.equal(worker.calls.archive, 1, "a real run in a refused mode is still stopped");
+  guard.dispose();
+});
+
+test("server mode guard does not skip an agent whose snapshot or labels could not be read", async () => {
+  const { server } = captureHooks();
+  const guard = registerModeGuard(server, recordedRuns([["src:c1", "run"]]), { log: () => {}, recordWaitMs: 0 });
+  const run = fakeRun({ modes: ["bypassPermissions"], labels: runLabels("src", "c1") });
+  const refresh = run.handle.refresh;
+  const misses = [null, { agent: { currentModeId: "bypassPermissions" } }, { agent: { currentModeId: "bypassPermissions", labels: null } }];
+  run.handle.refresh = async () => (misses.length ? (run.calls.refresh++, misses.shift()) : refresh());
+  const paseo = { agents: { ref: () => run.handle } };
+  const agent = { id: "run", provider: "claude" };
+  // First no snapshot, then a snapshot without labels, then labels null: none of them is cached.
+  for (let i = 0; i < 3; i++) await guard.check(agent, paseo);
+  assert.equal(run.calls.refresh, 3);
+  assert.equal(run.calls.archive, 0);
+  await guard.check(agent, paseo);
+  assert.ok(run.calls.refresh >= 4, "the labelled snapshot is read on the next turn");
+  assert.equal(run.calls.archive, 1, "the run in bypass mode is stopped");
+  guard.dispose();
+});
+
+test("server mode guard keeps checking real runs on every turn", async () => {
+  const { server } = captureHooks();
+  const guard = registerModeGuard(server, recordedRuns([["src:c1", "run"]]), { log: () => {}, recordWaitMs: 0 });
+  const run = fakeRun({ modes: ["auto"], labels: runLabels("src", "c1") });
+  const paseo = { agents: { ref: () => run.handle } };
+  for (let i = 0; i < 3; i++) await guard.check({ id: "run", provider: "claude" }, paseo);
+  assert.ok(run.calls.refresh >= 3, "every check reads the run again");
+  guard.dispose();
+});
+
 test("the settings screen cannot save a refused permission mode", () => {
   // agentModeError gates the Save action: refused modes produce an error, allowed ones none.
   for (const mode of ["bypassPermissions", "acceptEdits", "dontAsk", "full-access", "auto-review", "yolo"]) {

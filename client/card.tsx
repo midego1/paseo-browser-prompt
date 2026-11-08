@@ -19,6 +19,7 @@ import {
 import { endedRun } from "../shared/run-lock";
 import { acquireRunLock, finishRunLock } from "../shared/run-lock-rpc";
 import { MAX_DONE, MAX_RUNS, preferences } from "../shared/settings";
+import { saveWithRetries, withDoneMark } from "../shared/settings-save";
 import { stashPrompt } from "../shared/trampoline";
 import { CLAUDE_COLOR, CLAUDE_ICON, OPENAI_COLOR, OPENAI_ICON, PASEO_ICON } from "../shared/brand-icons";
 import { archivedAfterSuccess } from "../shared/archive-rpc";
@@ -195,8 +196,11 @@ export function BrowserPromptCard({
   // A later copy of a block in this chat is a full card with a hint (its buttons share the first's
   // done mark and run), and with "Collapse repeated blocks that are done" a done copy is one line
   // until the owner taps Show. Which block is first comes from the chat's index (client/chat-index).
+  // With collapsing off the index only matters while the shared run is going (the run guard below),
+  // so the chat is read then and not for every card.
   const collapse = settings.status === "ready" ? settings.values.mergeRepeats : true;
-  const first = withinMessage(useFirstOf(paseo, agentId, fingerprint, messageId, index, true), sameAs, messageId);
+  const sharedRunGoing = !!runAgentId && !canStartRun({ repeat: true, runState: shownState });
+  const first = withinMessage(useFirstOf(paseo, agentId, fingerprint, messageId, index, collapse || sharedRunGoing), sameAs, messageId);
   const isRepeat = first.state === "repeat";
   const [expanded, setExpanded] = useState(false);
   const view = repeatView({ collapse, first, done, expanded });
@@ -296,14 +300,18 @@ export function BrowserPromptCard({
     }
   }
 
+  /** Saves the done mark; a save that loses a revision race is retried against the newest settings. */
   async function toggleDone() {
     const next = !done;
     setLocalDone(next);
     if (settings.status !== "ready") return; // stays in memory for this session
-    const without = settings.values.done.filter((mark) => mark !== doneMark && mark !== runKey);
-    const list = next ? [...without, doneMark].slice(-MAX_DONE) : without;
-    const saved = await settings.save({ ...settings.values, done: list }, settings.revision);
-    if (saved) setLocalDone(null);
+    const saved = await saveWithRetries(
+      () => latestSettings.current,
+      (values) => ({ ...values, done: withDoneMark(values.done, doneMark, runKey, next, MAX_DONE) }),
+    );
+    // Saved: the stored mark shows. Not saved: the card shows the stored state again and says so.
+    setLocalDone(null);
+    if (!saved) toast.error(next ? "Could not save the done mark; try again." : "Could not remove the done mark; try again.");
   }
 
   const displayTitle = title || `Browser prompt ${index + 1}`;
