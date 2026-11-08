@@ -23,9 +23,11 @@ export const preferences = defineSettings({
      * app: copy, then open the ChatGPT desktop app with the prompt prefilled via the trampoline.
      * web-agent: copy, then open chatgpt.com agent mode (prefilled when short and secret-free).
      * copy-only: copy and remind to paste.
-     * claude-desktop: copy, then open the Claude desktop app with the prompt prefilled.
+     * claude-desktop: copy, then open the Claude desktop app with the prompt prefilled (through the
+     *   same launcher as the ChatGPT app).
      * paseo, chrome: a Paseo agent in the Paseo browser or in Claude in Chrome.
-     * The card offers every way; this one is highlighted.
+     * This one is highlighted on the card. The card shows the Chrome tab button only with a Claude
+     * provider, and no Desktop buttons on phones.
      */
     startMode: z.enum(["app", "web-agent", "copy-only", "claude-desktop", "paseo", "chrome"]).default("app"),
     /** iOS and Android. No documented ChatGPT mobile deep link for a new prompt exists. */
@@ -45,7 +47,10 @@ export const preferences = defineSettings({
     agentModel: z.string().default(DEFAULT_AGENT_SETTINGS.agentModel),
     agentThinking: z.string().default(DEFAULT_AGENT_SETTINGS.agentThinking),
     agentMode: z.string().default(DEFAULT_AGENT_SETTINGS.agentMode),
-    /** Paseo provider for Claude in Chrome runs, on the extension's Claude account; empty = the Provider setting. */
+    /**
+     * Paseo provider for Claude in Chrome runs, on the extension's Claude account. Empty:
+     * `claude-chrome` when the daemon has that provider, else the Provider setting.
+     */
     chromeProvider: z.string().default(DEFAULT_AGENT_SETTINGS.chromeProvider),
     /** Ask before starting the agent. */
     confirmAgentLaunch: z.boolean().default(DEFAULT_AGENT_SETTINGS.confirmAgentLaunch),
@@ -79,8 +84,10 @@ export const preferences = defineSettings({
      */
     reportBack: z.enum(REPORT_MODES).default(DEFAULT_REPORT_MODE),
     /**
-     * Agents started from cards: `[<agentId>:<cardId>, startedAgentId]`, oldest first, plus
-     * `"most-recent"` when the run started outside the card agent's workspace.
+     * Agents started from cards: `[<agentId>:<cardId>, startedAgentId, ...markers]`, oldest first, at
+     * most 5 per card and 200 in total. Markers: `"most-recent"` (always third when present) when the
+     * run started outside the card agent's workspace, `key:<content key>` for the block it was started
+     * for (copies of the block share the run), and `browser:chrome` for a Claude in Chrome run.
      */
     runs: z.array(z.tuple([z.string(), z.string()], z.string())).default([]),
     /** ChatGPT launcher bind address on the daemon host; empty = this machine's Tailscale IPv4. */

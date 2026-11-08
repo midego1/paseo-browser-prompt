@@ -536,10 +536,6 @@ export function createReportBack(options: ReportBackOptions) {
     return "question-sent";
   }
 
-  /**
-   * Handles one ended turn. Can wait for hours on a busy source, so callers must not await it inside
-   * a hook handler: Paseo cancels hook requests after 30 seconds. `dispose()` aborts every wait.
-   */
   /** Counts a new turn of a run; a repeated event for the same turn keeps its number. */
   function noteTurn(event: TurnEndedEvent): number {
     const runId = event.agent.id;
@@ -574,6 +570,10 @@ export function createReportBack(options: ReportBackOptions) {
     if (concluded.size > MAX_TRACKED_RUNS) concluded.delete(concluded.values().next().value as string);
   }
 
+  /**
+   * Handles one ended turn. Can wait for hours on a busy source, so callers must not await it inside
+   * a hook handler: Paseo cancels hook requests after 30 seconds. `dispose()` aborts every wait.
+   */
   function onTurnEnded(event: TurnEndedEvent, paseo: ReportBackPaseo): Promise<ReportResult> {
     const seq = noteTurn(event);
     const verdict = { succeeded: false };

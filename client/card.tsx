@@ -197,9 +197,8 @@ export function BrowserPromptCard({
   const shownState = asking && runState === "done" ? "asking" : runState;
   const confirmLaunch =
     settings.status === "ready" ? settings.values.confirmAgentLaunch : DEFAULT_AGENT_SETTINGS.confirmAgentLaunch;
-  /** The next run uses Claude Auto mode (classifier-reviewed, the default); the confirmation says so. */
-  // The browser of the run the owner just chose; the confirmation describes it.
-  // The launch the confirmation describes: resolved once, then started with exactly that config.
+  // The launch the confirmation describes (browser, provider and mode): resolved once, then started
+  // with exactly that config.
   const [pendingLaunch, setPendingLaunch] = useState<ResolvedLaunch | null>(null);
   const launchError = pendingLaunch && "error" in pendingLaunch ? pendingLaunch.error : null;
   const inChrome = pendingLaunch?.browser === "chrome";

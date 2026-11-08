@@ -121,7 +121,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
         <SettingsCard>
           <SettingsSelect
             label="Usual way to start (desktop)"
-            hint="Highlighted on the card. The card always offers every way. The Command Center opens ChatGPT as chosen here, or the ChatGPT app when this is a Paseo agent."
+            hint="Highlighted on the card; the other ways stay one press away (the Chrome tab button only with a Claude provider). The Command Center opens ChatGPT as chosen here, or the ChatGPT app when this is a Paseo agent."
             value={values.startMode}
             options={DESKTOP_OPTIONS}
             onValueChange={(startMode) => void settings.save({ ...values, startMode }, revision)}
@@ -302,7 +302,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
           <SettingsInput
             ref={chromeProviderInput}
             label="Claude in Chrome provider"
-            hint="Paseo provider for the agent's Chrome button (Claude in Chrome). The extension only connects when the agent uses its Claude account, so add a provider for that account to the daemon's config.json (see the README) and name it here. Empty: claude-chrome when the daemon has that provider, else the Provider above."
+            hint="Paseo provider for the card's Chrome tab button (Claude in Chrome). The extension only connects when the agent uses its Claude account, so add a provider for that account to the daemon's config.json (see the README) and name it here. Empty: claude-chrome when the daemon has that provider, else the Provider above."
             error={chromeProviderError ?? undefined}
             initialValue={values.chromeProvider}
             placeholder="claude-chrome"

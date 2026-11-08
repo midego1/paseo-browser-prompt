@@ -29,7 +29,7 @@ export const DEFAULT_AGENT_SETTINGS = {
   closeTabsOnSuccess: true,
   /** After a fully successful run, the plugin archives the agent once its report went out. */
   archiveAgentOnSuccess: false,
-  /** Provider for Claude in Chrome runs; empty = the Provider setting. */
+  /** Provider for Claude in Chrome runs. Empty: `claude-chrome` when the daemon has it, else the Provider setting. */
   chromeProvider: "",
 } as const;
 

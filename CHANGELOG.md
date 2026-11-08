@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.20.3 (unreleased)
+
+- Fixed: a copy of a block that started an earlier run now follows a newer run of the same steps
+  started from another copy, so pressing Run on it while that run goes no longer starts a second
+  one. A card's own new run shows only until its record is saved.
+- Fixed: a run is recorded on its card as soon as the agent exists, before its permission mode is
+  checked. A failed mode read no longer shows "Could not start" for an agent that is running
+  without a record (no mode guard, no report back, Run open for a duplicate); the read is retried,
+  and a mode that cannot be read counts as unverified, which the server's guard checks again at
+  every turn and permission request.
+- Fixed: a run whose card record drops out (a sixth run of the card, past 200 in total, or Clear on
+  **Agent links on cards**) keeps its mode guard and report back while the daemon runs, once the
+  server saw the record. Clear now asks for a second press (**Clear anyway**), since runs may still
+  be going.
+- Fixed: a run lock granted after the card stopped waiting (5 s) is handed back at once instead of
+  blocking every start of that block for 3 minutes; handing a lock back is tried once more on
+  failure.
+- The ChatGPT and Claude desktop launcher is set up again when a button needs it after it was off
+  (no Tailscale yet, port in use), at most every 5 s, doubling to every 5 minutes, without a setting
+  change or daemon restart.
+- Fixed: **Update now** pressed while a check runs installs after that check instead of returning
+  that check's result and installing nothing.
+- Fixed: a dropped (stale) question gives back exactly its own slot, also when a later question of
+  the run was counted while it waited.
+- Fixed: a timeline read started when the live stream was replaced or restored is cancelled with
+  the stream and dropped when the card follows another run, so an old run's steps and screenshots
+  never land on a new run.
+- Fixed: recording a run retries against the newest settings any card rendered, also when the
+  starting card unmounted meanwhile (it reused that card's stale revision); done marks too.
+- The launch confirmation names the modes the provider may move between (Oh My Pi: it must stay in
+  "ask"), instead of always "Auto, Always Ask and Plan".
+- Docs: the Claude desktop button uses the launcher too; the card hides the Chrome tab button
+  without a Claude provider and the Desktop buttons on phones; the Claude in Chrome provider
+  default; agent link limits; the `runs` record markers; the settings order; Close tabs covers
+  `tabs_close_mcp`; the state directory honors `$XDG_STATE_HOME` and holds `archived-runs.json`;
+  stale questions; misplaced doc comments moved to their code.
+
 ## 0.20.2 (unreleased)
 
 - ChatGPT Web no longer prefills the URL when the steps hold a Stripe (`sk_live_`, `rk_live_`,
