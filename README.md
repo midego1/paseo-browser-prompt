@@ -424,7 +424,8 @@ Which runs report:
 - The run must be listed in the host `runs` setting under `<source>:<card>`, which only the card
   writes (polled for up to 10 seconds, since the card saves it right after creating the agent).
   Run and source must be in the same workspace unless that entry records the most-recent fallback.
-  Running a card again replaces its entry, so only the latest run of a card reports.
+  Running a card again adds an entry (the newest 5 per card are kept), so an earlier run that is
+  still going is still mode-checked and still reports; the card shows the newest.
 - No report goes to a missing or archived source, to a source that is itself a browser run, or to
   the run itself, so reports cannot loop. Skips log agent ids only.
 - Once per run: run ids are claimed before delivery, also across concurrent events, and persisted

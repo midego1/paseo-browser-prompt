@@ -341,7 +341,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
           />
           <SettingsAction
             label="Agent links on cards"
-            hint={`${values.runs.length} card(s) remember a started agent on this host.`}
+            hint={`Cards on this host remember ${values.runs.length} started agent(s).`}
             actionLabel="Clear"
             disabled={values.runs.length === 0}
             onPress={() => void settings.save({ ...values, runs: [] }, revision)}

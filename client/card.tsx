@@ -7,6 +7,7 @@ import { z } from "zod";
 import { agentTitle, CHROME_RUN_MARKER, chromeAvailable, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, resolveAgentConfig, runStartedInChrome, describeLaunch, type BrowserAgent } from "../shared/agent-prompt";
 import { MOST_RECENT_FALLBACK } from "../shared/report-back";
 import {
+  addRunRecord,
   blockFingerprint,
   canStartRun,
   migrateDoneMark,
@@ -316,8 +317,9 @@ export function BrowserPromptCard({
   const displayTitle = title || `Browser prompt ${index + 1}`;
 
   /**
-   * Records the run in host settings. The server reports a run back only when it finds this entry,
-   * so a save that loses a revision race is retried against the newest settings.
+   * Records the run in host settings. The server checks a run's mode and reports it back only when it
+   * finds this entry, so an earlier run of this card keeps its own, and a save that loses a revision
+   * race is retried against the newest settings.
    */
   async function rememberRun(startedAgentId: string, fallback: boolean, chrome: boolean) {
     setLocalRun(startedAgentId);
@@ -333,8 +335,7 @@ export function BrowserPromptCard({
     for (let attempt = 0; attempt < 4; attempt++) {
       const current = latestSettings.current;
       if (current.status === "ready") {
-        const without = current.values.runs.filter(([entry]) => entry !== runKey);
-        const runs = [...without, entry].slice(-MAX_RUNS);
+        const runs = addRunRecord(current.values.runs, entry, MAX_RUNS);
         if (await current.save({ ...current.values, runs }, current.revision)) return;
       }
       await current.reload();
