@@ -10,16 +10,18 @@ import {
   addRunRecord,
   blockFingerprint,
   canStartRun,
+  cardRun,
   migrateDoneMark,
   repeatView,
+  runIsRecorded,
   runKeyMarker,
   sharedRunRecord,
   withinMessage,
 } from "../shared/repeats";
-import { endedRun } from "../shared/run-lock";
+import { acquireWithin, endedRun, finishWithRetry } from "../shared/run-lock";
 import { acquireRunLock, finishRunLock } from "../shared/run-lock-rpc";
 import { MAX_DONE, MAX_RUNS, preferences } from "../shared/settings";
-import { saveWithRetries, withDoneMark } from "../shared/settings-save";
+import { createSettingsMirror, saveWithRetries, withDoneMark, type RetrySettings } from "../shared/settings-save";
 import { stashPrompt } from "../shared/trampoline";
 import { CLAUDE_COLOR, CLAUDE_ICON, OPENAI_COLOR, OPENAI_ICON, PASEO_ICON } from "../shared/brand-icons";
 import { archivedAfterSuccess } from "../shared/archive-rpc";
@@ -50,6 +52,10 @@ const RUN_LOCK_RPC_TIMEOUT_MS = 5_000;
 
 const DESKTOP_HINT = "Your Paseo desktop app must be open: the agent drives the browser tabs there.";
 const CHROME_HINT = "Chrome must be open with the Claude extension signed in: the agent works there.";
+
+type PreferenceValues = z.output<(typeof preferences)["schema"]>;
+/** The newest settings any card rendered, for saves retried after their own card unmounted. */
+const settingsMirror = createSettingsMirror<PreferenceValues>();
 
 
 export const cardSchema = z.object({
@@ -90,11 +96,16 @@ export function BrowserPromptCard({
   const settings = useSettings(preferences);
   const latestSettings = useRef(settings);
   latestSettings.current = settings;
+  settingsMirror.publish(settings as RetrySettings<PreferenceValues>);
+  const newestSettings = () => settingsMirror.latest(latestSettings.current as RetrySettings<PreferenceValues>);
   const toast = useToast();
   const [localDone, setLocalDone] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
+  // A run this card started or was handed by the run lock, until its record arrives (see cardRun).
   const [localRun, setLocalRun] = useState<string | null>(null);
+  // The run this card started in this session: before its first turn an idle snapshot means "starting".
+  const [startedHere, setStartedHere] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const paseo = usePaseo();
   const sourceWorkspaceId = useAgent(agentId, (agent) => agent.workspaceId);
@@ -116,16 +127,21 @@ export function BrowserPromptCard({
 
   // Copies of a block in this chat share its run: the newest one started from this card's id or for
   // the same content.
-  const runRecord = settings.status === "ready" ? sharedRunRecord(settings.values.runs, agentId, runKey, key) : null;
+  const storedRuns = settings.status === "ready" ? settings.values.runs : null;
+  const runRecord = storedRuns ? sharedRunRecord(storedRuns, agentId, runKey, key) : null;
   const storedRun = runRecord?.[1] ?? null;
-  const runAgentId = localRun ?? storedRun;
-  // Started in this card session: an idle snapshot before its first turn means "starting".
+  const runAgentId = cardRun(localRun, storedRun, storedRuns ?? []);
+  // Once recorded, the shared record decides: a newer run started from another copy shows here.
+  const localRecorded = !!localRun && !!storedRuns && runIsRecorded(storedRuns, localRun);
+  useEffect(() => {
+    if (localRecorded) setLocalRun(null);
+  }, [localRecorded]);
   const {
     state: followedState,
     status: runStatus,
     createdAt: runCreatedAt,
     updatedAt: runUpdatedAt,
-  } = useRunState(runAgentId, localRun !== null && localRun === runAgentId);
+  } = useRunState(runAgentId, startedHere !== null && startedHere === runAgentId);
   // A run the plugin archived after it succeeded is closed or gone from the app's cache: still done.
   const checkArchived = useRpc(archivedAfterSuccess);
   const [archivedRun, setArchivedRun] = useState<string | null>(null);
@@ -306,7 +322,7 @@ export function BrowserPromptCard({
     setLocalDone(next);
     if (settings.status !== "ready") return; // stays in memory for this session
     const saved = await saveWithRetries(
-      () => latestSettings.current,
+      newestSettings,
       (values) => ({ ...values, done: withDoneMark(values.done, doneMark, runKey, next, MAX_DONE) }),
     );
     // Saved: the stored mark shows. Not saved: the card shows the stored state again and says so.
@@ -319,10 +335,11 @@ export function BrowserPromptCard({
   /**
    * Records the run in host settings. The server checks a run's mode and reports it back only when it
    * finds this entry, so an earlier run of this card keeps its own, and a save that loses a revision
-   * race is retried against the newest settings.
+   * race is retried against the newest settings (any mounted card's, also after this one unmounted).
    */
   async function rememberRun(startedAgentId: string, fallback: boolean, chrome: boolean) {
     setLocalRun(startedAgentId);
+    setStartedHere(startedAgentId);
     setStartedBrowser({ agentId: startedAgentId, chrome });
     // Position 2 stays the fallback marker the server reads; the content marker comes after it.
     const entry: [string, string, ...string[]] = [
@@ -332,16 +349,8 @@ export function BrowserPromptCard({
       runKeyMarker(key),
       ...(chrome ? [CHROME_RUN_MARKER] : []),
     ];
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const current = latestSettings.current;
-      if (current.status === "ready") {
-        const runs = addRunRecord(current.values.runs, entry, MAX_RUNS);
-        if (await current.save({ ...current.values, runs }, current.revision)) return;
-      }
-      await current.reload();
-      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
-    }
-    toast.error("Could not record the agent on this card; it will not report back to this chat.");
+    const saved = await saveWithRetries(newestSettings, (values) => ({ ...values, runs: addRunRecord(values.runs, entry, MAX_RUNS) }));
+    if (!saved) toast.error("Could not record the agent on this card; it will not report back to this chat.");
   }
 
   /**
@@ -349,24 +358,14 @@ export function BrowserPromptCard({
    * copy is starting or just started the run, this card shows that run (or waits for its record).
    * A run this card shows that has ended does not hold it. A daemon that cannot be asked (error or
    * no answer within RUN_LOCK_RPC_TIMEOUT_MS) does not block the start; the shared run record still
-   * applies.
+   * applies, and a grant that arrives after the timeout is handed back at once.
    */
   async function takeRunLock(): Promise<{ token: string | null } | null> {
     const lockInput = { sourceAgentId: agentId, ...fingerprint, endedRunId: endedRun(runAgentId, shownState) ?? undefined };
-    let result: Awaited<ReturnType<typeof lockRun>>;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      result = await Promise.race([
-        lockRun(lockInput),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error("no answer from the daemon")), RUN_LOCK_RPC_TIMEOUT_MS);
-        }),
-      ]);
-    } catch (error) {
-      console.warn(`[browser-prompt] run lock unavailable, starting without it: ${error instanceof Error ? error.message : String(error)}`);
+    const result = await acquireWithin(() => lockRun(lockInput), RUN_LOCK_RPC_TIMEOUT_MS, (token) => finishLock(token));
+    if ("unavailable" in result) {
+      console.warn(`[browser-prompt] run lock unavailable, starting without it: ${result.unavailable}`);
       return { token: null };
-    } finally {
-      clearTimeout(timer);
     }
     if (result.ok) return { token: result.token };
     if (result.agentId) setLocalRun(result.agentId);
@@ -379,10 +378,11 @@ export function BrowserPromptCard({
     return null;
   }
 
+  /** Hands the lock back (tried once more on failure), so the block is not held for RUN_LOCK_TTL_MS. */
   function finishLock(token: string | null, startedAgentId?: string) {
     if (!token) return;
-    void unlockRun({ sourceAgentId: agentId, ...fingerprint, token, agentId: startedAgentId }).catch((error) => {
-      console.warn(`[browser-prompt] could not hand back the run lock: ${error instanceof Error ? error.message : String(error)}`);
+    void finishWithRetry(() => unlockRun({ sourceAgentId: agentId, ...fingerprint, token, agentId: startedAgentId })).then((ok) => {
+      if (!ok) console.warn("[browser-prompt] could not hand back the run lock");
     });
   }
 
@@ -407,11 +407,15 @@ export function BrowserPromptCard({
         steps: text,
         settings: values,
         launch,
+        // Recorded as soon as it exists, before its mode check: the server's guard and report back
+        // then cover it even when that check is slow or cannot read its mode.
+        onCreated: async (createdId, workspaceSource) => {
+          // The lock now names the run, so a copy pressed before the record arrives shows this run.
+          finishLock(lockToken, createdId);
+          lockToken = null;
+          await rememberRun(createdId, workspaceSource === "most-recent", browser === "chrome");
+        },
       });
-      // The lock now names the run, so a copy pressed before the record arrives shows this run.
-      finishLock(lockToken, started.agentId);
-      lockToken = null;
-      await rememberRun(started.agentId, started.workspaceSource === "most-recent", browser === "chrome");
       if (!started.modeCheck.ok) {
         // The run left its permission mode and was stopped (or could not be): keep it on the card.
         setRunError(started.modeCheck.message);

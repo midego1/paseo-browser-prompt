@@ -10,6 +10,25 @@ export interface RetrySettings<Values> {
   reload(): Promise<void>;
 }
 
+/**
+ * The newest settings any mounted card rendered. Every card reads the same host settings document,
+ * so a retried save of a card that was unmounted meanwhile (its own handle no longer re-renders)
+ * still finds the newest revision here while another card or the settings page is mounted.
+ */
+export function createSettingsMirror<Values>() {
+  let latest: RetrySettings<Values> | null = null;
+  return {
+    /** Called on every render with the hook's current state. */
+    publish(state: RetrySettings<Values>): void {
+      latest = state;
+    },
+    /** The newest published state, else `fallback` (the caller's own handle). */
+    latest(fallback: RetrySettings<Values>): RetrySettings<Values> {
+      return latest ?? fallback;
+    },
+  };
+}
+
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { blockFingerprint } from "../shared/block-key.ts";
-import { createRunLocks, endedRun, RUN_LOCK_HOLD_MS, RUN_LOCK_TTL_MS, runLockKey } from "../shared/run-lock.ts";
+import { acquireWithin, createRunLocks, endedRun, finishWithRetry, RUN_LOCK_HOLD_MS, RUN_LOCK_TTL_MS, runLockKey } from "../shared/run-lock.ts";
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const steps = "1. Open https://example.com\n2. Read the first paragraph.\n3. Report it.";
@@ -97,7 +97,7 @@ test("the card takes the daemon's lock before starting and hands it back on star
   const lockAt = launch.indexOf("await takeRunLock()");
   const startAt = launch.indexOf("await startBrowserAgent(");
   assert.ok(lockAt > 0 && lockAt < startAt, "lock before the start");
-  assert.match(launch, /finishLock\(lockToken, started\.agentId\)/, "a started run names itself in the lock");
+  assert.match(launch, /onCreated: async \(createdId, workspaceSource\) => \{[\s\S]*?finishLock\(lockToken, createdId\);\s+lockToken = null;/, "a started run names itself in the lock");
   assert.match(launch, /finally \{\s*\/\/[^\n]*\n\s*finishLock\(lockToken\);/, "a failed start releases it");
   assert.match(card, /if \(result\.agentId\) setLocalRun\(result\.agentId\);/, "a refused copy shows the run");
   assert.match(card, /endedRunId: endedRun\(runAgentId, shownState\)/, "an ended run does not hold Run again");
@@ -106,4 +106,38 @@ test("the card takes the daemon's lock before starting and hands it back on star
   const server = read("index.server.ts");
   assert.match(server, /runLocks\.acquire\(runLockKey\(sourceAgentId, \{ key, length, check \}\), endedRunId\)/);
   assert.match(server, /server\.handle\(finishRunLock,/);
+});
+
+test("a lock grant that arrives after the RPC timeout is handed back at once; finishing retries once", async () => {
+  const released = [];
+  let grant;
+  const late = new Promise((resolve) => (grant = resolve));
+  const result = await acquireWithin(() => late, 10, (token) => released.push(token));
+  assert.deepEqual(result, { unavailable: "no answer from the daemon" }, "the card starts without the lock");
+  grant({ ok: true, token: "t-late" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(released, ["t-late"], "the late grant does not block the block for RUN_LOCK_TTL_MS");
+
+  // A late refusal, an answer in time and an error release nothing.
+  let refuse;
+  await acquireWithin(() => new Promise((resolve) => (refuse = resolve)), 10, (token) => released.push(token));
+  refuse({ ok: false, agentId: null });
+  assert.deepEqual(await acquireWithin(async () => ({ ok: true, token: "t1" }), 1000, (token) => released.push(token)), { ok: true, token: "t1" });
+  assert.deepEqual(await acquireWithin(async () => Promise.reject(new Error("rpc down")), 1000, () => {}), { unavailable: "rpc down" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(released, ["t-late"]);
+
+  let calls = 0;
+  const flaky = async () => {
+    if (++calls === 1) throw new Error("blip");
+  };
+  assert.equal(await finishWithRetry(flaky, { sleep: async () => {} }), true);
+  assert.equal(calls, 2, "tried once more");
+  let down = 0;
+  assert.equal(await finishWithRetry(async () => Promise.reject(new Error(`x${++down}`)), { sleep: async () => {} }), false);
+  assert.equal(down, 2, "and only once more");
+
+  const card = read("client/card.tsx");
+  assert.match(card, /acquireWithin\(\(\) => lockRun\(lockInput\), RUN_LOCK_RPC_TIMEOUT_MS, \(token\) => finishLock\(token\)\)/);
+  assert.match(card, /finishWithRetry\(\(\) => unlockRun\(/);
 });

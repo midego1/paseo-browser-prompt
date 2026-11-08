@@ -74,6 +74,8 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
   const [maxQuestionsDraft, setMaxQuestionsDraft] = useState<string | null>(null);
   const chromeProviderInput = useRef<SettingsInputHandle>(null);
   const [chromeProviderDraft, setChromeProviderDraft] = useState<string | null>(null);
+  // Clearing the agent links asks once more: runs may still be going.
+  const [confirmClearRuns, setConfirmClearRuns] = useState(false);
 
   if (settings.status !== "ready") {
     const message = settings.status === "loading" ? "Loading..." : `Settings unavailable: ${settings.error}`;
@@ -341,10 +343,21 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
           />
           <SettingsAction
             label="Agent links on cards"
-            hint={`Cards on this host remember ${values.runs.length} started agent(s).`}
-            actionLabel="Clear"
+            hint={
+              confirmClearRuns
+                ? `Runs may still be going. Their cards lose the link, status and Run guard; until the daemon restarts, a run it already saw keeps its mode guard and report back. Press Clear anyway to clear ${values.runs.length} link(s).`
+                : `Cards on this host remember ${values.runs.length} started agent(s).`
+            }
+            actionLabel={confirmClearRuns ? "Clear anyway" : "Clear"}
             disabled={values.runs.length === 0}
-            onPress={() => void settings.save({ ...values, runs: [] }, revision)}
+            onPress={async () => {
+              if (!confirmClearRuns) {
+                setConfirmClearRuns(true);
+                return;
+              }
+              setConfirmClearRuns(false);
+              await settings.save({ ...values, runs: [] }, revision);
+            }}
           />
         </SettingsCard>
       </SettingsSection>

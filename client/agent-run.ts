@@ -118,6 +118,11 @@ export async function startBrowserAgent(
     settings: AgentSettingsInput;
     /** The launch the owner confirmed: started with exactly this config. */
     launch?: Extract<ResolvedLaunch, { config: unknown }>;
+    /**
+     * Called as soon as the agent exists, before its mode is checked, so the card records it (and
+     * the server's guard and report back see it) even when the check is slow or cannot read it.
+     */
+    onCreated?: (agentId: string, workspaceSource: WorkspaceSource) => Promise<void>;
   },
 ): Promise<StartedAgent> {
   const { workspaceId, source } = await chooseWorkspace(paseo, input.sourceAgentId, input.cachedWorkspaceId);
@@ -139,10 +144,14 @@ export async function startBrowserAgent(
     ),
     labels: runLabels(input.sourceAgentId, input.cardId),
   });
+  // From here on the agent runs: nothing below may throw, or the card would call it "not started".
+  const recording = input.onCreated?.(agent.id, source).catch(() => undefined);
   // Paseo or the provider can end up in another mode than requested; never leave a run going in a
-  // refused mode (drift between Auto, Always Ask and Plan is fine).
+  // refused mode (drift between the provider's allowed modes is fine). An unreadable mode is
+  // unverified; the server's guard checks it again at every turn and permission request.
   const modeCheck = await enforceRunMode(agent as unknown as ModeGuardAgent, providerOf(config.provider), {
     restoreMode: config.modeId,
-  });
+  }).catch((): ModeCheck => ({ ok: true, actualMode: null, corrected: false }));
+  await recording;
   return { agentId: agent.id, workspaceId, workspaceSource: source, modeCheck };
 }

@@ -523,8 +523,10 @@ export function createReportBack(options: ReportBackOptions) {
     // Neither the chat nor the run is told about a question the run has moved past. A closed run is
     // left to redirect(), which sends it nothing.
     if (delivered === "stale" || (delivered !== "sent" && (movedPast(runId, turnKey) || state === "busy"))) {
-      // Not forwarded, so it does not count against the run's questions.
-      if (questionCounts.get(runId) === asked + 1) questionCounts.set(runId, asked);
+      // Not forwarded, so it does not count against the run's questions: it gives back its own slot,
+      // also when a later question of the run was counted in the meantime.
+      const count = questionCounts.get(runId);
+      if (count !== undefined && count > 0) questionCounts.set(runId, count - 1);
       log(`question of run ${runId} not forwarded; the run went on in the meantime`);
       return "question-stale";
     }

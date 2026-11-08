@@ -1,8 +1,9 @@
 // Run: npm test. Per-machine launcher address: detection, fallbacks, and the launcher staying off.
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { createLauncher } from "../server/launcher.ts";
+import { createLauncher, LAUNCHER_RETRY_MIN_MS } from "../server/launcher.ts";
 import {
   chooseTrampolineHost,
   isTailscaleIPv4,
@@ -136,4 +137,62 @@ test("listens on the chosen host, restarts on a new port, reports EADDRINUSE", a
   // the old port was released when the config changed
   await assert.rejects(fetch(`http://127.0.0.1:${port}/open?id=x`));
   await launcher.close();
+});
+
+test("an off launcher is set up again before a stash, with a bounded backoff", async () => {
+  let now = 0;
+  let probes = 0;
+  let tailscale = false;
+  const flaky = {
+    tailscaleIp: async () => {
+      probes++;
+      if (!tailscale) throw new Error("ENOENT");
+      return "100.101.2.3\n";
+    },
+    interfaces: () => ({}),
+  };
+  const started = [];
+  const fake = (host, port) => {
+    started.push(`${host}:${port}`);
+    return { ready: Promise.resolve(), state: () => ({ listening: true }), stash: () => "http://x/open?id=1", close: async () => {} };
+  };
+  const launcher = createLauncher(flaky, fake, { now: () => now });
+  await launcher.configure({ trampolineHost: "", trampolinePort: 5299 });
+  assert.equal(launcher.status().state, "no-tailscale");
+  const first = probes;
+  await launcher.retry();
+  assert.equal(probes, first + 1, "a stash re-probes Tailscale");
+  await launcher.retry();
+  assert.equal(probes, first + 1, "not again within the backoff");
+  // Tailscale comes up; the next retry after the backoff starts the launcher.
+  tailscale = true;
+  now += LAUNCHER_RETRY_MIN_MS - 1;
+  await launcher.retry();
+  assert.equal(launcher.status().state, "no-tailscale", "the backoff holds");
+  now += LAUNCHER_RETRY_MIN_MS * 2;
+  await launcher.retry();
+  assert.equal(launcher.status().state, "listening");
+  assert.deepEqual(started, ["100.101.2.3:5299"]);
+  await launcher.retry();
+  assert.equal(started.length, 1, "a listening launcher is left alone");
+  await launcher.close();
+});
+
+test("a port that was in use is tried again after the backoff", async () => {
+  const port = 17299 + Math.floor(Math.random() * 1000);
+  let now = 0;
+  const blocker = createServer();
+  await new Promise((resolve) => blocker.listen(port, "127.0.0.1", resolve));
+  const launcher = createLauncher(noTailscale, undefined, { now: () => now });
+  await launcher.configure({ trampolineHost: "127.0.0.1", trampolinePort: port });
+  assert.equal(launcher.status().state, "port-in-use");
+  await new Promise((resolve) => blocker.close(resolve));
+  await launcher.retry();
+  assert.equal(launcher.status().state, "listening", "the freed port is picked up without a setting change");
+  const outcome = launcher.stash("prompt", "");
+  assert.ok("url" in outcome);
+  await launcher.close();
+
+  const index = readFileSync(new URL("../index.server.ts", import.meta.url), "utf8");
+  assert.match(index, /server\.handle\(stashPrompt, async \(\{ prompt, target \}\) => \{\s*\/\/[^\n]*\n\s*await launcher\.retry\(\);/);
 });

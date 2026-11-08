@@ -299,3 +299,14 @@ test("text typed through the extension's tools is masked on the card", () => {
   const other = typed("mcp__other__computer", { text: "x" });
   assert.equal(other.lines.find((line) => line.label === "Text")?.masked ?? false, false);
 });
+
+test("the confirmation names only the modes the run's provider may move between", () => {
+  const omp = resolveAgentConfig({ ...DEFAULT_AGENT_SETTINGS, agentProvider: "omp", agentModel: "m", agentMode: "ask" });
+  const ompText = describeLaunch(omp, "paseo");
+  assert.doesNotMatch(ompText, /Auto, Always Ask and Plan/, "Oh My Pi has no Auto or Plan mode");
+  assert.match(ompText, /It must stay in "ask" mode; other modes are stopped\./);
+  const claude = describeLaunch(resolveAgentConfig(DEFAULT_AGENT_SETTINGS), "paseo");
+  assert.match(claude, /It can move between Auto, Always Ask and Plan later; other modes are stopped\./);
+  const chrome = describeLaunch(resolveAgentConfig({ ...DEFAULT_AGENT_SETTINGS, browserAgent: "chrome", chromeProvider: "claude-chrome" }), "chrome");
+  assert.match(chrome, /Auto, Always Ask and Plan/, "claude-chrome is a Claude provider");
+});

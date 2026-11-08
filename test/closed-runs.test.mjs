@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { createReportBack } from "../server/report-back.ts";
 import { mayLoadRun, QUESTION_MARKER, readRunTail } from "../shared/agent-prompt.ts";
 import { buildClosedRunNotice, runLabels } from "../shared/report-back.ts";
+import { createTailReads } from "../shared/tail-reads.ts";
 
 const SOURCE = "agent-source";
 const RUN = "agent-run";
@@ -98,7 +99,7 @@ test("readRunTail: a failed status check rejects without reading", async () => {
 test("the card reads a run's timeline only through readRunTail, and never settles on a closed run", () => {
   const progress = source("client/step-progress.tsx");
   assert.doesNotMatch(progress, /timeline\.refetch|\.refetch\(/);
-  assert.match(progress, /readRunTail\(paseo\.agents\.ref\(id\), 40, \(\) => statusNow\.current, \(\) => cancelled\)/);
+  assert.match(progress, /readRunTail\(paseo\.agents\.ref\(id\), 40, \(\) => statusNow\.current, \(\) => !read\.current\)/);
   assert.match(progress, /statusNow\.current = status;/);
   // live -> closed: the settle read is skipped, and a closed run does not count as already read.
   assert.match(progress, /if \(!settledNow \|\| !agentId \|\| stopped\) return;/);
@@ -293,4 +294,28 @@ test("question redirect: a run closed while its question waited for a busy chat 
   const reportBack = createReportBack(reportOptions({ talk: async () => ({ maxQuestions: 5 }), busyWaitMs: 5 }));
   assert.equal(await reportBack.onTurnEnded(ended(), w.paseo), "not-forwarded-closed");
   assert.deepEqual(w.sent, []);
+});
+
+test("a tail read drops its result once the card follows another run, or its subscription ended", () => {
+  let tracker = { run: "old" };
+  const reads = createTailReads(() => tracker);
+  const restored = reads.begin(); // started on a replacement / subscription_restored event
+  assert.equal(restored.current, true);
+  tracker = { run: "new" }; // the card moved on to a newer run
+  assert.equal(restored.current, false, "the old run's steps and screenshots never land on the new run");
+  const fresh = reads.begin();
+  assert.equal(fresh.current, true);
+  fresh.cancel();
+  assert.equal(fresh.current, false);
+  const open = reads.begin();
+  reads.cancelAll();
+  assert.equal(open.current, false);
+  const settled = reads.begin();
+  settled.done();
+  assert.equal(reads.pending(), 0, "settled reads need no cancelling");
+
+  const progress = source("client/step-progress.tsx");
+  assert.match(progress, /restoreReads\.push\(readTail\(agentId\)\);/, "restore reads are kept");
+  assert.match(progress, /subscription\(\);\s+for \(const read of restoreReads\) read\.cancel\(\);/, "and cancelled with the subscription");
+  assert.match(progress, /if \(!page \|\| !read\.current \|\| !tracker\.current\) return;/);
 });

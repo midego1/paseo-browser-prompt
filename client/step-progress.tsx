@@ -7,6 +7,7 @@ import { createRunTracker, type RunTracker, type RunView } from "../shared/run-t
 import { observeSkew, type UsageLike } from "../shared/run-stats";
 import { stepProgressView } from "../shared/step-view";
 import type { StepProgress } from "../shared/steps";
+import { createTailReads } from "../shared/tail-reads";
 
 const EMPTY: RunView = {
   progress: null,
@@ -94,14 +95,20 @@ export function useStepProgress(
     setView((current) => (sameView(current, next) ? current : next));
   };
 
+  // Reads are bound to the tracker they started for: a read that settles after the card moved to
+  // another run (or rebuilt its tracker) drops its result, so an old run's steps never land here.
+  const reads = useRef<ReturnType<typeof createTailReads<RunTracker | null>> | null>(null);
+  reads.current ??= createTailReads(() => tracker.current);
+
   const readTail = (id: string) => {
-    let cancelled = false;
+    const read = reads.current!.begin();
     let settled = false;
-    void readRunTail(paseo.agents.ref(id), 40, () => statusNow.current, () => cancelled)
+    void readRunTail(paseo.agents.ref(id), 40, () => statusNow.current, () => !read.current)
       .then(
         (page) => {
           settled = true;
-          if (!page || cancelled || !tracker.current) return;
+          read.done();
+          if (!page || !read.current || !tracker.current) return;
           tracker.current.history(page.entries.map(({ item }) => item));
           publish();
           // A live run's latest entry is not its end, and its usage is the previous turn's.
@@ -116,11 +123,12 @@ export function useStepProgress(
         },
         () => {
           settled = true;
+          read.done();
         },
       );
     return {
       cancel() {
-        cancelled = true;
+        read.cancel();
       },
       get settled() {
         return settled;
@@ -171,10 +179,12 @@ export function useStepProgress(
   // The live stream, only while the agent is running or initializing.
   useEffect(() => {
     if (!live || !agentId) return;
+    const restoreReads: { cancel(): void }[] = [];
     const subscription = paseo.agents.ref(agentId).timeline.subscribe((message) => {
       const event = message.event as { type: string; item?: { type: string; text?: unknown; messageId?: unknown } };
       if (event.type === "replacement" || event.type === "subscription_restored") {
-        readTail(agentId);
+        // Cancelled with the subscription below, and dropped if the tracker changed meanwhile.
+        restoreReads.push(readTail(agentId));
         return;
       }
       tracker.current?.event(event);
@@ -190,7 +200,10 @@ export function useStepProgress(
       }
     });
     void subscription.ready?.catch(() => undefined);
-    return () => subscription();
+    return () => {
+      subscription();
+      for (const read of restoreReads) read.cancel();
+    };
   }, [agentId, live, total, showSteps, showScreenshots, paseo]);
 
   return agentId ? { ...view, meta } : { ...EMPTY, meta: NO_META };

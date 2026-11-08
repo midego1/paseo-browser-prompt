@@ -2,7 +2,7 @@ import { enforceRunMode, type ModeGuardAgent } from "../shared/mode-guard.ts";
 import { isBrowserRun, reportTarget } from "../shared/report-back.ts";
 import { addLifecycleHook, type HookServer } from "./hooks.ts";
 import { NOT_A_RUN_TTL_MS } from "./report-back.ts";
-import { readRecordedRun, type SettingsReader } from "./report-back-hook.ts";
+import { createSeenRuns, readRecordedRun, type SeenRuns, type SettingsReader } from "./report-back-hook.ts";
 
 type GuardHandle = Omit<ModeGuardAgent, "refresh"> & {
   refresh(): Promise<{ agent: { labels?: Record<string, string> | null; currentModeId?: string | null } } | null>;
@@ -16,6 +16,8 @@ export interface ModeGuardOptions {
   recordPollMs?: number;
   /** How long an agent without browser run labels is skipped before its labels are read again. */
   notARunTtlMs?: number;
+  /** Runs seen recorded (shared with report back): a run whose record dropped out stays guarded. */
+  seen?: SeenRuns;
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -25,13 +27,14 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
  * refused mode (anything but ask-first or classifier modes, see `runModeAllowed`) is set back or
  * stopped. Only agents a card recorded in the host `runs` setting count as runs, the same check
  * report back uses; labels alone are not enough, so the guard never archives an agent that merely
- * carries the plugin's labels. Handlers return at once; logs carry agent ids and mode ids only.
+ * carries the plugin's labels. A run once seen recorded stays guarded when its record drops out. Handlers return at once; logs carry agent ids and mode ids only.
  */
 export function registerModeGuard(server: HookServer, settings: SettingsReader, options: ModeGuardOptions = {}) {
   const log = options.log ?? ((m: string) => console.log(`[browser-prompt] ${m}`));
   const recordWaitMs = options.recordWaitMs ?? 10_000;
   const recordPollMs = options.recordPollMs ?? 500;
   const notARunTtlMs = options.notARunTtlMs ?? NOT_A_RUN_TTL_MS;
+  const seen = options.seen ?? createSeenRuns();
   const notRuns = new Map<string, number>();
   const stopped = new Set<string>();
   const checking = new Set<string>();
@@ -40,7 +43,7 @@ export function registerModeGuard(server: HookServer, settings: SettingsReader, 
   async function isRecorded(query: { sourceId: string; cardId: string; runId: string }): Promise<boolean> {
     const deadline = Date.now() + recordWaitMs;
     for (;;) {
-      if (await readRecordedRun(settings, query)) return true;
+      if (await readRecordedRun(settings, query, seen)) return true;
       if (disposed || Date.now() >= deadline) return false;
       await sleep(recordPollMs);
     }

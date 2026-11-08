@@ -61,17 +61,32 @@ export type StashOutcome = { url: string } | { unavailable: Exclude<LauncherStat
 
 type Start = (host: string, port: number) => Trampoline;
 
+/** First wait before a launcher that is off (no Tailscale, port in use, ...) is set up again. */
+export const LAUNCHER_RETRY_MIN_MS = 5_000;
+/** The wait doubles per failed retry up to this. */
+export const LAUNCHER_RETRY_MAX_MS = 5 * 60_000;
+
+export interface LauncherOptions {
+  now?: () => number;
+}
+
 /**
  * Owns the one-time ChatGPT launcher. Picks the bind address per machine (setting, else Tailscale),
  * stays off when there is no Tailscale address or the setting is not one of this machine's
- * addresses, and restarts when the host or port setting changes.
+ * addresses, and restarts when the host or port setting changes. A launcher that is off is set up
+ * again when a prompt needs it (`retry`), at most once per backoff (5 s doubling to 5 min), so
+ * Tailscale coming up or a freed port is picked up without a setting change or daemon restart.
  */
-export function createLauncher(probes: HostProbes = systemProbes, start: Start = startTrampoline) {
+export function createLauncher(probes: HostProbes = systemProbes, start: Start = startTrampoline, options: LauncherOptions = {}) {
+  const now = options.now ?? (() => Date.now());
   let current: Trampoline | null = null;
   let status: LauncherStatus = { state: "starting", host: null, port: DEFAULT_TRAMPOLINE_PORT, source: "none" };
   let applied: string | null = null;
   let generation = 0;
   let pending: Promise<void> = Promise.resolve();
+  let lastConfig: LauncherConfig | null = null;
+  let retryAt = 0;
+  let retryDelay = LAUNCHER_RETRY_MIN_MS;
 
   async function stop() {
     const old = current;
@@ -79,11 +94,16 @@ export function createLauncher(probes: HostProbes = systemProbes, start: Start =
     if (old) await old.close();
   }
 
-  async function apply(config: LauncherConfig): Promise<void> {
+  async function apply(config: LauncherConfig, again = false): Promise<void> {
     const port = validatePort(config.trampolinePort) === null ? config.trampolinePort : DEFAULT_TRAMPOLINE_PORT;
     const key = `${config.trampolineHost.trim()}|${port}`;
-    if (key === applied && status.state !== "error") return;
+    if (key === applied && status.state !== "error" && !(again && status.state !== "listening")) return;
+    if (key !== applied) {
+      retryAt = 0;
+      retryDelay = LAUNCHER_RETRY_MIN_MS;
+    }
     applied = key;
+    lastConfig = config;
     const mine = ++generation;
     await stop();
     status = { state: "starting", host: null, port, source: "none" };
@@ -110,16 +130,36 @@ export function createLauncher(probes: HostProbes = systemProbes, start: Start =
       port,
       source: choice.source,
     };
+    if (listening) {
+      retryAt = 0;
+      retryDelay = LAUNCHER_RETRY_MIN_MS;
+    }
+  }
+
+  function enqueue(config: LauncherConfig, again: boolean): Promise<void> {
+    pending = pending.then(() => apply(config, again)).catch((error) => {
+      console.error(`[browser-prompt] trampoline setup failed: ${error instanceof Error ? error.message : String(error)}`);
+      status = { ...status, state: "error" };
+    });
+    return pending;
   }
 
   return {
     /** Applies a configuration; calls are serialized. */
     configure(config: LauncherConfig): Promise<void> {
-      pending = pending.then(() => apply(config)).catch((error) => {
-        console.error(`[browser-prompt] trampoline setup failed: ${error instanceof Error ? error.message : String(error)}`);
-        status = { ...status, state: "error" };
-      });
-      return pending;
+      return enqueue(config, false);
+    },
+    /**
+     * Before a stash: a launcher that is off is set up again with the last configuration, once the
+     * backoff since the previous retry has passed. Resolves when that attempt (if any) is done.
+     */
+    retry(): Promise<void> {
+      if (!lastConfig || status.state === "listening" || status.state === "starting") return pending;
+      const at = now();
+      if (at < retryAt) return pending;
+      retryAt = at + retryDelay;
+      retryDelay = Math.min(retryDelay * 2, LAUNCHER_RETRY_MAX_MS);
+      return enqueue(lastConfig, true);
     },
     status: (): LauncherStatus => ({ ...status }),
     stash(prompt: string, template: string): StashOutcome {

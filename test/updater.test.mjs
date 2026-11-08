@@ -437,3 +437,17 @@ test("the consent text names the repository and says code will be installed", ()
   assert.match(ui, /Downloads commit \$\{shortSha\(revision\)\} from \$\{remote\} and installs it as this plugin/);
   assert.match(ui, /install\(\{ remote, revision \}\)/, "Update now sends what was shown");
 });
+
+test("Update now pressed while a check runs installs after that check, not with its result", async () => {
+  const h = harness({ remote: lsRemote({ "refs/heads/main": B }), consent: NO_CONSENT });
+  // "Check now" is still reading the remote when the owner presses "Update now".
+  const checking = h.updater.check({ force: true });
+  const installing = h.updater.check({ install: { remote: REMOTE, revision: B } });
+  const [checked, installed] = await Promise.all([checking, installing]);
+  assert.equal(checked.status, "update-available", "the check itself installs nothing");
+  assert.equal(installed.status, "updating", "the install ran on its own");
+  assert.deepEqual(h.calls.spawn, [B]);
+  // Automatic checks still share whatever is in flight.
+  const [a, b] = await Promise.all([h.updater.check({ force: true }), h.updater.check()]);
+  assert.deepEqual(a, b);
+});

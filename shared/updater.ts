@@ -226,7 +226,8 @@ export interface CheckOptions {
 }
 
 /**
- * One updater per plugin process. Concurrent checks share the in-flight one.
+ * One updater per plugin process. Concurrent checks share the in-flight one; "Update now" waits
+ * for it and then runs its own.
  *
  * Nothing is downloaded or installed without the owner: an automatic check (a card shown or used)
  * returns at once, without reading the install or the network, unless auto-update is enabled, and
@@ -415,11 +416,18 @@ export function createUpdater(deps: UpdaterDeps) {
 
   return {
     check(options: CheckOptions = {}): Promise<CheckResult> {
-      if (inFlight) return inFlight;
-      inFlight = run(options).finally(() => {
-        inFlight = null;
-      });
-      return inFlight;
+      // "Update now" never takes a running check's result (which installs nothing it was not asked
+      // to): it runs after that check. Other checks share whatever is in flight.
+      if (inFlight && !options.install) return inFlight;
+      const before = inFlight ?? Promise.resolve();
+      const mine: Promise<CheckResult> = before
+        .catch(() => undefined)
+        .then(() => run(options))
+        .finally(() => {
+          if (inFlight === mine) inFlight = null;
+        });
+      inFlight = mine;
+      return mine;
     },
   };
 }
