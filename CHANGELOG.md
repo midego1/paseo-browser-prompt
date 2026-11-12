@@ -2,9 +2,10 @@
 
 ## 0.20.4 (unreleased)
 
-- A browser agent whose `browser_list_tabs` fails or times out no longer retries it or asks the
-  owner to restart or reopen the app: it goes on with `browser_new_tab`, and asks the owner only
-  when that fails too. Closing tabs at the end then counts only the tabs it opened itself.
+- The Paseo browser agent is told what to do when `browser_list_tabs` fails or times out: not
+  retry it or ask the owner, but go on with `browser_new_tab` (asking the owner only when that
+  fails too) and mention the failure in its report. Closing tabs at the end then counts only the
+  tabs it opened itself. The Chrome tab path is unchanged.
 
 ## 0.20.3 (unreleased)
 

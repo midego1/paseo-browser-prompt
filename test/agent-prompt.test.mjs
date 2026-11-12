@@ -537,6 +537,6 @@ test("an unverified start is logged with the agent id only", () => {
 
 test("a failing browser_list_tabs falls back to browser_new_tab instead of retrying or asking the owner", () => {
   const prompt = buildAgentPrompt("t", "1. Open example.com");
-  assert.match(prompt, /If browser_list_tabs fails or times out, do not retry it and do not ask the owner about it: go on with browser_new_tab; ask the owner only when browser_new_tab fails too\./);
-  assert.match(CLOSE_TABS_RULE, /if it fails or times out, rule 2's fallback applies: open your own tab with browser_new_tab and count only the tabs you opened as yours/);
+  assert.match(prompt, /If browser_list_tabs fails or times out, do not retry it and do not ask the owner about that failure: go on with browser_new_tab, ask the owner about it only when browser_new_tab fails too, and mention in your final report that the tab list could not be read\./);
+  assert.match(CLOSE_TABS_RULE, /If browser_list_tabs failed or timed out \(rule 2\), you know none of them: treat only the tabs you open yourself with browser_new_tab as yours\./);
 });

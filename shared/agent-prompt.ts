@@ -160,7 +160,7 @@ export const SCREENSHOT_RULE =
  * Tabs that were open before the run, and every tab after a run that fell short, stay open.
  */
 export const CLOSE_TABS_RULE =
-  "11. Closing tabs: this refines rule 2: start the run with browser_list_tabs (before any browser_new_tab) and remember which tabs already exist; if it fails or times out, rule 2's fallback applies: open your own tab with browser_new_tab and count only the tabs you opened as yours; also remember each tab you open yourself with browser_new_tab. " +
+  "11. Closing tabs: this refines rule 2: start the run with browser_list_tabs (before any browser_new_tab) and remember which tabs already exist. If browser_list_tabs failed or timed out (rule 2), you know none of them: treat only the tabs you open yourself with browser_new_tab as yours. Also remember each tab you open yourself with browser_new_tab. " +
   "Only when the run is fully successful (every numbered step done, none failed, skipped or blocked, no question left unanswered, nothing left for the owner to do; a skipped screenshot is not a skipped step), then as your very last action, after the last step (and its screenshot, if you take one) and right before your final report, close with browser_close_tab each tab you opened yourself with browser_new_tab, and only those. " +
   "Never close a tab that already existed when the run started, even if you used it, never a tab a page opened by itself, and never a tab a step tells you to leave open (for example so the owner can look at it). If you cannot tell whether you opened a tab yourself, leave it open. " +
   "Closing is cleanup, not a numbered step: write no step marker and take no screenshot for it; it is not a destructive action under rule 3. If a close fails, leave that tab open and go on to your report. " +
@@ -338,7 +338,7 @@ export const AGENT_SAFETY_PREAMBLE = [
   "",
   "Rules:",
   "1. Use ONLY the Paseo browser_* tools (browser_list_tabs, browser_new_tab, browser_navigate, browser_snapshot, browser_click, browser_fill, browser_type, browser_select, browser_keypress, browser_scroll, browser_wait, browser_screenshot and the other browser_* tools). Do not use Playwright or any browser on the server. Do not run shell commands. Do not edit files.",
-  "2. Start with browser_list_tabs or browser_new_tab, then browser_snapshot. If browser_list_tabs fails or times out, do not retry it and do not ask the owner about it: go on with browser_new_tab; ask the owner only when browser_new_tab fails too. Always act on fresh element refs from the latest snapshot and take a new snapshot after every navigation or page change. If a tab reports that it \"has not painted\", ask the owner to bring the Paseo app and that tab to the front, then retry.",
+  "2. Start with browser_list_tabs or browser_new_tab, then browser_snapshot. If browser_list_tabs fails or times out, do not retry it and do not ask the owner about that failure: go on with browser_new_tab, ask the owner about it only when browser_new_tab fails too, and mention in your final report that the tab list could not be read. The \"has not painted\" rule below still applies to any tab. Always act on fresh element refs from the latest snapshot and take a new snapshot after every navigation or page change. If a tab reports that it \"has not painted\", ask the owner to bring the Paseo app and that tab to the front, then retry.",
   ...SHARED_SAFETY_RULES,
 ].join("\n");
 
