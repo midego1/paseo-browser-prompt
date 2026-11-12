@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.20.4 (unreleased)
+
+- The Paseo browser agent is told what to do when `browser_list_tabs` fails or times out: not
+  retry it or ask the owner, but go on with `browser_new_tab` (asking the owner only when that
+  fails too) and mention the failure in its report. Closing tabs at the end then counts only the
+  tabs it opened itself. The Chrome tab path is unchanged.
+
 ## 0.20.3 (unreleased)
 
 - Fixed: a copy of a block that started an earlier run now follows a newer run of the same steps

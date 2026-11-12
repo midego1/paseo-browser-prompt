@@ -69,7 +69,7 @@ test("the close-tabs rule is in the preamble only when the setting is on", () =>
 
 test("the close-tabs rule: only own tabs, only after full success, last, reported", () => {
   for (const rule of [
-    /this refines rule 2: start the run with browser_list_tabs \(before any browser_new_tab\) and remember which tabs already exist/,
+    /this refines rule 2: start the run with browser_list_tabs \(before any browser_new_tab\) and remember which tabs already exist\. If browser_list_tabs failed or timed out \(rule 2\)/,
     /remember each tab you open yourself with browser_new_tab/,
     /Only when the run is fully successful \(every numbered step done, none failed, skipped or blocked, no question left unanswered, nothing left for the owner to do; a skipped screenshot is not a skipped step\)/,
     /as your very last action, after the last step \(and its screenshot, if you take one\) and right before your final report/,
