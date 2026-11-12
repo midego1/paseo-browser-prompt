@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.20.4 (unreleased)
+
+- A browser agent whose `browser_list_tabs` fails or times out no longer retries it or asks the
+  owner to restart or reopen the app: it goes on with `browser_new_tab`, and asks the owner only
+  when that fails too. Closing tabs at the end then counts only the tabs it opened itself.
+
 ## 0.20.3 (unreleased)
 
 - Fixed: a copy of a block that started an earlier run now follows a newer run of the same steps

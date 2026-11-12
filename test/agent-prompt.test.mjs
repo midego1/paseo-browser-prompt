@@ -7,6 +7,7 @@ import {
   agentModeError,
   agentTitle,
   buildAgentPrompt,
+  CLOSE_TABS_RULE,
   DEFAULT_AGENT_SETTINGS,
   MAX_AGENT_TITLE,
   CLASSIFIER_MODE_RULE,
@@ -532,4 +533,10 @@ test("a run seen recorded keeps its mode guard when its record drops out of runs
 test("an unverified start is logged with the agent id only", () => {
   const run = readFileSync(new URL("../client/agent-run.ts", import.meta.url), "utf8");
   assert.match(run, /if \(modeCheck\.ok && modeCheck\.actualMode === null\) \{\s+console\.warn\(`\[browser-prompt\] could not read the permission mode of run \$\{agent\.id\}; [^`$]*`\);/);
+});
+
+test("a failing browser_list_tabs falls back to browser_new_tab instead of retrying or asking the owner", () => {
+  const prompt = buildAgentPrompt("t", "1. Open example.com");
+  assert.match(prompt, /If browser_list_tabs fails or times out, do not retry it and do not ask the owner about it: go on with browser_new_tab; ask the owner only when browser_new_tab fails too\./);
+  assert.match(CLOSE_TABS_RULE, /if it fails or times out, rule 2's fallback applies: open your own tab with browser_new_tab and count only the tabs you opened as yours/);
 });
