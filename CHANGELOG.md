@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.20.5 (unreleased)
+
+- Fixed: the card no longer offers an Allow button whose text it cannot show exactly. A long
+  "Always allow …" rule cut at 80 characters (200 for plan actions), a label changed for display
+  (invisible characters, look-alike letters, extra spaces or line breaks), or an action with its own
+  id but no label is left out. When no Allow is left, the card offers only Deny and Open run.
+- Fixed: extra details Paseo attaches to a permission request now count. A detail the card does
+  not show, or one that differs from what the card shows, means Deny only. A shell command's
+  working directory is shown as Directory, so those requests keep Allow.
+- Right before sending an answer, the card reads the run again and sends it only when the request
+  still looks exactly as shown and the pressed button is still offered. Otherwise nothing is sent
+  and the card shows the request as it is now.
+- Fixed: a plan's "Implement" could also approve prompts the plan asks to allow (`allowedPrompts`)
+  without showing them. They are now shown, one per line, and anything else in a plan request the
+  card does not show (other fields, or a plan text that differs from the one shown) means Deny only.
+  Plans as Claude and Codex send them today keep Allow.
+- Fixed: more hidden characters count as changed text, among them the invisible "tag" characters
+  that can smuggle text, more variation selectors, the Braille blank and unusual spaces and line
+  separators. A command or button with them gets Deny only.
+- Allow and Confirm allow stay disabled until you have tapped Show on every piece of masked typed
+  text.
+- The card shows the exact tool name (the friendly name stays the title), so a look-alike tool from
+  another server cannot pass for Paseo's. A cut or changed tool name, or a request part that is not
+  an object, means Deny only.
+- A question the card cannot show exactly (more than 4 questions or 8 options, or text cut or
+  changed for display) offers only Open run. Otherwise the answer sends the option labels exactly as
+  the agent wrote them.
+- Files to upload are shown one per line, so a file name with a comma cannot look like two files.
+- Fixed: two identical lines on the card (for example the same allowed prompt twice) no longer
+  share a key, so both show.
+- Known limits now in the docs: the rule list behind an "Always allow" button is not shown beyond
+  the button's text, and look-alike letters from other alphabets pass unchanged.
+
 ## 0.20.4 (unreleased)
 
 - The Paseo browser agent is told what to do when `browser_list_tabs` fails or times out: not

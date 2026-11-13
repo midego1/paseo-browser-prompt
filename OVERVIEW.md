@@ -58,7 +58,7 @@ With **Close tabs after a successful run** (on by default) the agent notes which
 
 With **Archive the agent after a successful run** (off by default) the plugin archives an agent that reports every step succeeded with nothing left for you, once the chat got its report or notice (with Report back to chat off, right away). Any other run stays open. The card keeps showing it as done.
 
-When the agent needs you (a question it asks you, or a permission it needs), the card says so in the warning color and shows the question and its options, or the permission with what it would do, so you can answer right on the card: select an option and press **Send answer**, or press Allow and then **Confirm allow**, or Deny. Text the agent would type into a page is masked until you tap Show. Allow is offered only when the card can show everything the permission would allow; otherwise only Deny and Open run. A free-text answer opens the agent. Only your click answers; these questions are never sent to the chat.
+When the agent needs you (a question it asks you, or a permission it needs), the card says so in the warning color and shows the question and its options, or the permission with what it would do, so you can answer right on the card: select an option and press **Send answer**, or press Allow and then **Confirm allow**, or Deny. Text the agent would type into a page is masked until you tap Show, and Allow waits until you have shown it. Allow is offered only when the card can show everything the permission would allow, and each Allow button only when its own text is shown in full (a long "Always allow …" rule that would be cut is left out); otherwise only Deny and Open run. A free-text answer opens the agent. Only your click answers; these questions are never sent to the chat.
 
 By default the agent starts in the background: the card shows its state (running, needs you for a question or permission, done, failed) with a link to open it. Turn on **Open the agent when started** to open its view right away.
 
@@ -94,3 +94,5 @@ The Command Center has **Open last browser prompt in ChatGPT**.
 - ChatGPT Desktop needs the ChatGPT desktop app on macOS or Windows, and Claude Desktop the Claude desktop app on macOS, Windows or Linux. Both open with the prompt filled in; you press send, because their links never send by themselves. Neither documents a mobile deep link for a new prompt.
 - The ChatGPT web URL parameters are not officially documented and may change.
 - Run with Paseo agent needs the Paseo desktop app open; on Paseo 0.11 and 0.12 the card's message text uses a compact built-in Markdown renderer.
+- On a permission, the card shows an "Always allow …" button's own text in full, but not the rule list Paseo keeps next to it; read the button text before you confirm.
+- Look-alike letters from other alphabets (a Cyrillic "а" in a web address, for example) look the same on the card and do not block Allow.
