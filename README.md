@@ -627,20 +627,28 @@ warning-bordered box:
   request's input and Paseo's tool-call detail as plain text (`permissionDetails`): the tool name
   humanized, command and script as scrollable monospace blocks (up to 2,000 characters and 30
   lines), URL, files and values (up to 1,000), element, key, click options, search, purpose,
-  timeout and scroll; for ExitPlanMode the plan text (up to 6,000, scrollable) and the plan's
+  timeout, scroll and a shell's working directory (`cwd`, as Directory); for ExitPlanMode the plan text (up to 6,000, scrollable) and the plan's
   actions in full. Values typed into a page (browser_fill, browser_type) are masked as
   "•••• (N chars)" until the owner taps Show.
 - Allow is offered only when the card shows everything it would allow: every non-empty input field
   is rendered (only `browserId`, the tab id, is hidden on purpose; any other key, for example
   `dangerouslyDisableSandbox` or `run_in_background`, withholds Allow), nothing was cut, and
   nothing was altered for display (`cleanPromptTextInfo` reports NFKC changes, removed invisible,
-  bidi or control characters, and collapsed whitespace). Otherwise the card offers only Deny and
-  **Open run**, and says so.
+  bidi or control characters, and collapsed whitespace). Paseo's tool-call detail counts too: a
+  non-empty detail field the card does not show (other than `type`, and `toolName` on a search
+  detail), or a shown field whose detail value differs from the input value shown, withholds Allow.
+  Each Allow action must also show exactly what it grants: one whose label is cut (80 characters,
+  200 for plan actions), altered for display, or missing while the action has its own id (for
+  example a long "Always allow Bash(…)" rule) is not offered. With no such Allow left the card
+  offers only Deny and **Open run**, and says so.
 - The owner answers with clicks: a tap on an option only selects it and **Send answer** sends it;
   Allow on a permission asks for **Confirm allow** first; Deny is immediate. The answer goes to the run with the SDK's
   `respondToPermission`: questions as `{ behavior: "allow", updatedInput: { answers } }` keyed by
   each question's full text (several choices joined with ", "), permissions with the pressed
-  action's behavior and `selectedActionId`. **Other answer: open run** / **Open run** opens the run
+  action's behavior and `selectedActionId`. Right before sending, the card reads the run again
+  and sends only when the request is still this card's, still pending, and the pressed action is
+  still offered on the fresh request (`responseOffered`); otherwise it shows the fresh request and
+  says so. **Other answer: open run** / **Open run** opens the run
   for free text or anything the card does not show.
 - Only the owner's click answers: no server code and no chat path calls `respondToPermission`
   (a test checks this), and these questions are never forwarded to the chat. If the request cannot

@@ -217,6 +217,7 @@ const SUMMARY_FIELDS: FieldSpec[] = [
   { field: "file_path", label: "File" },
   { field: "filePath", label: "File" },
   { field: "path", label: "Path" },
+  { field: "cwd", label: "Directory" },
   { field: "function", label: "Script", block: true },
   { field: "pattern", label: "Search", max: 500 },
   { field: "query", label: "Search", max: 500 },
@@ -228,6 +229,10 @@ const SUMMARY_FIELDS: FieldSpec[] = [
 const RENDERED_FIELDS = new Set([...SUMMARY_FIELDS.map((spec) => spec.field), "deltaX", "deltaY"]);
 /** Input fields hidden on purpose because they do not change what is allowed. */
 const HIDDEN_FIELDS = new Set(["browserId"]);
+/** Detail fields the summary can show: the ones read from `detail` when the input lacks them. */
+const DETAIL_FIELDS = new Set(SUMMARY_FIELDS.map((spec) => spec.field));
+/** Detail fields that only name the tool again (Paseo's search detail), not an argument. */
+const DETAIL_NAME_FIELDS: Record<string, string> = { search: "toolName" };
 
 /** A field's text, "" when empty, or null when it cannot be shown as text (objects, mixed arrays). */
 function fieldText(value: unknown): string | null {
@@ -245,8 +250,8 @@ function fieldText(value: unknown): string | null {
 export interface PermissionDetails {
   lines: SummaryLine[];
   /**
-   * Every non-empty input field is shown, nothing was cut or altered: only then does the card
-   * offer Allow.
+   * Every non-empty input and detail field is shown, nothing was cut or altered: only then does the
+   * card offer Allow.
    */
   complete: boolean;
 }
@@ -268,6 +273,20 @@ export function permissionDetails(request: RequestLike): PermissionDetails {
     if (RENDERED_FIELDS.has(key) || HIDDEN_FIELDS.has(key)) continue;
     const text = fieldText(input[key]);
     if (text === null || text !== "" || (Array.isArray(input[key]) && (input[key] as unknown[]).length > 0)) complete = false;
+  }
+  // Paseo's tool-call detail is derived from the input. Any other non-empty detail field, or a shown
+  // field whose detail value differs from the input value that is shown instead, is not seen: incomplete.
+  for (const key of Object.keys(detail)) {
+    if (key === "type" || (typeof detail.type === "string" && DETAIL_NAME_FIELDS[detail.type] === key)) continue;
+    const value = detail[key];
+    const text = fieldText(value);
+    if (text === "" && !(Array.isArray(value) && value.length > 0)) continue;
+    if (text === null || !DETAIL_FIELDS.has(key)) {
+      complete = false;
+      continue;
+    }
+    const shown = fieldText(input[key]);
+    if (shown && shown !== text) complete = false;
   }
   for (const spec of SUMMARY_FIELDS) {
     let raw = fieldText(input[spec.field]);
@@ -303,23 +322,37 @@ export function permissionSummary(request: RequestLike): SummaryLine[] {
   return permissionDetails(request).lines;
 }
 
-function toActions(actions: unknown, labelMax = MAX_OPTION_LABEL): PromptAction[] {
+interface ParsedAction extends PromptAction {
+  /**
+   * The label is shown exactly as sent: not cut, not altered, and present when the action has its
+   * own id. An Allow action grants what its id means ("Always allow Bash(git push --force:*)"), so
+   * one whose label is not shown in full is never offered.
+   */
+  intact: boolean;
+}
+
+function toActions(actions: unknown, labelMax = MAX_OPTION_LABEL): ParsedAction[] {
   const parsed = Array.isArray(actions)
     ? actions
         .map((action) => record(action))
         .filter((action): action is Record<string, unknown> => !!action && (action.behavior === "allow" || action.behavior === "deny"))
         .slice(0, MAX_ACTIONS)
-        .map((action) => ({
-          id: typeof action.id === "string" ? action.id : null,
-          label: cleanPromptText(action.label, labelMax) || (action.behavior === "allow" ? "Allow" : "Deny"),
-          behavior: action.behavior as "allow" | "deny",
-        }))
+        .map((action) => {
+          const id = typeof action.id === "string" ? action.id : null;
+          const info = cleanPromptTextInfo(action.label, labelMax);
+          return {
+            id,
+            label: info.text || (action.behavior === "allow" ? "Allow" : "Deny"),
+            behavior: action.behavior as "allow" | "deny",
+            intact: !info.truncated && !info.altered && (!!info.text || id === null),
+          };
+        })
     : [];
   return parsed.length
     ? parsed
     : [
-        { id: null, label: "Allow", behavior: "allow" },
-        { id: null, label: "Deny", behavior: "deny" },
+        { id: null, label: "Allow", behavior: "allow", intact: true },
+        { id: null, label: "Deny", behavior: "deny", intact: true },
       ];
 }
 
@@ -358,11 +391,15 @@ export function ownerPrompts(requests: readonly RequestLike[] | null | undefined
     // Allow only when the card shows everything it would allow: the whole, unaltered plan, or every
     // input field in full and unaltered plus something to judge (a title, a description or at least
     // one field beyond the tool name). Otherwise only Deny and Open run.
-    const canAllow = isPlan
+    const contentShown = isPlan
       ? !!plan && !planInfo.truncated && !planInfo.altered
       : details.complete && providerTextIntact && (!!title || !!description || summary.some((line) => line.label !== "Tool"));
     const actions = toActions(request.actions, isPlan ? MAX_PLAN_ACTION_LABEL : MAX_OPTION_LABEL);
-    const shown = canAllow ? actions : actions.filter((action) => action.behavior === "deny");
+    // Allow actions whose label is not shown exactly are dropped; none left means Deny only.
+    const canAllow = contentShown && actions.some((action) => action.behavior === "allow" && action.intact);
+    const shown = actions
+      .filter((action) => action.behavior === "deny" || (canAllow && action.intact))
+      .map(({ intact: _intact, ...action }) => action);
     prompts.push({
       kind: "permission",
       requestId,
@@ -430,6 +467,27 @@ export function questionResponse(prompt: Extract<OwnerPrompt, { kind: "question"
     answers[question.key] = (selections[index] ?? []).join(", ");
   });
   return { behavior: "allow", updatedInput: { answers } };
+}
+
+/**
+ * The answer may still be sent: checked against the prompts from a fresh read of the run right before
+ * sending. The request must still be pending with the same kind; an Allow (or a deny with its own
+ * action id) must be one of the actions the card offers for it now, so an action that is no longer
+ * shown in full is never granted.
+ */
+export function responseOffered(prompts: readonly OwnerPrompt[], requestId: string, response: PermissionResponse): boolean {
+  const prompt = prompts.find((candidate) => candidate.requestId === requestId);
+  if (!prompt) return false;
+  if (prompt.kind === "question") {
+    if (response.behavior !== "allow" || response.selectedActionId) return false;
+    const answers = record(response.updatedInput?.answers);
+    const keys = prompt.questions.map((question) => question.key);
+    return !!answers && Object.keys(answers).length === keys.length && keys.every((key) => typeof answers[key] === "string");
+  }
+  if (response.behavior === "allow" && (!prompt.canAllow || response.updatedInput)) return false;
+  const id = response.selectedActionId ?? null;
+  if (response.behavior === "deny" && id === null) return true;
+  return prompt.actions.some((action) => action.behavior === response.behavior && action.id === id);
 }
 
 /** The response for a permission action the owner pressed. */

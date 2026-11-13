@@ -13,7 +13,9 @@ import {
   permissionSummary,
   verifiedRun,
   isComplete,
+  MAX_OPTION_LABEL,
   MAX_OPTIONS,
+  MAX_PLAN_ACTION_LABEL,
   MAX_QUESTION_TEXT,
   MAX_QUESTIONS,
   ownerPrompts,
@@ -21,6 +23,8 @@ import {
   questionResponse,
   selectOption,
 } from "../shared/owner-prompt.ts";
+// Namespace import for helpers added later, so a missing export fails only the tests that use it.
+import * as ownerPromptModule from "../shared/owner-prompt.ts";
 
 // The shape Paseo's Claude provider gives AskUserQuestion (allowOther added by Paseo).
 const question = (overrides = {}) => ({
@@ -400,4 +404,121 @@ test("the card's needs-you state comes from the stream and the snapshot, not onl
   assert.match(card, /useOwnerPrompts\(runAgentId, active, ownerVersion, ownerCard, permissionPending\)/);
   const hook = readFileSync(new URL("../client/owner-prompt.tsx", import.meta.url), "utf8");
   assert.match(hook, /setPending\(requests\.length\)/, "the snapshot's pending count is kept");
+});
+
+// ---- Allow actions must show exactly what they grant (ported from the overlay's review) ----
+
+const withActions = (actions, extra = {}) => ({ id: "pa", kind: "tool", name: "Bash", input: { command: "git push" }, actions, ...extra });
+const ids = (prompt) => prompt.actions.map((action) => action.id);
+
+test("an always-allow label cut at 80 characters is not offered; Allow once and Deny stay", () => {
+  const always = "Always allow Bash(git push --force origin:*) in /very/long/project/path/that/goes/on/and/on";
+  assert.ok(always.length > MAX_OPTION_LABEL);
+  const [prompt] = ownerPrompts([
+    withActions([
+      { id: "allow-once", label: "Allow once", behavior: "allow" },
+      { id: "allow-always", label: always, behavior: "allow" },
+      { id: "deny", label: "Deny", behavior: "deny" },
+    ]),
+  ]);
+  assert.deepEqual(ids(prompt), ["allow-once", "deny"], "the cut always-allow is dropped");
+  assert.equal(prompt.canAllow, true, "the plain Allow once still works");
+  const [only] = ownerPrompts([withActions([{ id: "allow-always", label: always, behavior: "allow" }, { id: "deny", label: "Deny", behavior: "deny" }])]);
+  assert.equal(only.canAllow, false, "no Allow left: Deny only");
+  assert.deepEqual(ids(only), ["deny"]);
+});
+
+test("a plan action label over 200 characters is not offered", () => {
+  const long = `Implement and also ${"keep going ".repeat(20)}`;
+  assert.ok(long.trim().length > MAX_PLAN_ACTION_LABEL);
+  const [plan] = ownerPrompts([
+    {
+      id: "pp",
+      kind: "plan",
+      name: "ExitPlanMode",
+      metadata: { planText: "1. Do it" },
+      actions: [
+        { id: "implement", label: "Implement", behavior: "allow" },
+        { id: "implement_long", label: long, behavior: "allow" },
+        { id: "reject", label: "Reject", behavior: "deny" },
+      ],
+    },
+  ]);
+  assert.equal(plan.canAllow, true);
+  assert.deepEqual(ids(plan), ["implement", "reject"]);
+  const [only] = ownerPrompts([
+    { id: "pq", kind: "plan", name: "ExitPlanMode", metadata: { planText: "1. Do it" }, actions: [{ id: "implement_long", label: long, behavior: "allow" }, { id: "reject", label: "Reject", behavior: "deny" }] },
+  ]);
+  assert.equal(only.canAllow, false);
+  assert.deepEqual(ids(only), ["reject"]);
+});
+
+test("an allow label altered for display (zero-width, NFKC, whitespace, line break) is not offered", () => {
+  for (const label of ["Always allow\u200b Bash(rm:*)", "Always allow \uff22ash(rm:*)", "Always  allow Bash(rm:*)", "Always allow\nBash(rm:*)", "Always allow\u202eBash(rm:*)"]) {
+    const [prompt] = ownerPrompts([withActions([{ id: "allow-always", label, behavior: "allow" }, { id: "deny", label: "Deny", behavior: "deny" }])]);
+    assert.equal(prompt.canAllow, false, JSON.stringify(label));
+    assert.deepEqual(ids(prompt), ["deny"], JSON.stringify(label));
+  }
+});
+
+test("an allow action with its own id but no label is not offered; the plain Allow without id is", () => {
+  for (const label of ["", "   ", undefined, 42]) {
+    const [prompt] = ownerPrompts([withActions([{ id: "allow-always", label, behavior: "allow" }, { id: "deny", label: "Deny", behavior: "deny" }])]);
+    assert.equal(prompt.canAllow, false, JSON.stringify(label));
+    assert.deepEqual(ids(prompt), ["deny"], JSON.stringify(label));
+  }
+  const [plain] = ownerPrompts([withActions([{ behavior: "allow" }, { behavior: "deny" }])]);
+  assert.equal(plain.canAllow, true);
+  assert.deepEqual(plain.actions, [
+    { id: null, label: "Allow", behavior: "allow" },
+    { id: null, label: "Deny", behavior: "deny" },
+  ]);
+});
+
+test("detail keys the card does not show, or a detail value that differs from the shown input: Deny only", () => {
+  const canAllow = (detail, input = { command: "ls" }) => ownerPrompts([claude("Bash", input, { detail })])[0].canAllow;
+  assert.equal(canAllow({ type: "shell", command: "ls" }), true);
+  assert.equal(canAllow({ type: "shell", command: "ls", output: "" }), true, "empty fields do not count");
+  assert.equal(canAllow({ type: "shell", command: "ls", env: "X=1" }), false, "an unrendered key");
+  assert.equal(canAllow({ type: "shell", command: "ls", extra: { a: 1 } }), false, "an object");
+  assert.equal(canAllow({ type: "shell", command: "rm -rf /" }), false, "the detail command differs from the shown input");
+  assert.equal(canAllow({ type: "unknown", input: { a: 1 } }), false);
+  assert.equal(canAllow({ type: "edit", filePath: "/a", oldString: "x", newString: "y" }, { file_path: "/a" }), false);
+  assert.equal(canAllow({ type: "search", query: "TODO", toolName: "grep" }, { pattern: "TODO" }), true, "search names its tool");
+  assert.equal(canAllow({ type: "fetch", url: "https://a.example", toolName: "x" }, { url: "https://a.example" }), false, "toolName only for search");
+});
+
+test("a shell cwd is shown as Directory and keeps Allow", () => {
+  const [bash] = ownerPrompts([claude("Bash", { command: "ls" }, { detail: { type: "shell", command: "ls", cwd: "/srv/app" } })]);
+  assert.deepEqual(bash.summary.at(-1), { label: "Directory", value: "/srv/app", block: false });
+  assert.equal(bash.canAllow, true);
+});
+
+test("at answer time the sent action must still be offered on the freshly read request", () => {
+  const { responseOffered } = ownerPromptModule;
+  assert.equal(typeof responseOffered, "function");
+  const always = "Always allow Bash(git push --force origin:*) in /very/long/project/path/that/goes/on/and/on";
+  const fresh = ownerPrompts([
+    withActions([
+      { id: "allow-once", label: "Allow once", behavior: "allow" },
+      { id: "allow-always", label: always, behavior: "allow" },
+      { id: "deny", label: "Deny", behavior: "deny" },
+    ]),
+  ]);
+  assert.equal(responseOffered(fresh, "pa", { behavior: "allow", selectedActionId: "allow-once" }), true);
+  assert.equal(responseOffered(fresh, "pa", { behavior: "allow", selectedActionId: "allow-always" }), false, "dropped action");
+  assert.equal(responseOffered(fresh, "pa", { behavior: "allow" }), false, "no id-less Allow on this request");
+  assert.equal(responseOffered(fresh, "pa", { behavior: "deny", selectedActionId: "deny", message: "x" }), true);
+  assert.equal(responseOffered(fresh, "other", { behavior: "allow", selectedActionId: "allow-once" }), false, "no longer pending");
+  const denyOnly = ownerPrompts([withActions([{ id: "allow-always", label: always, behavior: "allow" }, { id: "deny", label: "Deny", behavior: "deny" }])]);
+  assert.equal(responseOffered(denyOnly, "pa", { behavior: "allow", selectedActionId: "allow-always" }), false);
+  assert.equal(responseOffered(denyOnly, "pa", { behavior: "deny", message: "x" }), true, "Deny always goes");
+  const [ask] = ownerPrompts([question()]);
+  const answer = questionResponse(ask, { 0: ["Top"] });
+  assert.equal(responseOffered([ask], "perm-1", answer), true);
+  assert.equal(responseOffered([ask], "perm-1", { behavior: "allow", updatedInput: { answers: { other: "Top" } } }), false);
+  const ui = readFileSync(new URL("../client/owner-prompt.tsx", import.meta.url), "utf8");
+  const body = ui.slice(ui.indexOf("async function answer("));
+  assert.ok(body.indexOf("responseOffered(") > 0 && body.indexOf("responseOffered(") < body.indexOf("respondToPermission("), "checked before sending");
+  assert.ok(body.indexOf(".refresh()") > 0 && body.indexOf(".refresh()") < body.indexOf("responseOffered("), "on a fresh read");
 });

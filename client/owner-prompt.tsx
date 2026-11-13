@@ -10,6 +10,7 @@ import {
   type PermissionResponse,
   permissionResponse,
   questionResponse,
+  responseOffered,
   selectOption,
   type Selections,
   type PromptAction,
@@ -80,7 +81,17 @@ export function useOwnerPrompts(
   async function answer(requestId: string, response: PermissionResponse) {
     if (!agentId) return;
     try {
-      await paseo.agents.ref(agentId).respondToPermission({ requestId, response });
+      // Read the run again right before sending: the request must still be this card's, pending, and
+      // the pressed action one the card offers on the fresh request (an Allow shown in full).
+      const agent = paseo.agents.ref(agentId);
+      const fresh = await agent.refresh();
+      const ok = verifiedRun(fresh?.agent.labels, card.sourceAgentId, card.cardId);
+      const current = ok ? ownerPrompts(fresh?.agent.pendingPermissions ?? []) : [];
+      if (!responseOffered(current, requestId, response)) {
+        setPrompts(current);
+        throw new Error("The request changed or is no longer offered on the card. Check it again or open the run.");
+      }
+      await agent.respondToPermission({ requestId, response });
       setPrompts((current) => current.filter((prompt) => prompt.requestId !== requestId));
     } finally {
       setReload((value) => value + 1);

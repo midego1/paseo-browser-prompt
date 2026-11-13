@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.20.5 (unreleased)
+
+- Fixed: the card no longer offers an Allow button whose text it cannot show exactly. A long
+  "Always allow …" rule cut at 80 characters (200 for plan actions), a label changed for display
+  (invisible characters, look-alike letters, extra spaces or line breaks), or an action with its own
+  id but no label is left out. When no Allow is left, the card offers only Deny and Open run.
+- Fixed: extra details Paseo attaches to a permission request now count. A detail the card does
+  not show, or one that differs from what the card shows, means Deny only. A shell command's
+  working directory is shown as Directory, so those requests keep Allow.
+- Right before sending an answer, the card reads the run again and sends it only when the pressed
+  button is still offered on that fresh request.
+
 ## 0.20.4 (unreleased)
 
 - The Paseo browser agent is told what to do when `browser_list_tabs` fails or times out: not
