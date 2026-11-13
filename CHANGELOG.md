@@ -15,6 +15,7 @@
 - Fixed: a plan's "Implement" could also approve prompts the plan asks to allow (`allowedPrompts`)
   without showing them. They are now shown, one per line, and anything else in a plan request the
   card does not show (other fields, or a plan text that differs from the one shown) means Deny only.
+  Plans as Claude and Codex send them today keep Allow.
 - Fixed: more hidden characters count as changed text, among them the invisible "tag" characters
   that can smuggle text, more variation selectors, the Braille blank and unusual spaces and line
   separators. A command or button with them gets Deny only.
@@ -27,6 +28,10 @@
   changed for display) offers only Open run. Otherwise the answer sends the option labels exactly as
   the agent wrote them.
 - Files to upload are shown one per line, so a file name with a comma cannot look like two files.
+- Fixed: two identical lines on the card (for example the same allowed prompt twice) no longer
+  share a key, so both show.
+- Known limits now in the docs: the rule list behind an "Always allow" button is not shown beyond
+  the button's text, and look-alike letters from other alphabets pass unchanged.
 
 ## 0.20.4 (unreleased)
 

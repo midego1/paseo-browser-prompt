@@ -341,7 +341,7 @@ function PermissionPrompt({
       ) : null}
       {prompt.summary.map((line, index) => (
         <DetailLine
-          key={`${line.label}:${line.value}`}
+          key={`${index}:${line.label}:${line.value}`}
           line={line}
           theme={theme}
           revealed={revealed.includes(index)}

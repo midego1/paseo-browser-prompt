@@ -374,8 +374,16 @@ export function permissionDetails(request: RequestLike): PermissionDetails {
   return { lines: lines.slice(0, MAX_SUMMARY_LINES), complete };
 }
 
-/** Plan metadata Paseo sets: the plan text (shown) and the tool call's id (names nothing to allow). */
-const PLAN_METADATA_FIELDS = new Set(["planText", "toolUseId"]);
+/**
+ * Plan metadata the providers set (Paseo server 0.15.4): Claude's ExitPlanMode sends `planText` (shown)
+ * and `toolUseId` (the tool call's id); Codex's plan approval sends `planText` and `source:
+ * "codex_plan_approval"`. Each value must be exactly this kind: none of them names anything to allow.
+ */
+const PLAN_METADATA: Record<string, (value: unknown) => boolean> = {
+  planText: (value) => typeof value === "string",
+  toolUseId: (value) => typeof value === "string",
+  source: (value) => value === "codex_plan_approval",
+};
 
 export interface PlanDetails extends PermissionDetails {
   /** The plan text as shown. */
@@ -400,11 +408,18 @@ export function planDetails(request: RequestLike): PlanDetails {
   const inputPlan = fieldText(input.plan);
   if (inputPlan === null || (present(metadata.planText) && typeof metadata.planText !== "string")) complete = false;
   if (planText && inputPlan && inputPlan !== planText) complete = false;
-  const plan = cleanPromptTextInfo(planText || inputPlan || "", MAX_PLAN_TEXT, { multiline: true });
+  const shownPlan = planText || inputPlan || "";
+  const plan = cleanPromptTextInfo(shownPlan, MAX_PLAN_TEXT, { multiline: true });
   for (const key of Object.keys(metadata)) {
-    if (key === "toolUseId" ? typeof metadata.toolUseId !== "string" && !isEmpty(metadata.toolUseId) : !PLAN_METADATA_FIELDS.has(key) && !isEmpty(metadata[key])) complete = false;
+    if (isEmpty(metadata[key])) continue;
+    if (!Object.prototype.hasOwnProperty.call(PLAN_METADATA, key) || !PLAN_METADATA[key](metadata[key])) complete = false;
   }
-  for (const key of Object.keys(detail)) if (!isEmpty(detail[key])) complete = false;
+  // A plan detail (protocol type `{ type: "plan", text }`; today's providers send none for the
+  // request) may only repeat the plan shown. Any other field, or other text, is not seen.
+  for (const key of Object.keys(detail)) {
+    if (key === "type" || isEmpty(detail[key])) continue;
+    if (key !== "text" || detail.text !== shownPlan) complete = false;
+  }
   for (const key of Object.keys(input)) {
     if (key === "plan") continue;
     if (key !== "allowedPrompts") {

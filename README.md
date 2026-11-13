@@ -642,9 +642,11 @@ warning-bordered box:
   default-ignorable and format characters such as zero-width, bidi, variation selectors and tag
   characters, control characters, spaces other than U+0020, and collapsed whitespace). An input,
   detail or metadata that is present but not an object, or a tool name that is cut or altered,
-  withholds Allow. For a plan, any input field other than `plan` and `allowedPrompts`, any detail,
-  any metadata other than `planText` and `toolUseId`, or an input plan that differs from the shown
-  `planText` withholds Allow. Paseo's tool-call detail counts too: a
+  withholds Allow. For a plan, any input field other than `plan` and `allowedPrompts`, any detail
+  field other than `type` and a `text` equal to the shown plan, any metadata other than what the
+  providers set (Paseo server 0.15.4: Claude's `planText` and `toolUseId`, Codex's `planText` and
+  `source: "codex_plan_approval"`), or an input plan that differs from the shown `planText`
+  withholds Allow. Paseo's tool-call detail counts too: a
   non-empty detail field the card does not show (other than `type`, and `toolName` on a search
   detail), or a shown field whose detail value differs from the input value shown, withholds Allow.
   Each Allow action must also show exactly what it grants: one whose label is cut (80 characters,
@@ -663,6 +665,11 @@ warning-bordered box:
 - Only the owner's click answers: no server code and no chat path calls `respondToPermission`
   (a test checks this), and these questions are never forwarded to the chat. If the request cannot
   be read, the box offers **Answer in run**.
+- Known limits: the rule an "always allow" action applies (`request.suggestions`) is not shown
+  beyond that action's own label, which must be shown in full; read the label before you confirm.
+  Look-alike letters from other scripts (a Cyrillic "а" in a domain or command, for example) are
+  not changed by NFKC, so they pass unchanged and do not withhold Allow; only full-width and
+  similar compatibility forms count as altered.
 
 ### Talk to the chat
 

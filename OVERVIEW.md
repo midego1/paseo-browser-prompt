@@ -94,3 +94,5 @@ The Command Center has **Open last browser prompt in ChatGPT**.
 - ChatGPT Desktop needs the ChatGPT desktop app on macOS or Windows, and Claude Desktop the Claude desktop app on macOS, Windows or Linux. Both open with the prompt filled in; you press send, because their links never send by themselves. Neither documents a mobile deep link for a new prompt.
 - The ChatGPT web URL parameters are not officially documented and may change.
 - Run with Paseo agent needs the Paseo desktop app open; on Paseo 0.11 and 0.12 the card's message text uses a compact built-in Markdown renderer.
+- On a permission, the card shows an "Always allow …" button's own text in full, but not the rule list Paseo keeps next to it; read the button text before you confirm.
+- Look-alike letters from other alphabets (a Cyrillic "а" in a web address, for example) look the same on the card and do not block Allow.

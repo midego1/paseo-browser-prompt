@@ -704,3 +704,59 @@ test("the answer is sent only after a fresh read shows the same prompt and offer
   assert.deepEqual(await sendCheckedAnswer(intact.target, card, shown, allow), { sent: true });
   assert.deepEqual(intact.sent, [{ requestId: "pa", response: allow }], "respondToPermission called once");
 });
+
+// ---- re-review: plan requests as the providers build them (Paseo server 0.15.4) ----
+
+const planActions = [
+  { id: "reject", label: "Reject", behavior: "deny", variant: "danger", intent: "dismiss" },
+  { id: "implement", label: "Implement", behavior: "allow", variant: "primary", intent: "implement" },
+  { id: "implement_resume", label: "Implement with Auto mode", behavior: "allow", variant: "secondary", intent: "implement_resume" },
+];
+
+test("a realistic Claude ExitPlanMode or Codex plan approval keeps Allow", () => {
+  const planText = "## Plan\n\n1. Open settings\n2. Rename the project";
+  // Claude provider's handlePermissionRequest: metadata { toolUseId, planText }, no detail for plans.
+  const claudePlan = {
+    id: "permission-6f1c",
+    provider: "claude",
+    name: "ExitPlanMode",
+    kind: "plan",
+    input: { plan: planText, allowedPrompts: [{ tool: "Bash", prompt: "run tests" }] },
+    detail: undefined,
+    suggestions: undefined,
+    actions: planActions,
+    metadata: { toolUseId: "toolu_01ABC", planText },
+  };
+  // Codex's synthetic plan approval: title, description, metadata { planText, source }.
+  const codexPlan = {
+    id: "permission-9a2e",
+    provider: "codex",
+    name: "CodexPlanApproval",
+    kind: "plan",
+    title: "Plan",
+    description: "Review the proposed plan before implementation starts.",
+    input: { plan: planText },
+    actions: planActions.slice(0, 2),
+    metadata: { planText, source: "codex_plan_approval" },
+  };
+  for (const request of [claudePlan, codexPlan, { ...claudePlan, id: "p-detail", detail: { type: "plan", text: planText } }]) {
+    const [plan] = ownerPrompts([request]);
+    assert.equal(plan.canAllow, true, request.id);
+    assert.equal(plan.plan, planText.replace(/\n{3,}/g, "\n\n"));
+    assert.ok(plan.actions.some((action) => action.id === "implement"), request.id);
+  }
+  const deny = (extra) => ownerPrompts([{ ...claudePlan, ...extra }])[0];
+  assert.equal(deny({ detail: { type: "plan", text: "1. Something else" } }).canAllow, false, "detail text differs from the shown plan");
+  assert.equal(deny({ detail: { type: "plan", text: planText, extra: "x" } }).canAllow, false, "another detail field");
+  assert.equal(deny({ metadata: { toolUseId: "toolu_01ABC", planText, source: "other" } }).canAllow, false, "source other than Codex's");
+  assert.equal(deny({ metadata: { toolUseId: 7, planText } }).canAllow, false, "a toolUseId that is not text");
+});
+
+test("summary lines get unique keys, so identical lines render once each", () => {
+  const [plan] = ownerPrompts([
+    { id: "dup", kind: "plan", name: "ExitPlanMode", input: { plan: "1. x", allowedPrompts: [{ tool: "Bash", prompt: "run tests" }, { tool: "Bash", prompt: "run tests" }] }, metadata: { planText: "1. x" }, actions: planActions },
+  ]);
+  assert.equal(plan.summary.length, 2, "both identical lines are shown");
+  const ui = readFileSync(new URL("../client/owner-prompt.tsx", import.meta.url), "utf8");
+  assert.match(ui, /<DetailLine\s+key=\{`\$\{index\}:/, "the key carries the line's index");
+});
