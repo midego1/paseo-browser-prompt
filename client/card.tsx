@@ -655,9 +655,9 @@ export function BrowserPromptCard({
           prompts={owner.prompts}
           verified={owner.verified}
           theme={theme}
-          onAnswer={async (requestId, response) => {
+          onAnswer={async (prompt, response) => {
             try {
-              await owner.answer(requestId, response);
+              await owner.answer(prompt, response);
             } catch (error) {
               toast.error(`Could not send your answer: ${error instanceof Error ? error.message : String(error)}`);
             }

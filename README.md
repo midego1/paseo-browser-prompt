@@ -624,17 +624,27 @@ warning-bordered box:
   the requests into prompts: questions with their header, text and options (at most 4 questions
   and 8 options; text NFKC-normalized, invisible and control characters removed, capped), or
   permissions. Claude permission requests have no title or description, so the card shows the
-  request's input and Paseo's tool-call detail as plain text (`permissionDetails`): the tool name
-  humanized, command and script as scrollable monospace blocks (up to 2,000 characters and 30
-  lines), URL, files and values (up to 1,000), element, key, click options, search, purpose,
-  timeout, scroll and a shell's working directory (`cwd`, as Directory); for ExitPlanMode the plan text (up to 6,000, scrollable) and the plan's
-  actions in full. Values typed into a page (browser_fill, browser_type) are masked as
-  "•••• (N chars)" until the owner taps Show.
+  request's input and Paseo's tool-call detail as plain text (`permissionDetails`): the exact tool
+  name (the humanized one is the title, so `mcp__evil__browser_navigate` cannot pass for Paseo's
+  browser tool), command and script as scrollable monospace blocks (up to 2,000 characters and 30
+  lines), files one per line, URL and values (up to 1,000), element, key, click options, search, purpose,
+  timeout, scroll and a shell's working directory (`cwd`, as Directory); for ExitPlanMode the plan text (up to 6,000, scrollable), the
+  prompts it asks to allow (`allowedPrompts`, one "Also allows" line each) and the plan's actions
+  in full (`planDetails`). Values typed into a page (browser_fill, browser_type) are masked as
+  "•••• (N chars)" until the owner taps Show; Allow and **Confirm allow** stay disabled until every
+  masked line is shown. A question the card cannot show exactly (more than 4 questions or 8
+  options, a dropped option, or text cut or altered for display) offers only **Open run**; otherwise
+  the answer carries the option labels exactly as the agent sent them.
 - Allow is offered only when the card shows everything it would allow: every non-empty input field
   is rendered (only `browserId`, the tab id, is hidden on purpose; any other key, for example
   `dangerouslyDisableSandbox` or `run_in_background`, withholds Allow), nothing was cut, and
-  nothing was altered for display (`cleanPromptTextInfo` reports NFKC changes, removed invisible,
-  bidi or control characters, and collapsed whitespace). Paseo's tool-call detail counts too: a
+  nothing was altered for display (`cleanPromptTextInfo` reports NFKC changes, removed
+  default-ignorable and format characters such as zero-width, bidi, variation selectors and tag
+  characters, control characters, spaces other than U+0020, and collapsed whitespace). An input,
+  detail or metadata that is present but not an object, or a tool name that is cut or altered,
+  withholds Allow. For a plan, any input field other than `plan` and `allowedPrompts`, any detail,
+  any metadata other than `planText` and `toolUseId`, or an input plan that differs from the shown
+  `planText` withholds Allow. Paseo's tool-call detail counts too: a
   non-empty detail field the card does not show (other than `type`, and `toolName` on a search
   detail), or a shown field whose detail value differs from the input value shown, withholds Allow.
   Each Allow action must also show exactly what it grants: one whose label is cut (80 characters,
@@ -646,9 +656,9 @@ warning-bordered box:
   `respondToPermission`: questions as `{ behavior: "allow", updatedInput: { answers } }` keyed by
   each question's full text (several choices joined with ", "), permissions with the pressed
   action's behavior and `selectedActionId`. Right before sending, the card reads the run again
-  and sends only when the request is still this card's, still pending, and the pressed action is
-  still offered on the fresh request (`responseOffered`); otherwise it shows the fresh request and
-  says so. **Other answer: open run** / **Open run** opens the run
+  and sends only when the request is still this card's, still pending, builds exactly the prompt
+  the owner saw (title, details, plan, actions), and the pressed action is still offered on it
+  (`sendCheckedAnswer`); otherwise it sends nothing, shows the fresh request and says so. **Other answer: open run** / **Open run** opens the run
   for free text or anything the card does not show.
 - Only the owner's click answers: no server code and no chat path calls `respondToPermission`
   (a test checks this), and these questions are never forwarded to the chat. If the request cannot

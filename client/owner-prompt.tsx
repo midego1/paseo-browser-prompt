@@ -4,14 +4,15 @@ import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
 import {
+  allowReady,
   isComplete,
   type OwnerPrompt,
   ownerPrompts,
   type PermissionResponse,
   permissionResponse,
   questionResponse,
-  responseOffered,
   selectOption,
+  sendCheckedAnswer,
   type Selections,
   type PromptAction,
   type SummaryLine,
@@ -78,21 +79,23 @@ export function useOwnerPrompts(
     };
   }, [agentId, watch, version, reload, expectPending, paseo, card.sourceAgentId, card.cardId]);
 
-  async function answer(requestId: string, response: PermissionResponse) {
+  async function answer(prompt: OwnerPrompt, response: PermissionResponse) {
     if (!agentId) return;
     try {
-      // Read the run again right before sending: the request must still be this card's, pending, and
-      // the pressed action one the card offers on the fresh request (an Allow shown in full).
+      // Read the run again right before sending: the request must still be this card's, pending,
+      // build exactly the prompt the owner saw, and offer the pressed action (an Allow shown in full).
       const agent = paseo.agents.ref(agentId);
-      const fresh = await agent.refresh();
-      const ok = verifiedRun(fresh?.agent.labels, card.sourceAgentId, card.cardId);
-      const current = ok ? ownerPrompts(fresh?.agent.pendingPermissions ?? []) : [];
-      if (!responseOffered(current, requestId, response)) {
-        setPrompts(current);
+      const result = await sendCheckedAnswer(
+        { read: () => agent.refresh(), send: (args) => agent.respondToPermission(args) },
+        card,
+        prompt,
+        response,
+      );
+      if (!result.sent) {
+        setPrompts(result.prompts);
         throw new Error("The request changed or is no longer offered on the card. Check it again or open the run.");
       }
-      await agent.respondToPermission({ requestId, response });
-      setPrompts((current) => current.filter((prompt) => prompt.requestId !== requestId));
+      setPrompts((current) => current.filter((item) => item.requestId !== prompt.requestId));
     } finally {
       setReload((value) => value + 1);
     }
@@ -191,6 +194,7 @@ function QuestionPrompt({
 }) {
   const [selections, setSelections] = useState<Selections>({});
   const allowOther = prompt.questions.some((question) => question.allowOther || question.options.length === 0);
+  const answerable = prompt.answerable;
   return (
     <View style={{ gap: 10 }}>
       {prompt.questions.map((question, index) => (
@@ -208,7 +212,7 @@ function QuestionPrompt({
                 label={option.label}
                 description={option.description}
                 selected={(selections[index] ?? []).includes(option.label)}
-                disabled={busy}
+                disabled={busy || !answerable}
                 theme={theme}
                 onPress={() => setSelections(selectOption(prompt, selections, index, option.label))}
               />
@@ -216,19 +220,26 @@ function QuestionPrompt({
           </View>
         </View>
       ))}
+      {!answerable ? (
+        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+          The card cannot show this question exactly (too long, too many options, or changed for display), so answer it in the run.
+        </Text>
+      ) : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         {/* A tap only selects; Send confirms, so a mis-tap never answers. */}
-        <Button
-          label="Send answer"
-          primary
-          disabled={busy || !isComplete(prompt, selections)}
-          theme={theme}
-          onPress={() => {
-            const response = questionResponse(prompt, selections);
-            if (response) onAnswer(response);
-          }}
-        />
-        <Button label={allowOther ? "Other answer: open run" : "Open run"} theme={theme} onPress={onOpen} />
+        {answerable ? (
+          <Button
+            label="Send answer"
+            primary
+            disabled={busy || !isComplete(prompt, selections)}
+            theme={theme}
+            onPress={() => {
+              const response = questionResponse(prompt, selections);
+              if (response) onAnswer(response);
+            }}
+          />
+        ) : null}
+        <Button label={answerable && allowOther ? "Other answer: open run" : "Open run"} primary={!answerable} theme={theme} onPress={onOpen} />
       </View>
     </View>
   );
@@ -248,8 +259,18 @@ function MonoBlock({ text, theme, maxHeight }: { text: string; theme: Theme; max
   );
 }
 
-function DetailLine({ line, theme }: { line: SummaryLine; theme: Theme }) {
-  const [revealed, setRevealed] = useState(false);
+function DetailLine({
+  line,
+  theme,
+  revealed,
+  setRevealed,
+}: {
+  line: SummaryLine;
+  theme: Theme;
+  /** Kept by the prompt, so Allow can wait until every masked line is shown. */
+  revealed: boolean;
+  setRevealed: (revealed: boolean) => void;
+}) {
   if (line.block) {
     return (
       <View style={{ gap: 2 }}>
@@ -300,6 +321,16 @@ function PermissionPrompt({
 }) {
   // Allowing takes a second, explicit tap; denying does not.
   const [confirming, setConfirming] = useState<PromptAction | null>(null);
+  // Indexes of the masked lines the owner revealed. Allow waits until all of them are shown; a
+  // changed prompt starts over.
+  const [revealed, setRevealed] = useState<number[]>([]);
+  const signature = JSON.stringify(prompt);
+  useEffect(() => {
+    setRevealed([]);
+    setConfirming(null);
+  }, [signature]);
+  const ready = allowReady(prompt, revealed);
+  const masked = prompt.summary.some((line) => line.masked);
   return (
     <View style={{ gap: 8 }}>
       <Text style={{ color: theme.colors.foreground, fontSize: 14, fontWeight: "600" }}>{prompt.title}</Text>
@@ -308,14 +339,25 @@ function PermissionPrompt({
           {prompt.description}
         </Text>
       ) : null}
-      {prompt.summary.map((line) => (
-        <DetailLine key={`${line.label}:${line.value}`} line={line} theme={theme} />
+      {prompt.summary.map((line, index) => (
+        <DetailLine
+          key={`${line.label}:${line.value}`}
+          line={line}
+          theme={theme}
+          revealed={revealed.includes(index)}
+          setRevealed={(show) => {
+            setRevealed((current) => (show ? [...current.filter((item) => item !== index), index] : current.filter((item) => item !== index)));
+            if (!show) setConfirming(null);
+          }}
+        />
       ))}
       {prompt.plan ? <MonoBlock text={prompt.plan} theme={theme} maxHeight={320} /> : null}
       {!prompt.canAllow ? (
         <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
           The card cannot show everything this would allow, so only Deny is offered here. Open the run to see it.
         </Text>
+      ) : masked && !ready ? (
+        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>Show the typed text before allowing it.</Text>
       ) : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         {confirming ? (
@@ -323,7 +365,7 @@ function PermissionPrompt({
             <Button
               label={`Confirm allow: ${confirming.label}`}
               primary
-              disabled={busy}
+              disabled={busy || !ready}
               theme={theme}
               onPress={() => {
                 const action = confirming;
@@ -339,7 +381,7 @@ function PermissionPrompt({
               key={`${action.id ?? action.behavior}:${action.label}`}
               label={action.label}
               primary={action.behavior === "allow"}
-              disabled={busy}
+              disabled={busy || (action.behavior === "allow" && !ready)}
               theme={theme}
               onPress={() => (action.behavior === "allow" ? setConfirming(action) : onAnswer(permissionResponse(action)))}
             />
@@ -367,15 +409,15 @@ export function OwnerPromptBox({
   /** The snapshot the requests came from shows this card's run; otherwise no answer buttons. */
   verified: boolean;
   theme: Theme;
-  onAnswer: (requestId: string, response: PermissionResponse) => Promise<void>;
+  onAnswer: (prompt: OwnerPrompt, response: PermissionResponse) => Promise<void>;
   onOpen: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const run = async (requestId: string, response: PermissionResponse) => {
+  const run = async (prompt: OwnerPrompt, response: PermissionResponse) => {
     if (busy) return;
     setBusy(true);
     try {
-      await onAnswer(requestId, response);
+      await onAnswer(prompt, response);
     } finally {
       setBusy(false);
     }
@@ -409,7 +451,7 @@ export function OwnerPromptBox({
             prompt={prompt}
             theme={theme}
             busy={busy}
-            onAnswer={(response) => void run(prompt.requestId, response)}
+            onAnswer={(response) => void run(prompt, response)}
             onOpen={onOpen}
           />
         ) : (
@@ -418,7 +460,7 @@ export function OwnerPromptBox({
             prompt={prompt}
             theme={theme}
             busy={busy}
-            onAnswer={(response) => void run(prompt.requestId, response)}
+            onAnswer={(response) => void run(prompt, response)}
             onOpen={onOpen}
           />
         ),

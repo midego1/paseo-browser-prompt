@@ -153,5 +153,5 @@ test("in Always Ask mode the close shows as a complete permission, so the card c
     input: { browserId: "123e4567-e89b-42d3-a456-426614174000" },
   });
   assert.equal(details.complete, true);
-  assert.deepEqual(details.lines.map((line) => line.value), ["Browser close tab"]);
+  assert.deepEqual(details.lines.map((line) => line.value), ["mcp__paseo__browser_close_tab"], "the exact tool name");
 });
