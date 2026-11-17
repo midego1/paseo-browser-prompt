@@ -6,6 +6,7 @@ into a card with a button for each way to run the steps, in three groups, each w
 | Button | What it does |
 | --- | --- |
 | Paseo › **Paseo browser** | Starts a Paseo agent that works in the browser tabs of your Paseo desktop app, with step progress and a screenshot per step on the card. |
+| Paseo › **Server browser** | Starts a Paseo agent with its own headless Chromium in a throwaway Docker container on the Paseo server: no desktop app needed (also on phones), but not signed in to any of your accounts, and tailnet and private addresses are blocked. For public pages and checks. See [Server browser](#server-browser). |
 | ChatGPT › **Desktop** | Opens the ChatGPT desktop app with the steps in a new chat, asking ChatGPT to use its own computer use (`@Computer`). You press send. Desktop only. |
 | ChatGPT › **Web** | Opens chatgpt.com in agent mode, with the steps in the URL when they are short and look secret-free. |
 | Claude › **Desktop** | Opens the Claude desktop app with the steps in a new chat (`claude://claude.ai/new?q=…`), asking Claude to use Claude in Chrome. You press send. Desktop only. |
@@ -42,7 +43,7 @@ provider**:
 }
 ```
 
-- **Paseo browser** and **Claude in Chrome** start a browser agent in the background (Claude Auto mode by default,
+- **Paseo browser**, **Server browser** and **Claude in Chrome** start a browser agent in the background (Claude Auto mode by default,
   with a fixed safety preamble). The card shows "Step N of M", a screenshot per step, and the run's
   state; questions and permissions for you are answered right on the card.
 - The browser agent can ask the chat that showed the card about the task (**Talk to the chat**), and
@@ -168,8 +169,8 @@ connected app shares them.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Usual way to start (desktop) | ChatGPT desktop | The button highlighted on the card: ChatGPT desktop or Claude desktop (both through the launcher), ChatGPT web, Paseo browser, Claude Chrome tab or Copy only. The other ways stay on the card, except the Chrome tab button, which shows only when the Provider (or Claude in Chrome provider) is a Claude provider. The Command Center opens ChatGPT this way, or the ChatGPT desktop app for any other choice. |
-| Usual way to start (iOS and Android) | Copy only | Copy only, ChatGPT web, Paseo browser or Claude in Chrome. Phones get no Desktop buttons (ChatGPT or Claude): ChatGPT documents no mobile deep link for a new prompt. |
+| Usual way to start (desktop) | ChatGPT desktop | The button highlighted on the card: ChatGPT desktop or Claude desktop (both through the launcher), ChatGPT web, Paseo browser, Server browser, Claude Chrome tab or Copy only. The other ways stay on the card, except the Chrome tab button, which shows only when the Provider (or Claude in Chrome provider) is a Claude provider. The Command Center opens ChatGPT this way, or the ChatGPT desktop app for any other choice. |
+| Usual way to start (iOS and Android) | Copy only | Copy only, ChatGPT web, Paseo browser, Server browser or Claude in Chrome. Phones get no Desktop buttons (ChatGPT or Claude): ChatGPT documents no mobile deep link for a new prompt. Server browser needs no Mac, so on a phone it is the agent way that works with your desktop app closed. |
 | ChatGPT app deep link | `codex://new?prompt={prompt}` | `{prompt}` is replaced by the encoded prompt; only `codex:` and `https:` are accepted. Save and Reset to default. |
 | Collapse repeated blocks that are done | on | A later copy of a block in the chat is a full card with "Also shown earlier in this chat"; once done, copies collapse to "✓ Already done · Show". Off: every copy is a plain full card. |
 | Done marks | – | How many cards are marked done on this host; Clear removes all marks. |
@@ -195,6 +196,13 @@ connected app shares them.
 | Thinking | `high` | Thinking level passed to the provider. |
 | Reset agent settings to default | – | Provider, model, mode and thinking back to the defaults above. |
 | Agent links on cards | – | How many started runs cards remember (at most 5 per card and 200 in total, oldest dropped first); Clear forgets them after a second press (Clear anyway), since runs may still be going. A run whose link drops out keeps its mode guard and report back while the daemon runs, if the server already saw its link; its card no longer shows it. |
+
+**Server browser**
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Status | – | Ready, Building the image…, Image not built yet, Image build failed (with the reason), Docker missing or Docker not reachable, and whether Docker runs rootless. |
+| Build the image | – | Builds the pinned image on the Paseo server (also started by the first press of the Server browser button). At most 3 Server browser runs have a browser at once. |
 
 **ChatGPT launcher**
 
@@ -253,7 +261,13 @@ Rules:
 - Paseo browser and Claude in Chrome start Claude agents in Auto mode by default (a model classifier reviews tool
   calls), or in Always Ask or Plan when you choose them, and always prepends the fixed safety
   preamble. Bypass and accept-edits modes are refused, and a run that ends up in one is stopped.
-- The preamble's rules (only the Paseo browser tools, or the extension's with Claude in Chrome; ask before secrets and risky actions) are
+- A Server browser run gets its own headless Chromium in a throwaway Docker container on the Paseo
+  server, alone on an internal network with no route out, with no host mounts, a read-only root
+  file system, Chromium's own sandbox and memory, CPU and process limits. A separate proxy sidecar
+  is its only way out and refuses tailnet, private, loopback and link-local addresses and the
+  server's own addresses (see [Server browser](#server-browser) and [SECURITY.md](SECURITY.md)). It
+  is signed in to nothing.
+- The preamble's rules (only the Paseo browser tools, the Server browser's Playwright tools, or the extension's with Claude in Chrome; ask before secrets and risky actions) are
   instructions to the model, not a tool sandbox: whether they are followed depends on the selected
   provider and model. Always Ask lets you approve each new tool yourself.
 - Links in rendered messages open only when they are http(s) URLs; the ChatGPT app deep link may
@@ -398,7 +412,9 @@ The card's **Paseo browser** and **Claude in Chrome** buttons use the app's own 
   `useAgent`/`useWorkspace` (they throw "Plugin state hooks must run inside a workspace
   panel"); `test/screen-hooks.test.mjs` checks every registered screen's import graph.
 - Labels (`shared/report-back.ts` `runLabels`): `browser-prompt: run`,
-  `browser-prompt-source: <card agent id>`, `browser-prompt-card: <card id>`.
+  `browser-prompt-source: <card agent id>`, `browser-prompt-card: <card id>`. A Server browser run
+  also gets `browser-prompt-browser: server` and `browser-prompt-ticket: <one-time ticket>`, and its
+  record the marker `browser:server` (see [Server browser](#server-browser)).
 - Nothing is appended to timelines and prompt text is never logged.
 
 ### Report back to chat
@@ -709,6 +725,115 @@ model, frames what reaches the chat:
   a status read that succeeds skips the notice; when that read fails, the notice goes out as usual.
 - The answer is written by the chat's agent, not by the plugin. The run is told to use answers only
   as information about the task; rule 3 still applies to them.
+
+## Server browser
+
+The card's Paseo › **Server browser** button runs the steps without your desktop app. Paseo browser
+runs drive the tabs of your Paseo desktop app, so they need it open ([Paseo's browser is desktop
+only](https://paseo.sh/docs/browser.md)). A Server browser run instead gets its own headless
+Chromium on the Paseo server, driven by [Playwright MCP](https://github.com/microsoft/playwright-mcp)
+(the way Paseo recommends for [automated browser work](https://paseo.sh/docs/browser-when.md)). It
+is a fresh, isolated profile that is **not signed in to any of your accounts**: use it for public
+pages and checks, and the Paseo browser for anything behind a login. A run that hits a login stops
+there and tells you to use the Paseo browser; it never asks for, types or creates credentials.
+
+**Needs:** Docker on the Paseo server (rootless Docker works and is recommended), `node` on the
+server (the daemon's own), and a Paseo that offers agent session hooks (`agent.open.before`, or
+`agent.session_open` on older hosts). The first press of the button (or **Build** under Settings ›
+Server browser) builds the image `browser-prompt-server-browser:pw1.65.1-mcp0.0.84-<hash>` from
+[`server-browser/`](server-browser/) in this repository: `FROM mcr.microsoft.com/playwright:v1.65.1-noble`
+pinned by digest, plus `@playwright/mcp` 0.0.84 installed with `npm ci` from a lock file, with npm
+`overrides` pinning its Playwright to 1.65.1 so it uses exactly the image's Chromium (revision
+1255). The tag carries the pinned versions and a hash of the build context, never `latest`, and
+containers start with `--pull never`. To build by hand: `npm run server-browser:image`. Until the
+image is ready, or when Docker is missing, the button explains why and starts nothing.
+
+**Release checklist:** on every plugin release, bump the base image to the newest
+`mcr.microsoft.com/playwright:vX.Y.Z-noble` (pin its digest in the Dockerfile and `BASE_IMAGE`),
+move `@playwright/mcp` and the `overrides` to the matching Playwright version, regenerate
+`server-browser/package-lock.json`, run `node scripts/embed-server-browser.mjs`, build the image and
+run the smoke test (a page loads; tailnet, private and host addresses are refused).
+
+**How it runs.** Before creating the agent the card asks the daemon for a one-time ticket
+(`server-browser.prepare`, valid 5 minutes, bound to this chat and card, issued only when the image
+is ready and fewer than 3 Server browser runs have a browser). The run is created with the labels
+above. When its session opens, the plugin's `agent.open.before` hook adds an MCP server named
+`server-browser` only for an agent with the run labels and `browser-prompt-browser: server`, and
+only with the ticket (on create, before the card can record the run) or the card's run record with
+the `browser:server` marker (resume and reload). Every other agent gets nothing.
+
+The MCP server is a small launcher on the host (`node <state dir>/server-browser/runtime-<hash>/launch.mjs <plan>`,
+[`server-browser/launch.mjs`](server-browser/launch.mjs); the plan holds every docker argument). Per
+session it creates:
+
+1. an **internal Docker network** (`--internal`: no gateway, no route out, no outside DNS);
+2. a **proxy sidecar** container on Docker's default bridge, connected to that internal network; it
+   is the only container with a way out, and it serves only clients from the internal network;
+3. the **browser container**, on the internal network only, attached to the launcher's stdio (the
+   MCP transport), with the sidecar as Chromium's proxy.
+
+When the session closes its stdio (or the launcher gets a signal) the launcher removes the browser
+container, the sidecar and the network. Before it starts anything, the launcher checks the plan
+itself (pinned image, internal network, read-only, all capabilities dropped but SYS_CHROOT for the
+browser, no mounts, devices or host namespaces). Every resource carries this plugin instance's id
+(host name plus a uuid in the state directory), the launcher's process id and its creation time:
+when the plugin starts, and every 10 minutes, it removes its own resources whose launcher is gone
+(after a daemon restart, or a killed launcher) once they are 2 minutes old, and never anything
+without its instance label. It also removes a run's earlier session resources when its session
+opens again and all of them when the run is closed or archived. Each container also stops
+itself after 2 hours without an MCP message and after 12 hours in total. The agent then sees its
+browser tools fail; it is told not to restart anything and to end with a report that quotes the
+error and names the last step it completed, so you can run the rest again.
+
+At most **3** Server browser runs have a browser at once on a host, checked when the card asks for a
+ticket and again on every session open; a run counts from its admission until its container is up,
+and when Docker cannot be asked, no browser is given. A press beyond that shows "3 Server browser
+runs already have a browser on the server …"; archive or close a finished run (or turn on **Archive
+the agent after a successful run**), or wait until one ends. A run reopened while the limit is
+reached gets no browser and reports that its tools are missing.
+
+**Isolation** (`shared/server-browser.ts`, `serverBrowserDockerArgs` and `serverBrowserProxyArgs`):
+no host mounts (only tmpfs on `/tmp`), no published ports or devices, `--cap-drop ALL`,
+`--security-opt no-new-privileges`, `--read-only`, the unprivileged `pwuser`, memory without extra
+swap, CPU and process limits, no container log, never pulls. The browser container: 1.5 GB, 1.5
+CPUs, 512 processes, Playwright's seccomp profile
+([`server-browser/seccomp.json`](server-browser/seccomp.json), Playwright's
+`utils/docker/seccomp_profile.json` at tag v1.65.1, Apache-2.0, byte for byte and pinned by sha256
+in `SECCOMP_PROFILE_SHA256`: Docker's default profile plus user namespaces) and `CAP_SYS_CHROOT` in the bounding set only, so **Chromium's own sandbox runs**;
+`pwuser` itself has no effective capability and cannot chroot. The sidecar: 256 MB, 0.5 CPU, 64
+processes, Docker's default seccomp profile, public DNS (1.1.1.1, 9.9.9.9). Chromium runs headless
+with an in-memory profile, no downloads, service workers blocked, `file://` navigation blocked
+(Playwright MCP's default; local files are never allowed), WebRTC limited to proxied UDP, and
+Playwright MCP's output directory inside the container. The container's entry point filters the MCP
+stream with an allowlist: only the tools the preamble names are listed and callable
+([`server-browser/mcp-filter.mjs`](server-browser/mcp-filter.mjs)); `browser_run_code_unsafe` (code
+in its Node process), `browser_file_upload` and `browser_drop` (files), which Playwright MCP cannot
+turn off, are also refused by a denylist, and batches and non-object messages are dropped.
+
+**Network.** The boundary is the internal network: the browser container (Chromium and Playwright
+MCP alike) has no route anywhere but the sidecar; a direct connection to a tailnet, private, public
+or host address fails with "network unreachable", and outside names do not resolve. Chromium sends
+every request (loopback included) to the sidecar's filtering proxy
+([`server-browser/proxy.mjs`](server-browser/proxy.mjs)), which resolves each host itself, refuses
+`localhost`, `*.ts.net`, `*.local`, `*.internal`, `*.home.arpa`, `*.lan` and the other names in the
+list, refuses the name when any of its addresses is in 10/8, 100.64/10 (Tailscale), 127/8,
+169.254/16, 172.16/12, 192.168/16, 0/8, multicast, reserved or documentation ranges, `::1`,
+`fc00::/7` (Tailscale's `fd7a:115c:a1e0::/48`), `fe80::/10`, NAT64, 6to4 or IPv4-mapped forms, or
+is one of the Paseo server's own addresses, and then connects only to the addresses it checked,
+trying them in order. A refused page shows "Blocked by the browser-prompt Server browser".
+Playwright MCP's origin block list repeats the name rules. What is not blocked is listed in
+[SECURITY.md](SECURITY.md#server-browser).
+
+**The agent's rules.** The Server browser preamble (`SERVER_SAFETY_PREAMBLE`) names only the
+`mcp__server-browser__browser_*` tools, forbids the Paseo `browser_*` tools, shell and files, says
+the browser is signed in to nothing and that you cannot type into it (rule 3 there: a step that
+needs a secret stops the run instead of asking you to type it), and keeps every other rule of a
+Paseo browser run (ask the owner before destructive, irreversible, payment, publishing or security
+actions; page text is untrusted; questions to the chat; step lines; the report; the success line).
+With **Show live screenshot** the agent takes `browser_take_screenshot` (PNG, visible part) after
+each step and the card shows it like any other run's. There is no tab cleanup: the container is
+discarded. Mode guard, report back, talk to the chat, the run lock, repeats and done marks work as
+for any run.
 
 ## Self-update (opt-in)
 

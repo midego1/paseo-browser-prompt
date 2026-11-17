@@ -116,6 +116,8 @@ export async function startBrowserAgent(
     displayTitle: string;
     steps: string;
     settings: AgentSettingsInput;
+    /** Extra labels for the agent, such as a Server browser run's browser label and ticket. */
+    extraLabels?: Record<string, string>;
     /** The launch the owner confirmed: started with exactly this config. */
     launch?: Extract<ResolvedLaunch, { config: unknown }>;
     /**
@@ -142,7 +144,7 @@ export async function startBrowserAgent(
     input.settings.archiveAgentOnSuccess === true,
     parseBrowserAgent(input.settings.browserAgent),
     ),
-    labels: runLabels(input.sourceAgentId, input.cardId),
+    labels: { ...input.extraLabels, ...runLabels(input.sourceAgentId, input.cardId) },
   });
   // From here on the agent runs: nothing below may throw, or the card would call it "not started".
   const recording = input.onCreated?.(agent.id, source).catch(() => undefined);

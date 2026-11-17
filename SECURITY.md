@@ -17,7 +17,9 @@ Do not include real secrets, tokens or private prompts in a report; describe the
 | Prompt text | `https://chatgpt.com/?hints=agent&q=...` in your browser (OpenAI, browser history) | ChatGPT web mode, only when the prompt is short and has nothing that looks like a credential |
 | Prompt text | Plugin memory on your Paseo daemon, under a random one-time id, at most 10 minutes; then the ChatGPT app via its `codex://` deep link, or the Claude app via its `claude://` deep link | ChatGPT desktop and Claude desktop |
 | Launcher URL `http://<own Tailscale IP or 127.0.0.1>:5299/open?id=<id>` | Your browser; contains no prompt text | ChatGPT desktop and Claude desktop |
-| Card steps plus a fixed safety preamble | A new agent on your own Paseo daemon, and that agent's model provider (Anthropic by default); with Claude in Chrome also Anthropic's bridge to your Chrome | Paseo browser, Claude in Chrome |
+| Card steps plus a fixed safety preamble | A new agent on your own Paseo daemon, and that agent's model provider (Anthropic by default); with Claude in Chrome also Anthropic's bridge to your Chrome | Paseo browser, Server browser, Claude in Chrome |
+| The pages a Server browser run opens, and their host names | Fetched from the Paseo server's network by a headless Chromium in a Docker container on that server; names resolved by the public resolvers 1.1.1.1 and 9.9.9.9; page text and screenshots go to the agent's model provider as tool output | Server browser |
+| Image build: the pinned Playwright base image and the pinned `@playwright/mcp` package | Downloaded on the Paseo server from `mcr.microsoft.com` (when not there yet) and the npm registry; the build context is written to the state directory below | Server browser, first use or Build |
 | The browser agent's final report (up to 4,000 characters), escaped and framed as untrusted output | The agent whose chat showed the card, and that agent's model provider | Report back to chat: Auto (default) only when that chat runs in an ask-first mode, or Always |
 | Title, outcome and run agent id only | The agent whose chat showed the card | Report back to chat: Auto, when that chat runs in any other mode |
 | Browser screenshots (viewport PNG after each step) | The browser agent's model provider, as tool output; a private copy kept by Paseo on the daemon host; shown as a thumbnail on the card in your Paseo app | Show live screenshot (on by default) |
@@ -30,6 +32,120 @@ Do not include real secrets, tokens or private prompts in a report; describe the
 | `git ls-remote` / `git fetch` | The `https://` remote the plugin was installed from | Git installs: automatically only after the owner enabled auto-update for that remote; otherwise only when the owner presses Check now or Update now |
 
 The plugin does not read the clipboard, does not log prompt text, and sends no telemetry.
+
+## Server browser
+
+**What runs where.** The run's agent runs on your Paseo daemon like any run. A Paseo browser run
+drives the tabs of your Paseo desktop app (that browser lives only in the desktop app), a Claude in
+Chrome run your real Chrome. A Server browser run instead gets a headless Chromium in its own Docker
+container on the daemon host. The agent's provider process starts the plugin's launcher
+(`node …/launch.mjs <plan>`) as an MCP server over stdio; per session the launcher creates an
+internal Docker network, a proxy sidecar and the browser container, and removes all three when the
+session ends. Before it runs anything it checks the plan again (defense in depth): the pinned image,
+an `--internal` network, `--read-only`, `--cap-drop ALL`, `no-new-privileges`, `--cap-add` at most
+`SYS_CHROOT` for the browser, the expected networks, and no mounts, devices, privileged mode, host
+namespaces, published ports or unconfined seccomp/AppArmor. The plugin adds that MCP server only to agents that carry the plugin's run labels plus
+`browser-prompt-browser: server`, and only with a one-time ticket the daemon issued for that chat
+and card right before the run was created, or, when an existing run's session opens again, with the
+card's run record marked `browser:server`. No other agent gets it, and an agent that copies the
+labels gets it only with a fresh, unused ticket. At most 3 runs have a browser at once: the cap is
+checked when the card asks for a ticket and again on every session open (create, resume, refresh,
+import); a run counts from the moment it is admitted until its browser container exists, and when
+Docker cannot be asked how many are running, no browser is given (fail closed).
+
+**What is isolated.**
+
+- The browser container is alone on an `--internal` Docker network: no gateway and no route to
+  anything but the sidecar, and names outside it do not resolve. Checked on rootless Docker 28.5:
+  in a throwaway container on an `--internal` network (resolver Docker's embedded `127.0.0.11`),
+  `getent hosts example.com`, `getent hosts paseo-box.tail60821.ts.net` and `getent hosts
+  one.one.one.one` all exit 2 (not resolved), and direct TCP connections to a tailnet, a private, a
+  public and the host's own address fail with "network unreachable". Chromium and the Playwright MCP
+  process share that container, so a browser exploit or a misused tool has no network path except
+  the proxy, which applies the rules below in a different container.
+- The proxy sidecar is the only container of the session with a route out (Docker's default bridge;
+  with rootless Docker, user-mode networking whose host-loopback access is off by default). It
+  accepts connections only from the session's internal network, so other containers on the bridge
+  cannot use it.
+- Both containers: no host mounts (only tmpfs on `/tmp`), no published ports, no devices, the image's
+  unprivileged `pwuser`, `--cap-drop ALL`, `no-new-privileges`, a read-only root file system, memory
+  without extra swap, CPU and process limits (browser 1.5 GB / 1.5 CPUs / 512 processes, sidecar 256
+  MB / 0.5 CPU / 64), no container log, never pulled.
+- The browser container uses Playwright's seccomp profile (Docker's default plus user namespaces;
+  Playwright's `utils/docker/seccomp_profile.json` at tag v1.65.1, byte for byte, pinned by its
+  sha256 `cc3e61ca…1cc7849`; the plugin refuses to write another) and keeps `CAP_SYS_CHROOT` in its
+  bounding set only, so Chromium's own sandbox (namespace sandbox) runs; `pwuser` has no effective
+  capability and cannot chroot. It does not start with `--cap-drop ALL` alone: the zygote cannot set
+  up its sandbox without that capability inside its user namespace, and with Docker's default
+  seccomp profile it cannot create the namespace at all. The sidecar keeps Docker's default profile.
+- The browser profile is in memory, downloads are refused, service workers are blocked, `file://`
+  navigation is blocked, and Playwright MCP's files (screenshots, snapshots) stay in the container.
+  A filter on the MCP stream lets only the tools the agent is told about through (an allowlist):
+  every other tool is removed from the tool list and refused, `browser_run_code_unsafe` (code in
+  Playwright MCP's Node process), `browser_file_upload` and `browser_drop` are also on a denylist
+  as a second check (Playwright MCP cannot turn them off), and batches, other JSON values and
+  non-JSON lines are dropped in both directions. The browser is not signed in to anything and holds none of
+  your cookies.
+- Lifecycle: the launcher removes the session's containers and network when the session closes its
+  stdio. A killed launcher may leave them. Every resource is labelled with this plugin instance's id
+  (the daemon's host name plus a uuid kept in the plugin's state directory), its launcher's process
+  id and its creation time. When the plugin starts and every 10 minutes it removes only its own
+  instance's resources whose launcher process is gone and that are older than 2 minutes; another
+  daemon's resources on the same Docker, and anything without its instance label (such as a
+  container someone started from the image by hand), are never touched. It also removes a run's
+  earlier session resources when its session reopens, and all of a run's resources when it is
+  closed or archived (both limited to its own instance). Each container stops itself
+  after 2 hours without an MCP message and after 12 hours in total; the agent then reports that its
+  browser stopped and which step it reached.
+
+**What is blocked.** Every Chromium request (HTTP, HTTPS, WebSocket, also to loopback) goes to the
+sidecar's proxy, which resolves the name itself and refuses:
+
+- names: `localhost`, `ts.net`, `beta.tailscale.net`, `local`, `internal`, `home.arpa`, `lan`,
+  `localdomain` and every subdomain of them (so every `*.ts.net` MagicDNS name), whatever they
+  resolve to;
+- IPv4: 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10 (Tailscale and other CGNAT), 127.0.0.0/8,
+  169.254.0.0/16 (link-local and cloud metadata), 172.16.0.0/12 (Docker bridges), 192.0.0.0/24,
+  192.0.2.0/24, 192.88.99.0/24, 192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24,
+  224.0.0.0/4 and 240.0.0.0/4;
+- IPv6: `::`, `::1`, `::/96`, `64:ff9b::/96`, `64:ff9b:1::/48`, `100::/64`, `2001::/32`,
+  `2001:db8::/32`, `2002::/16`, `fc00::/7` (Tailscale's `fd7a:115c:a1e0::/48`), `fe80::/10`,
+  `fec0::/10`, `ff00::/8`, and IPv4-mapped addresses checked as IPv4;
+- every address on the Paseo server's own network interfaces (for example its public address, where
+  services that listen on all interfaces could otherwise be reached);
+- a name for which any resolved address is in those ranges. The proxy then connects only to the
+  addresses it checked (in order, the next one when one fails), so DNS rebinding cannot swap them
+  in between, and a public name that points to 127.0.0.1 or a tailnet address (`127.0.0.1.nip.io`,
+  `localtest.me`) is refused.
+
+Playwright MCP's origin block list repeats the name rules and the server's addresses. The sidecar
+uses public DNS (1.1.1.1, 9.9.9.9), never the host's resolver or Tailscale's MagicDNS, and Chromium
+may not send WebRTC UDP around the proxy (it has no route for it anyway).
+
+**What is not blocked.**
+
+- The public internet, through the proxy: any public address and site, including your own services
+  that are reachable publicly (other servers' public addresses, a public IP of this server that is
+  not on one of its interfaces, such as a NAT or floating IP), and any port Chromium allows. A page
+  or a misled agent can send what it saw to any public site.
+- Host names are sent to the public resolvers (and to the sites). Names on the block list are
+  refused before any lookup.
+- The proxy sidecar itself can reach every address (its rules are what stops it); a flaw in the
+  proxy's code is therefore the remaining path to private addresses. It is small, uses only Node's
+  standard library, and runs in its own locked-down container.
+- Docker is the isolation boundary. With rootless Docker a container escape would get the daemon
+  user's rights (with rootful Docker, root's), so keep Docker and the pinned images updated (see the
+  release checklist below).
+- Page content and screenshots reach the agent's model provider, as in any run, and the agent's
+  rules (no secrets, ask before risky actions, stop at a login) are instructions to a model, not
+  enforced controls. The agent keeps its other tools as in any run; Always Ask lets you approve each
+  one.
+
+**Release checklist.** On every plugin release, bump the Server browser's base image to the newest
+`mcr.microsoft.com/playwright:vX.Y.Z-noble`, pinned by digest (`server-browser/Dockerfile` and
+`BASE_IMAGE`), move `@playwright/mcp` and its `overrides` to the matching Playwright version, update
+`seccomp.json` from that Playwright tag, regenerate the lock file and the embedded copy
+(`node scripts/embed-server-browser.mjs`), and rerun the smoke test.
 
 ## Design limits
 

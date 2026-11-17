@@ -23,21 +23,24 @@ import { DEFAULT_APP_LINK_TEMPLATE, validateAppLinkTemplate } from "../shared/br
 import { parseReportMode, type ReportMode } from "../shared/report-back";
 import { preferences } from "../shared/settings";
 import { LauncherSettings } from "./launcher-settings";
+import { ServerBrowserSettings } from "./server-browser-settings";
 import { UpdateSettings } from "./update-settings";
 
-const DESKTOP_OPTIONS: { label: string; value: "app" | "web-agent" | "copy-only" | "claude-desktop" | "paseo" | "chrome" }[] = [
+const DESKTOP_OPTIONS: { label: string; value: "app" | "web-agent" | "copy-only" | "claude-desktop" | "paseo" | "chrome" | "server" }[] = [
   { label: "ChatGPT desktop", value: "app" },
   { label: "ChatGPT web", value: "web-agent" },
   { label: "Claude desktop", value: "claude-desktop" },
   { label: "Paseo browser", value: "paseo" },
+  { label: "Server browser", value: "server" },
   { label: "Claude Chrome tab", value: "chrome" },
   { label: "Copy only", value: "copy-only" },
 ];
 
-const MOBILE_OPTIONS: { label: string; value: "copy-only" | "web-agent" | "paseo" | "chrome" }[] = [
+const MOBILE_OPTIONS: { label: string; value: "copy-only" | "web-agent" | "paseo" | "chrome" | "server" }[] = [
   { label: "Copy only", value: "copy-only" },
   { label: "ChatGPT web", value: "web-agent" },
   { label: "Paseo browser", value: "paseo" },
+  { label: "Server browser", value: "server" },
   { label: "Claude Chrome tab", value: "chrome" },
 ];
 
@@ -128,7 +131,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
           />
           <SettingsSelect
             label="Usual way to start (iOS and Android)"
-            hint="Highlighted on the card. ChatGPT documents no mobile deep link for a new prompt, so the card has no ChatGPT app button there."
+            hint="Highlighted on the card. ChatGPT documents no mobile deep link for a new prompt, so the card has no ChatGPT app button there. Server browser needs no desktop app, so on a phone it is the agent way that works without your Mac."
             value={values.mobileStartMode}
             options={MOBILE_OPTIONS}
             onValueChange={(mobileStartMode) => void settings.save({ ...values, mobileStartMode }, revision)}
@@ -361,6 +364,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
           />
         </SettingsCard>
       </SettingsSection>
+      <ServerBrowserSettings theme={theme} />
       <LauncherSettings theme={theme} />
       <UpdateSettings theme={theme} />
     </>

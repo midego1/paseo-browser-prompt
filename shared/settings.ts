@@ -26,12 +26,14 @@ export const preferences = defineSettings({
      * claude-desktop: copy, then open the Claude desktop app with the prompt prefilled (through the
      *   same launcher as the ChatGPT app).
      * paseo, chrome: a Paseo agent in the Paseo browser or in Claude in Chrome.
+     * server: a Paseo agent in the Server browser (headless Chromium in a container on the daemon
+     *   host; needs no desktop app, not signed in to any account).
      * This one is highlighted on the card. The card shows the Chrome tab button only with a Claude
      * provider, and no Desktop buttons on phones.
      */
-    startMode: z.enum(["app", "web-agent", "copy-only", "claude-desktop", "paseo", "chrome"]).default("app"),
+    startMode: z.enum(["app", "web-agent", "copy-only", "claude-desktop", "paseo", "chrome", "server"]).default("app"),
     /** iOS and Android. No documented ChatGPT mobile deep link for a new prompt exists. */
-    mobileStartMode: z.enum(["copy-only", "web-agent", "paseo", "chrome"]).default("copy-only"),
+    mobileStartMode: z.enum(["copy-only", "web-agent", "paseo", "chrome", "server"]).default("copy-only"),
     /** Desktop app deep link; `{prompt}` is replaced by the URI-encoded prompt. */
     appLinkTemplate: z.string().default(DEFAULT_APP_LINK_TEMPLATE),
     /**
@@ -87,7 +89,8 @@ export const preferences = defineSettings({
      * Agents started from cards: `[<agentId>:<cardId>, startedAgentId, ...markers]`, oldest first, at
      * most 5 per card and 200 in total. Markers: `"most-recent"` (always third when present) when the
      * run started outside the card agent's workspace, `key:<content key>` for the block it was started
-     * for (copies of the block share the run), and `browser:chrome` for a Claude in Chrome run.
+     * for (copies of the block share the run), `browser:chrome` for a Claude in Chrome run and
+     * `browser:server` for a Server browser run (the server attaches the browser only to runs with it).
      */
     runs: z.array(z.tuple([z.string(), z.string()], z.string())).default([]),
     /** ChatGPT launcher bind address on the daemon host; empty = this machine's Tailscale IPv4. */

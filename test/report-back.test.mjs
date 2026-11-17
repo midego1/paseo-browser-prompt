@@ -699,6 +699,8 @@ test("hosts with addHook get the new hook name; Paseo 0.14 hosts get the depreca
     "agent.turn_started": "agent.turn.before",
     "agent.turn_ended": "agent.turn.after",
     "agent.permission_requested": "agent.permission.before",
+    "agent.closed": "agent.close.after",
+    "agent.archived": "agent.archive.after",
   });
   const handler = async () => {};
   const calls = [];

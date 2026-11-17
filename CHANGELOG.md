@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.21.0 (unreleased)
+
+- New: Paseo › **Server browser** on the card, next to Paseo browser. It starts a Paseo agent with
+  its own headless Chromium in a throwaway Docker container on the Paseo server, driven by a pinned
+  Playwright MCP, so no desktop app is needed (on phones it is the only agent way that works without
+  your Mac). That browser is not signed in to any of your accounts: for public pages and checks. A
+  run that needs a login or a secret stops and says to use the Paseo browser; it never asks for or
+  types credentials.
+- Per session, a launcher on the server creates an internal Docker network with no route out, a
+  proxy sidecar (the only container with a way out, serving only that network) and the browser
+  container on the internal network, and removes all three when the session ends. Both containers
+  have no host mounts, every capability dropped, no new privileges, a read-only root file system, an
+  unprivileged user, memory, CPU and process limits and no log. Chromium's own sandbox runs, with
+  Playwright's seccomp profile and CAP_SYS_CHROOT in the bounding set only.
+- The sidecar's proxy refuses `*.ts.net` and other local names, tailnet (100.64.0.0/10), private,
+  loopback, link-local, reserved and IPv6 local addresses, and the server's own addresses, also when
+  a public name resolves to one of them, and connects only to the addresses it checked. SECURITY.md
+  lists what is and is not blocked.
+- `file://` navigation is blocked. The MCP stream is filtered with an allowlist of the tools the
+  agent is told about (Playwright MCP's `browser_run_code_unsafe`, `browser_file_upload` and
+  `browser_drop` are also denylisted), and batches and non-object messages are dropped. The
+  launcher re-checks every docker command of its plan before running it.
+- At most 3 Server browser runs have a browser at once, checked for the ticket and on every session
+  open, failing closed when Docker cannot be asked; the button says why when the limit is reached.
+  Leftover containers and networks of this plugin instance (a killed launcher, a daemon restart) are
+  removed when the plugin starts and every 10 minutes once 2 minutes old, a run's earlier ones when
+  its session reopens, and all of a run's when it is closed or archived. Resources of another daemon
+  or without the instance label are never touched. Each container stops after 2 hours idle and 12 hours in
+  total; the agent then reports the step it reached.
+- The image (`browser-prompt-server-browser:pw1.65.1-mcp0.0.84-<hash>`, never `latest`) is built
+  locally from `server-browser/` on first use: Playwright 1.65.1 base image pinned by digest, and
+  `@playwright/mcp` 0.0.84 on the same Playwright 1.65.1 from a lock file. Settings › Server browser
+  shows ready, building, failed or Docker missing, with a Build button; `npm run server-browser:image`
+  builds it by hand. Until it is ready the button explains why and starts nothing. The release
+  checklist in SECURITY.md and the README bumps the image on every release.
+- The browser's MCP server is added only to Server browser runs a card started: the plugin's run
+  labels plus `browser-prompt-browser: server`, with a one-time ticket on the run's first session
+  and its run record (marker `browser:server`) after that. Other agents get nothing.
+- Server browser runs get their own preamble: only the `mcp__server-browser__browser_*` tools, never
+  the Paseo browser tools, shell or files, with the same rules for risky actions, questions to the
+  chat, step lines and the report; rule 3 there stops at any secret instead of asking you to type it.
+  Screenshots after each step use Playwright's `browser_take_screenshot` and show on the card; there
+  is no tab cleanup.
+- **Usual way to start** offers Server browser on desktop and on iOS and Android. The settings
+  version stays 18 (no migration needed).
+- **Rollback:** an older version of the plugin cannot read settings whose usual way is "Server
+  browser". Before you go back to 0.20.x, set **Usual way to start** (desktop and iOS/Android) to
+  another way; otherwise the older version shows the settings as invalid until you reset them.
+  Remove the image with `docker image rm browser-prompt-server-browser:<tag>`.
+- The card's permission box shows Playwright's element, target and option fields, and masks keys
+  typed with `browser_press_key` like `browser_keypress`.
+
 ## 0.20.5 (unreleased)
 
 - Fixed: the card no longer offers an Allow button whose text it cannot show exactly. A long

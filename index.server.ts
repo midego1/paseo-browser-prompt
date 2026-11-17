@@ -4,10 +4,12 @@ import { createLauncher } from "./server/launcher";
 import { registerModeGuard } from "./server/mode-guard-hook";
 import { createSeenRuns, registerReportBack } from "./server/report-back-hook";
 import { fileReportedStore } from "./server/reported-store";
+import { createServerBrowser, registerServerBrowser, type OpenHookServer } from "./server/server-browser";
 import { createServerUpdater, currentUpdateStatus } from "./server/updater";
 import { CLAUDE_DESKTOP_LINK_TEMPLATE, DEFAULT_APP_LINK_TEMPLATE } from "./shared/browser-prompt";
 import { createRunLocks, runLockKey } from "./shared/run-lock";
 import { acquireRunLock, finishRunLock } from "./shared/run-lock-rpc";
+import { prepareServerBrowserRun, serverBrowserStatus } from "./shared/server-browser-rpc";
 import { preferences } from "./shared/settings";
 import { getLauncherStatus, stashPrompt } from "./shared/trampoline";
 import { DEFAULT_TRAMPOLINE_PORT } from "./shared/trampoline-host";
@@ -67,7 +69,21 @@ export default function contribute(server: PluginServerContext) {
   // Mode guard: a browser run that leaves its allowed permission mode is set back or stopped.
   const modeGuard = registerModeGuard(server, settings, { seen: seenRuns });
 
+  // Server browser: a run's own headless Chromium in a throwaway Docker container on this host,
+  // attached as an MCP server only to Server browser runs a card started (see server/server-browser.ts).
+  const serverBrowser = createServerBrowser();
+  const serverBrowserHook = registerServerBrowser(server as unknown as OpenHookServer, settings, serverBrowser);
+  server.handle(serverBrowserStatus, async ({ build }) => {
+    if (!serverBrowserHook.supported) return { state: "unsupported" as const, image: serverBrowser.image, rootless: null, detail: "" };
+    return serverBrowser.status({ build });
+  });
+  server.handle(prepareServerBrowserRun, async ({ sourceAgentId, cardId }) => {
+    if (!serverBrowserHook.supported) return { ok: false as const, state: "unsupported" as const, detail: "" };
+    return serverBrowser.prepare({ sourceId: sourceAgentId, cardId });
+  });
+
   return async () => {
+    serverBrowserHook.dispose();
     modeGuard.dispose();
     await reportBack.dispose();
     unsubscribe();

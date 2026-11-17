@@ -82,8 +82,9 @@ test("the chat, step and success rules still come with a run in Chrome", () => {
 test("a card remembers which browser its run started in", () => {
   const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
   assert.equal(CHROME_RUN_MARKER, "browser:chrome");
-  assert.match(card, /\.\.\.\(chrome \? \[CHROME_RUN_MARKER\] : \[\]\)/);
-  assert.match(card, /runInChrome \? CHROME_HINT : DESKTOP_HINT/);
+  assert.match(card, /\.\.\.\(browser === "chrome" \? \[CHROME_RUN_MARKER\] : browser === "server" \? \[SERVER_RUN_MARKER\] : \[\]\)/);
+  assert.match(card, /HINTS\[runBrowser\]/);
+  assert.match(card, /BROWSER_NAMES\[runBrowser\]/);
 });
 
 test("both browsers share the hard safety rules", () => {
@@ -127,12 +128,13 @@ test("every way on the card can be the usual way", () => {
   const settings = readFileSync(new URL("../shared/settings.ts", import.meta.url), "utf8");
   const screen = readFileSync(new URL("../client/settings-screen.tsx", import.meta.url), "utf8");
   const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
-  assert.match(settings, /startMode: z\.enum\(\["app", "web-agent", "copy-only", "claude-desktop", "paseo", "chrome"\]\)\.default\("app"\)/);
-  assert.match(settings, /mobileStartMode: z\.enum\(\["copy-only", "web-agent", "paseo", "chrome"\]\)\.default\("copy-only"\)/);
+  assert.match(settings, /startMode: z\.enum\(\["app", "web-agent", "copy-only", "claude-desktop", "paseo", "chrome", "server"\]\)\.default\("app"\)/);
+  assert.match(settings, /mobileStartMode: z\.enum\(\["copy-only", "web-agent", "paseo", "chrome", "server"\]\)\.default\("copy-only"\)/);
+  assert.equal(screen.match(/label: "Server browser", value: "server"/g)?.length, 2, "desktop and phones");
   assert.equal(screen.match(/label: "Paseo browser", value: "paseo"/g)?.length, 2);
   assert.equal(screen.match(/label: "Claude Chrome tab", value: "chrome"/g)?.length, 2);
   assert.equal(screen.match(/label: "Claude desktop", value: "claude-desktop"/g)?.length, 1, "desktop only");
-  for (const way of ["app", "web-agent", "claude-desktop", "paseo", "chrome"]) assert.ok(card.includes(`highlighted={defaultMode === "${way}"}`), way);
+  for (const way of ["app", "web-agent", "claude-desktop", "paseo", "chrome", "server"]) assert.ok(card.includes(`highlighted={defaultMode === "${way}"}`), way);
   assert.ok(card.includes('defaultMode === "copy-only" ? styles.primary'), "copy-only");
   assert.match(readFileSync(new URL("../index.client.tsx", import.meta.url), "utf8"), /chatGptMode\(effectiveMode\(/, "the Command Center only opens ChatGPT");
 });
@@ -225,7 +227,7 @@ test("only the latest press counts, and the agent buttons wait while it resolves
   const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
   assert.match(card, /const seq = \+\+pressSeq\.current;/);
   assert.match(card, /if \(seq !== pressSeq\.current\) return;/);
-  assert.equal(card.match(/disabled=\{busy \|\| resolving \|\| runBlocked\}/g)?.length, 2);
+  assert.equal(card.match(/disabled=\{busy \|\| resolving \|\| runBlocked\}/g)?.length, 3);
 });
 
 test("Claude in Chrome shows only when the launch would work", () => {

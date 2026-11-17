@@ -112,8 +112,9 @@ export function safeImageSource(source: string): string | null {
   return value;
 }
 
+/** Paseo's browser_screenshot, or the Server browser's Playwright MCP browser_take_screenshot. */
 export function isScreenshotTool(name: unknown): boolean {
-  return typeof name === "string" && /(^|__|[.:/])browser_screenshot$/.test(name);
+  return typeof name === "string" && /(^|__|[.:/])browser_(take_)?screenshot$/.test(name);
 }
 
 type Item = { type: string; text?: unknown; name?: unknown; detail?: unknown; error?: unknown };

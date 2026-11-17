@@ -35,7 +35,7 @@ test("package files exist and the descriptions name every way to start", async (
   assert.equal(lock.packages[""].version, pkg.version);
   const manifest = JSON.parse(readFileSync(new URL("../paseo-plugin.json", import.meta.url), "utf8"));
   for (const description of [manifest.description, pkg.description]) {
-    for (const way of ["ChatGPT", "Claude desktop", "Paseo browser", "Claude in Chrome"]) assert.ok(description.includes(way), `${way}: ${description}`);
+    for (const way of ["ChatGPT", "Claude desktop", "Paseo browser", "Server browser", "Claude in Chrome"]) assert.ok(description.includes(way), `${way}: ${description}`);
   }
 });
 
@@ -45,7 +45,7 @@ test("OVERVIEW.md describes the 0.20 card and settings", () => {
   assert.doesNotMatch(overview, /\*\*Chrome\*\* button|ChatGPT app button/);
   assert.match(overview, /Chrome tab/);
   const screen = readFileSync(new URL("../client/settings-screen.tsx", import.meta.url), "utf8");
-  const ways = [...screen.matchAll(/\{ label: "([^"]+)", value: "(app|web-agent|claude-desktop|paseo|chrome|copy-only)" \}/g)].map((m) => m[1]);
+  const ways = [...screen.matchAll(/\{ label: "([^"]+)", value: "(app|web-agent|claude-desktop|paseo|server|chrome|copy-only)" \}/g)].map((m) => m[1]);
   const settings = overview.slice(overview.indexOf("## Settings"));
   for (const way of new Set(ways)) assert.ok(settings.includes(way.replace("Copy only", "copy only")), `usual way ${way}`);
   for (const label of ["Close tabs after a successful run", "Archive the agent after a successful run", "Claude in Chrome provider"]) {

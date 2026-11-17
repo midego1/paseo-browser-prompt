@@ -5,6 +5,8 @@ export const HOOK_NAMES = {
   "agent.turn_started": "agent.turn.before",
   "agent.turn_ended": "agent.turn.after",
   "agent.permission_requested": "agent.permission.before",
+  "agent.closed": "agent.close.after",
+  "agent.archived": "agent.archive.after",
 } as const;
 export type HookEvent = keyof typeof HOOK_NAMES;
 
