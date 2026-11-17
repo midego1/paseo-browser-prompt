@@ -773,17 +773,24 @@ session it creates:
    MCP transport), with the sidecar as Chromium's proxy.
 
 When the session closes its stdio (or the launcher gets a signal) the launcher removes the browser
-container, the sidecar and the network. Every resource carries the launcher's process id as a label:
-when the plugin starts, and every 10 minutes, it removes resources whose launcher is gone (after a
-daemon restart, or a killed launcher), and it removes a run's earlier session resources when its
-session opens again and all of them when the run is closed or archived. Each container also stops
+container, the sidecar and the network. Before it starts anything, the launcher checks the plan
+itself (pinned image, internal network, read-only, all capabilities dropped but SYS_CHROOT for the
+browser, no mounts, devices or host namespaces). Every resource carries this plugin instance's id
+(host name plus a uuid in the state directory), the launcher's process id and its creation time:
+when the plugin starts, and every 10 minutes, it removes its own resources whose launcher is gone
+(after a daemon restart, or a killed launcher) once they are 2 minutes old, and never anything
+without its instance label. It also removes a run's earlier session resources when its session
+opens again and all of them when the run is closed or archived. Each container also stops
 itself after 2 hours without an MCP message and after 12 hours in total. The agent then sees its
 browser tools fail; it is told not to restart anything and to end with a report that quotes the
 error and names the last step it completed, so you can run the rest again.
 
-At most **3** Server browser runs have a browser at once on a host. A press beyond that shows "3
-Server browser runs already have a browser on the server …"; archive or close a finished run (or
-turn on **Archive the agent after a successful run**), or wait until one ends.
+At most **3** Server browser runs have a browser at once on a host, checked when the card asks for a
+ticket and again on every session open; a run counts from its admission until its container is up,
+and when Docker cannot be asked, no browser is given. A press beyond that shows "3 Server browser
+runs already have a browser on the server …"; archive or close a finished run (or turn on **Archive
+the agent after a successful run**), or wait until one ends. A run reopened while the limit is
+reached gets no browser and reports that its tools are missing.
 
 **Isolation** (`shared/server-browser.ts`, `serverBrowserDockerArgs` and `serverBrowserProxyArgs`):
 no host mounts (only tmpfs on `/tmp`), no published ports or devices, `--cap-drop ALL`,
@@ -791,16 +798,17 @@ no host mounts (only tmpfs on `/tmp`), no published ports or devices, `--cap-dro
 swap, CPU and process limits, no container log, never pulls. The browser container: 1.5 GB, 1.5
 CPUs, 512 processes, Playwright's seccomp profile
 ([`server-browser/seccomp.json`](server-browser/seccomp.json), Playwright's
-`utils/docker/seccomp_profile.json` from v1.65.1, Apache-2.0: Docker's default profile plus user
-namespaces) and `CAP_SYS_CHROOT` in the bounding set only, so **Chromium's own sandbox runs**;
+`utils/docker/seccomp_profile.json` at tag v1.65.1, Apache-2.0, byte for byte and pinned by sha256
+in `SECCOMP_PROFILE_SHA256`: Docker's default profile plus user namespaces) and `CAP_SYS_CHROOT` in the bounding set only, so **Chromium's own sandbox runs**;
 `pwuser` itself has no effective capability and cannot chroot. The sidecar: 256 MB, 0.5 CPU, 64
 processes, Docker's default seccomp profile, public DNS (1.1.1.1, 9.9.9.9). Chromium runs headless
 with an in-memory profile, no downloads, service workers blocked, `file://` navigation blocked
 (Playwright MCP's default; local files are never allowed), WebRTC limited to proxied UDP, and
-Playwright MCP's output directory inside the container. Playwright MCP's `browser_run_code_unsafe`
-(code in its Node process), `browser_file_upload` and `browser_drop` (files) cannot be configured
-off, so the container's entry point filters the MCP stream: they are removed from `tools/list` and
-refused in `tools/call` ([`server-browser/mcp-filter.mjs`](server-browser/mcp-filter.mjs)).
+Playwright MCP's output directory inside the container. The container's entry point filters the MCP
+stream with an allowlist: only the tools the preamble names are listed and callable
+([`server-browser/mcp-filter.mjs`](server-browser/mcp-filter.mjs)); `browser_run_code_unsafe` (code
+in its Node process), `browser_file_upload` and `browser_drop` (files), which Playwright MCP cannot
+turn off, are also refused by a denylist, and batches and non-object messages are dropped.
 
 **Network.** The boundary is the internal network: the browser container (Chromium and Playwright
 MCP alike) has no route anywhere but the sidecar; a direct connection to a tailnet, private, public

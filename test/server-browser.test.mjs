@@ -40,8 +40,14 @@ import {
   createTicketStore,
   hostAddressesToBlock,
   isServerBrowserRun,
+  CREATED_LABEL,
+  INSTANCE_LABEL,
   LAUNCHER_PID_LABEL,
   MAX_SERVER_BROWSER_RUNS,
+  SECCOMP_PROFILE_SHA256,
+  SECCOMP_PROFILE_SOURCE,
+  STARTING_WINDOW_MS,
+  SWEEP_MIN_AGE_MS,
   PLAYWRIGHT_MCP_VERSION,
   PLAYWRIGHT_VERSION,
   SERVER_BROWSER_MCP_NAME,
@@ -68,6 +74,7 @@ import {
   currentImageTag,
   findDocker,
   findNode,
+  loadInstanceId,
   processAlive,
   registerServerBrowser,
   resolveDockerHost,
@@ -85,12 +92,15 @@ import {
   resolveTarget,
   startProxy,
 } from "../server-browser/proxy.mjs";
-import { DENIED_TOOLS, DENIED_TEXT, filterClientLine, filterServerLine, lineSplitter } from "../server-browser/mcp-filter.mjs";
-import { checkPlan, launch, substitute } from "../server-browser/launch.mjs";
+import { ALLOWED_TOOLS, DENIED_TOOLS, DENIED_TEXT, filterClientLine, filterServerLine, lineSplitter, toolAllowed } from "../server-browser/mcp-filter.mjs";
+import { checkPlan, checkRun, launch, substitute } from "../server-browser/launch.mjs";
+import { createHash } from "node:crypto";
+import { writeFileSync } from "node:fs";
 
 const IMAGE = serverBrowserImageTag("ab".repeat(32));
 const SECCOMP = "/state/server-browser/runtime-x/seccomp.json";
-const input = (extra = {}) => ({ image: IMAGE, agentId: "agent-1", nonce: "n0nce", blockedIps: ["100.96.145.38", "152.53.114.172"], seccompProfile: SECCOMP, ...extra });
+const INSTANCE = "paseo-box-0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d";
+const input = (extra = {}) => ({ image: IMAGE, agentId: "agent-1", nonce: "n0nce", blockedIps: ["100.96.145.38", "152.53.114.172"], seccompProfile: SECCOMP, instance: INSTANCE, ...extra });
 const argsFor = (extra = {}) => serverBrowserDockerArgs(input(extra));
 const flagValues = (args, flag) => args.flatMap((arg, i) => (arg === flag ? [args[i + 1]] : []));
 const FORBIDDEN = ["-v", "--volume", "--mount", "--device", "--privileged", "--pid", "--ipc", "--userns", "-p", "--publish", "-P", "-t", "--add-host", "--net", "--volumes-from"];
@@ -98,7 +108,14 @@ const noHostAccess = (args) => {
   for (const flag of FORBIDDEN) assert.ok(!args.includes(flag), flag);
   assert.ok(!args.some((arg) => /^host$|unconfined|docker\.sock|apparmor/.test(arg)), "no host network, no unconfined profile, no socket");
 };
-const sessionLabelsOf = (role) => [`${CONTAINER_LABEL}=${role}`, `${CONTAINER_AGENT_LABEL}=agent-1`, `${SESSION_LABEL}=bp-sb-agent-1-n0nce`, `${LAUNCHER_PID_LABEL}=__BP_PID__`];
+const sessionLabelsOf = (role) => [
+  `${CONTAINER_LABEL}=${role}`,
+  `${CONTAINER_AGENT_LABEL}=agent-1`,
+  `${SESSION_LABEL}=bp-sb-agent-1-n0nce`,
+  `${LAUNCHER_PID_LABEL}=__BP_PID__`,
+  `${INSTANCE_LABEL}=${INSTANCE}`,
+  `${CREATED_LABEL}=__BP_CREATED__`,
+];
 
 test("browser container: internal network only, Chromium sandbox, every other isolation flag, the pinned image last", () => {
   const args = argsFor();
@@ -197,6 +214,7 @@ function fakeLauncherDeps({ fail = "" } = {}) {
   let signalHandler = null;
   const deps = {
     pid: 4242,
+    now: () => 1_800_000_000_000,
     log: () => {},
     onSignal: (handler) => (signalHandler = handler),
     run: async (args) => {
@@ -222,6 +240,8 @@ test("the launcher creates the network, starts and connects the sidecar, runs th
   const steps = fake.calls.map((call) => call.slice(0, 2).join(" "));
   assert.deepEqual(steps, ["network create", "network inspect", "run -d", "network connect", "inspect --format", "SPAWN run"]);
   assert.ok(fake.calls[0].includes(`${LAUNCHER_PID_LABEL}=4242`), "the launcher's pid goes on every resource");
+  assert.ok(fake.calls[0].includes(`${CREATED_LABEL}=1800000000`), "and its creation time");
+  assert.ok(fake.calls[2].includes(`${INSTANCE_LABEL}=${INSTANCE}`) && fake.calls[5].includes(`${CREATED_LABEL}=1800000000`));
   assert.ok(fake.calls[2].includes("BP_ALLOW_CLIENTS=172.19.0.0/16"), "the sidecar serves only the internal network");
   assert.deepEqual(fake.calls[3], ["network", "connect", "bp-sb-agent-1-n0nce-net", "bp-sb-agent-1-n0nce-proxy"]);
   const browser = fake.calls[5];
@@ -259,13 +279,27 @@ test("the MCP filter removes and refuses the tools that run code or pick files",
   assert.deepEqual(JSON.parse(filterServerLine(list)).result.tools.map((tool) => tool.name), ["browser_navigate", "browser_snapshot"]);
   const other = JSON.stringify({ jsonrpc: "2.0", id: 3, result: { content: [] } });
   assert.equal(filterServerLine(other), other, "other messages pass unchanged");
-  assert.equal(filterServerLine("not json"), "not json");
+  assert.equal(filterServerLine("not json"), null, "non-JSON from the server is dropped");
+  assert.equal(filterServerLine("[1,2]"), null);
+  const unknown = JSON.stringify({ jsonrpc: "2.0", id: 4, result: { tools: [{ name: "browser_navigate" }, { name: "browser_emulate_media" }, { name: "browser_network_request" }, { name: "browser_new_tool" }] } });
+  assert.deepEqual(JSON.parse(filterServerLine(unknown)).result.tools.map((tool) => tool.name), ["browser_navigate"], "allowlist: unknown tools are not listed");
   const call = JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "browser_run_code_unsafe", arguments: { code: "async () => require('fs')" } } });
   const verdict = filterClientLine(call);
   assert.deepEqual(JSON.parse(verdict.reply), { jsonrpc: "2.0", id: 7, result: { content: [{ type: "text", text: DENIED_TEXT }], isError: true } });
   assert.deepEqual(filterClientLine(JSON.stringify({ jsonrpc: "2.0", method: "tools/call", params: { name: "browser_file_upload" } })), { drop: true });
   const allowed = JSON.stringify({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "browser_navigate", arguments: { url: "https://example.com" } } });
   assert.deepEqual(filterClientLine(allowed), { forward: allowed });
+  const notListed = filterClientLine(JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "browser_emulate_media" } }));
+  assert.equal(JSON.parse(notListed.reply).result.isError, true, "a tool not on the allowlist is refused");
+  assert.equal(JSON.parse(filterClientLine(JSON.stringify({ jsonrpc: "2.0", id: 10, method: "tools/call", params: {} })).reply).result.isError, true, "no name");
+  // Batches and other JSON values never reach Playwright MCP.
+  assert.deepEqual(filterClientLine(JSON.stringify([{ jsonrpc: "2.0", id: 11, method: "tools/call", params: { name: "browser_run_code_unsafe" } }])), { drop: true });
+  for (const value of ["42", '"text"', "null", "true", "not json", ""]) assert.deepEqual(filterClientLine(value), { drop: true }, value);
+  const init = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+  assert.deepEqual(filterClientLine(init), { forward: init }, "other requests pass");
+  // The allowlist is the preamble's tool list, and no denied tool is on it.
+  assert.deepEqual([...ALLOWED_TOOLS].sort(), [...SERVER_BROWSER_TOOLS].sort());
+  for (const tool of DENIED_TOOLS) assert.equal(toolAllowed(tool), false, tool);
   const lines = [];
   const split = lineSplitter((line) => lines.push(line));
   split.push('{"a":1}\n{"b"');
@@ -590,14 +624,13 @@ test("a run record counts only with the Server browser marker, for that card and
  */
 function fakeDocker({ info = 0, image = false, build = 0, containers = [], networks = [] } = {}) {
   const calls = [];
-  const state = { image, containers: [...containers], networks: [...networks] };
+  const state = { image, containers: [...containers], networks: [...networks], psFails: false };
   const list = (items, args) => {
-    const filter = args[args.indexOf("--filter") + 1].replace(/^label=/, "");
-    const [key, value] = filter.split(/=(.*)/s);
+    const filters = args.flatMap((arg, i) => (arg === "--filter" ? [args[i + 1].replace(/^label=/, "").split(/=(.*)/s)] : []));
     const format = args[args.indexOf("--format") + 1];
     const columns = [...format.matchAll(/\{\{\.Label "([^"]+)"\}\}/g)].map((m) => m[1]);
     return items
-      .filter((item) => key in item.labels && (value === undefined || item.labels[key] === value))
+      .filter((item) => filters.every(([key, value]) => key in item.labels && (value === undefined || item.labels[key] === value)))
       .map((item) => [item.id, ...columns.map((label) => item.labels[label] ?? "")].join("\t"))
       .join("\n");
   };
@@ -611,7 +644,7 @@ function fakeDocker({ info = 0, image = false, build = 0, containers = [], netwo
       if (build === 0) state.image = true;
       return build === 0 ? { code: 0, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: "ERROR: failed to solve: token=abc123 pull access denied" };
     }
-    if (sub === "ps") return { code: 0, stdout: list(state.containers, args), stderr: "" };
+    if (sub === "ps") return state.psFails ? { code: 1, stdout: "", stderr: "Cannot connect" } : { code: 0, stdout: list(state.containers, args), stderr: "" };
     if (sub === "network" && args[1] === "ls") return { code: 0, stdout: list(state.networks, args), stderr: "" };
     if (sub === "rm") {
       state.containers = state.containers.filter((item) => !args.includes(item.id));
@@ -625,9 +658,18 @@ function fakeDocker({ info = 0, image = false, build = 0, containers = [], netwo
   };
   return { run, calls, state };
 }
-const browserContainer = (id, agent, { session = `bp-sb-${agent}-s`, pid = "100", role = "browser" } = {}) => ({
+const NOW = 1_800_000_000_000;
+const OLD = String(Math.floor((NOW - 10 * 60_000) / 1000));
+const browserContainer = (id, agent, { session = `bp-sb-${agent}-s`, pid = "100", role = "browser", instance = INSTANCE, created = OLD } = {}) => ({
   id,
-  labels: { [CONTAINER_LABEL]: role, [CONTAINER_AGENT_LABEL]: agent, [SESSION_LABEL]: session, [LAUNCHER_PID_LABEL]: pid },
+  labels: {
+    [CONTAINER_LABEL]: role,
+    [CONTAINER_AGENT_LABEL]: agent,
+    [SESSION_LABEL]: session,
+    [LAUNCHER_PID_LABEL]: pid,
+    ...(instance ? { [INSTANCE_LABEL]: instance } : {}),
+    ...(created ? { [CREATED_LABEL]: created } : {}),
+  },
 });
 
 const quiet = () => {};
@@ -651,6 +693,8 @@ const makeBrowser = (docker, extra = {}) =>
     findNode: async () => "/usr/bin/node",
     runtimeRoot: mkdtempSync(join(tmpdir(), "bp-sb-runtime-")),
     alive: () => true,
+    instanceId: INSTANCE,
+    now: () => NOW,
     dockerHost: async () => "unix:///run/user/1001/docker.sock",
     interfaces: () => ({ eth0: [{ address: "152.53.114.172" }] }),
     random: (() => {
@@ -735,25 +779,126 @@ test("at most three runs have a browser at once; the card is told why", async ()
   assert.equal((await browser.prepare({ sourceId: "chat", cardId: "card-4" })).ok, true, "a slot frees up when a run ends");
 });
 
-test("the sweep removes containers and networks whose launcher is gone, and keeps live sessions", async () => {
+test("the cap holds for every session open, and a run counts from admission until its container exists", async () => {
+  const docker = fakeDocker({ image: true, containers: [browserContainer("a1a1a1", "run-a"), browserContainer("b2b2b2", "run-b")] });
+  let now = NOW;
+  const browser = makeBrowser(docker, { now: () => now });
+  const c = await browser.mcpServer("run-c");
+  assert.ok(c && "server" in c, "the third run is admitted (on resume as on create)");
+  assert.equal(await browser.activeRuns(), 3, "run-c counts before its container is up");
+  assert.deepEqual(await browser.mcpServer("run-d"), { refused: "busy" }, "a resume or refresh of a fourth run gets no browser");
+  assert.ok("server" in (await browser.mcpServer("run-a")), "a run that already has a browser may reopen (its old container is replaced)");
+  docker.state.containers.push(browserContainer("c3c3c3", "run-c"));
+  assert.equal(await browser.activeRuns(), 3, "run-c once, now by its container");
+  docker.state.containers = docker.state.containers.filter((item) => item.labels[CONTAINER_AGENT_LABEL] !== "run-c");
+  assert.equal(await browser.activeRuns(), 2, "its container is gone and it was seen up: no longer counted");
+  const e = await browser.mcpServer("run-e");
+  assert.ok("server" in e);
+  now += STARTING_WINDOW_MS + 1;
+  assert.equal(await browser.activeRuns(), 2, "an admitted run whose container never appeared stops counting after the window");
+});
+
+test("counting fails closed when docker ps fails", async () => {
+  const docker = fakeDocker({ image: true });
+  const browser = makeBrowser(docker);
+  docker.state.psFails = true;
+  assert.deepEqual(await browser.mcpServer("run-x"), { refused: "unavailable" });
+  const prepared = await browser.prepare({ sourceId: "chat", cardId: "card" });
+  assert.equal(prepared.ok, false);
+  assert.equal(prepared.state, "docker-unavailable");
+  assert.equal(await browser.sweep(), 0, "and nothing is removed");
+});
+
+test("the sweep removes only this instance's resources whose launcher is gone, once they are old enough", async () => {
+  const young = String(Math.floor((NOW - SWEEP_MIN_AGE_MS / 2) / 1000));
   const docker = fakeDocker({
     containers: [
       browserContainer("aaaaaa", "run-a", { pid: "100" }),
       browserContainer("bbbbbb", "run-a", { pid: "100", role: "proxy" }),
       browserContainer("cccccc", "run-b", { pid: "200" }),
-      { id: "dddddd", labels: { [CONTAINER_LABEL]: "1", [CONTAINER_AGENT_LABEL]: "old" } },
+      browserContainer("dddddd", "run-c", { pid: "300", instance: "other-daemon-1234" }),
+      browserContainer("eeeeee", "run-d", { pid: "400", instance: "" }),
+      browserContainer("ffffff", "run-e", { pid: "500", created: young }),
+      browserContainer("abcabc", "run-f", { pid: "600", created: "" }),
+      { id: "0a0a0a", labels: { [CONTAINER_LABEL]: "browser" } },
     ],
-    networks: [browserContainer("eeeeee", "run-a", { pid: "100", role: "network" }), browserContainer("ffffff", "run-b", { pid: "200", role: "network" })],
+    networks: [browserContainer("e0e0e0", "run-a", { pid: "100", role: "network" }), browserContainer("f0f0f0", "run-b", { pid: "200", role: "network" })],
   });
   const browser = makeBrowser(docker, { alive: (pid) => pid === 100 });
-  assert.equal(await browser.sweep(), 3, "run-b's container and network, and a container from before the launcher");
-  assert.deepEqual(docker.state.containers.map((item) => item.id), ["aaaaaa", "bbbbbb"]);
-  assert.deepEqual(docker.state.networks.map((item) => item.id), ["eeeeee"]);
+  assert.equal(await browser.sweep(), 2, "only run-b's container and network");
+  assert.deepEqual(
+    docker.state.containers.map((item) => item.id),
+    ["aaaaaa", "bbbbbb", "dddddd", "eeeeee", "ffffff", "abcabc", "0a0a0a"],
+    "live launcher, another instance, no instance label (started by hand), too young, no creation time: all kept",
+  );
+  assert.deepEqual(docker.state.networks.map((item) => item.id), ["e0e0e0"]);
+  const listed = docker.calls.filter((call) => call[1] === "ps" || call[2] === "ls");
+  assert.ok(listed.length > 0 && listed.every((call) => call.includes(`label=${INSTANCE_LABEL}=${INSTANCE}`)), "docker is asked for this instance only");
   const rm = docker.calls.filter((call) => call[1] === "rm" || call[2] === "rm").map((call) => call.slice(1));
-  assert.deepEqual(rm, [["rm", "-f", "cccccc", "dddddd"], ["network", "rm", "ffffff"]], "containers first, then their networks");
+  assert.deepEqual(rm, [["rm", "-f", "cccccc"], ["network", "rm", "f0f0f0"]], "containers first, then their networks");
   assert.equal(processAlive(process.pid), true);
   assert.equal(processAlive(0), false);
   assert.equal(processAlive(Number.NaN), false);
+});
+
+test("the instance id is the host name and a uuid, made once and kept in the state directory", async () => {
+  const file = join(mkdtempSync(join(tmpdir(), "bp-sb-instance-")), "server-browser", "instance-id");
+  const first = await loadInstanceId(file, "paseo box!", () => "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d");
+  assert.equal(first, "paseo-box--0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d");
+  assert.equal(await loadInstanceId(file, "other", () => "never-used"), first, "kept across restarts");
+  writeFileSync(file, "bad id; rm\n");
+  const fresh = await loadInstanceId(file, "paseo-box", () => "11111111-2222-4333-8444-555555555555");
+  assert.equal(fresh, "paseo-box-11111111-2222-4333-8444-555555555555", "a damaged file is never used in a label; a new id replaces it");
+  assert.equal(readFileSync(file, "utf8").trim(), fresh);
+  const docker = fakeDocker({ image: true });
+  const browser = makeBrowser(docker);
+  const mcp = await browser.mcpServer("run-1");
+  const plan = JSON.parse(Buffer.from(mcp.server.args[1], "base64").toString("utf8"));
+  for (const run of [plan.browser.run, plan.proxy.run, plan.network.create]) assert.ok(run.includes(`${INSTANCE_LABEL}=${INSTANCE}`));
+});
+
+test("checkPlan refuses plans that would weaken the isolation", () => {
+  const good = serverBrowserPlan("/usr/bin/docker", input());
+  const browserWith = (mutate) => ({ ...good, browser: { ...good.browser, run: mutate([...good.browser.run]) } });
+  const proxyWith = (mutate) => ({ ...good, proxy: { ...good.proxy, run: mutate([...good.proxy.run]) } });
+  const insert = (extra) => (run) => [run[0], ...extra, ...run.slice(1)];
+  const cases = [
+    ["a host mount", browserWith(insert(["-v", "/:/host"])), /-v is not allowed/],
+    ["--volume=", browserWith(insert(["--volume=/:/host"])), /--volume is not allowed/],
+    ["--mount", browserWith(insert(["--mount", "type=bind,src=/,dst=/h"])), /--mount/],
+    ["--privileged", proxyWith(insert(["--privileged"])), /--privileged/],
+    ["--device", browserWith(insert(["--device", "/dev/kvm"])), /--device/],
+    ["--pid host", browserWith(insert(["--pid", "host"])), /--pid/],
+    ["--ipc=host", browserWith(insert(["--ipc=host"])), /--ipc/],
+    ["--network host", proxyWith((run) => run.map((arg) => (arg === "bridge" ? "host" : arg))), /network must be bridge/],
+    ["a second network", browserWith(insert(["--network", "bridge"])), /network must be/],
+    ["the browser on bridge", browserWith((run) => run.map((arg) => (arg === good.network.name ? "bridge" : arg))), /network must be bp-sb/],
+    ["--cap-add SYS_ADMIN", browserWith(insert(["--cap-add", "SYS_ADMIN"])), /--cap-add is limited/],
+    ["--cap-add on the proxy", proxyWith(insert(["--cap-add", "SYS_CHROOT"])), /--cap-add is limited/],
+    ["seccomp=unconfined", browserWith(insert(["--security-opt", "seccomp=unconfined"])), /not allowed/],
+    ["apparmor=unconfined", proxyWith(insert(["--security-opt", "apparmor=unconfined"])), /not allowed/],
+    ["no --read-only", browserWith((run) => run.filter((arg) => arg !== "--read-only")), /--read-only is required/],
+    ["no --cap-drop ALL", proxyWith((run) => run.map((arg) => (arg === "ALL" ? "NET_RAW" : arg))), /--cap-drop ALL is required/],
+    ["no no-new-privileges", browserWith((run) => run.map((arg) => (arg === "no-new-privileges" ? "label=type:x" : arg))), /no-new-privileges is required/],
+    ["another image", browserWith((run) => [...run.slice(0, -1), "alpine:3"]), /pinned Server browser image/],
+    ["latest", browserWith((run) => [...run.slice(0, -1), "browser-prompt-server-browser:latest"]), /pinned/],
+    ["another proxy command", proxyWith((run) => [...run.slice(0, -1), "/bin/sh"]), /proxy entry point/],
+    ["a network that is not internal", { ...good, network: { ...good.network, create: good.network.create.filter((arg) => arg !== "--internal") } }, /--internal/],
+  ];
+  for (const [what, plan, error] of cases) assert.throws(() => checkPlan(plan), error, what);
+  assert.equal(checkPlan(good), good);
+  assert.doesNotThrow(() => checkRun(good.browser.run, "browser", good.network.name));
+});
+
+test("the seccomp profile is pinned to its upstream hash and the plugin refuses another", async () => {
+  const profile = readFileSync(new URL("../server-browser/seccomp.json", import.meta.url), "utf8");
+  assert.equal(createHash("sha256").update(profile).digest("hex"), SECCOMP_PROFILE_SHA256);
+  assert.equal(SECCOMP_PROFILE_SHA256, "cc3e61cabda6bbc1e53e54d27ba4d55a9d3be829b6dd1a596f4a7b31b1cc7849");
+  assert.match(SECCOMP_PROFILE_SOURCE, /microsoft\/playwright v1\.65\.1 utils\/docker\/seccomp_profile\.json/);
+  const shared = readFileSync(new URL("../shared/server-browser.ts", import.meta.url), "utf8");
+  assert.match(shared, /raw\.githubusercontent\.com\/microsoft\/playwright\/v1\.65\.1\/utils\/docker\/seccomp_profile\.json/, "the source is named");
+  const tampered = makeBrowser(fakeDocker({ image: true }), { runtimeFiles: { ...SERVER_BROWSER_RUNTIME_FILES, "seccomp.json": profile.replace("SCMP_ACT_ERRNO", "SCMP_ACT_ALLOW") } });
+  await assert.rejects(tampered.mcpServer("run-1"), /not the pinned one/);
 });
 
 /** A host with addHook, recording registrations. */

@@ -98,7 +98,10 @@ const fromAgent = lineSplitter((line) => {
   if ("reply" in verdict) process.stdout.write(`${verdict.reply}\n`);
   else if ("forward" in verdict) child.stdin.write(`${verdict.forward}\n`);
 });
-const fromServer = lineSplitter((line) => process.stdout.write(`${filterServerLine(line)}\n`));
+const fromServer = lineSplitter((line) => {
+  const kept = filterServerLine(line);
+  if (kept !== null) process.stdout.write(`${kept}\n`);
+});
 process.stdin.setEncoding("utf8");
 child.stdout.setEncoding("utf8");
 process.stdin.on("data", (chunk) => fromAgent.push(chunk));

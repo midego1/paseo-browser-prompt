@@ -40,11 +40,33 @@ export const CONTAINER_LABEL = "browser-prompt.server-browser";
 export const CONTAINER_AGENT_LABEL = "browser-prompt.agent";
 export const SESSION_LABEL = "browser-prompt.session";
 export const LAUNCHER_PID_LABEL = "browser-prompt.launcher-pid";
+/**
+ * The plugin instance (daemon host name plus a uuid kept in the plugin's state directory) that made
+ * a resource. The sweep only ever removes resources with its own instance id, so another daemon on
+ * the same Docker, or a container someone started from the image by hand, is never touched.
+ */
+export const INSTANCE_LABEL = "browser-prompt.instance";
+/** When the launcher created the resource (Unix seconds); the sweep leaves young resources alone. */
+export const CREATED_LABEL = "browser-prompt.created";
 /** Placeholders the launcher fills in (see server-browser/launch.mjs). */
 export const PID_PLACEHOLDER = "__BP_PID__";
+export const CREATED_PLACEHOLDER = "__BP_CREATED__";
 export const SUBNET_PLACEHOLDER = "__BP_SUBNET__";
 export const PROXY_IP_PLACEHOLDER = "__BP_PROXY_IP__";
 export const PROXY_PORT = 3128;
+
+/**
+ * sha256 of server-browser/seccomp.json: Playwright's utils/docker/seccomp_profile.json at tag
+ * v1.65.1 (https://raw.githubusercontent.com/microsoft/playwright/v1.65.1/utils/docker/seccomp_profile.json,
+ * Apache-2.0), byte for byte. The plugin refuses to write a profile with another hash.
+ */
+export const SECCOMP_PROFILE_SHA256 = "cc3e61cabda6bbc1e53e54d27ba4d55a9d3be829b6dd1a596f4a7b31b1cc7849";
+export const SECCOMP_PROFILE_SOURCE = "microsoft/playwright v1.65.1 utils/docker/seccomp_profile.json";
+
+/** Resources younger than this are never swept: their launcher may still be setting them up. */
+export const SWEEP_MIN_AGE_MS = 2 * 60_000;
+/** A run counts toward the cap from its admission until its browser container shows up (or this long). */
+export const STARTING_WINDOW_MS = 2 * 60_000;
 
 /** At most this many Server browser runs have a browser at the same time on one host. */
 export const MAX_SERVER_BROWSER_RUNS = 3;
@@ -109,6 +131,16 @@ export interface DockerArgsInput {
   blockedIps: readonly string[];
   /** Host path of the seccomp profile the browser container uses (Playwright's, allowing user namespaces). */
   seccompProfile: string;
+  /** This plugin instance (see INSTANCE_LABEL). */
+  instance: string;
+}
+
+const INSTANCE_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+
+/** Instance ids go into labels; anything unusual is refused. */
+export function safeInstanceId(instance: string): string {
+  if (!INSTANCE_ID.test(instance)) throw new Error("Unexpected plugin instance id.");
+  return instance;
 }
 
 function checkImage(image: string) {
@@ -125,6 +157,10 @@ function sessionLabels(input: DockerArgsInput, role: string): string[] {
     `${SESSION_LABEL}=${containerName(input.agentId, input.nonce)}`,
     "--label",
     `${LAUNCHER_PID_LABEL}=${PID_PLACEHOLDER}`,
+    "--label",
+    `${INSTANCE_LABEL}=${safeInstanceId(input.instance)}`,
+    "--label",
+    `${CREATED_LABEL}=${CREATED_PLACEHOLDER}`,
   ];
 }
 

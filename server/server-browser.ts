@@ -1,14 +1,20 @@
 import { execFile } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
-import { networkInterfaces } from "node:os";
-import { basename, delimiter, join } from "node:path";
+import { hostname, networkInterfaces } from "node:os";
+import { basename, delimiter, dirname, join } from "node:path";
 import type { PluginHookContext, PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import {
   CONTAINER_AGENT_LABEL,
   CONTAINER_LABEL,
+  CREATED_LABEL,
   createTicketStore,
+  INSTANCE_LABEL,
+  safeInstanceId,
+  SECCOMP_PROFILE_SHA256,
+  STARTING_WINDOW_MS,
+  SWEEP_MIN_AGE_MS,
   hostAddressesToBlock,
   LAUNCHER_PID_LABEL,
   MAX_SERVER_BROWSER_RUNS,
@@ -184,6 +190,27 @@ export interface ServerBrowserOptions {
   alive?: (pid: number) => boolean;
   /** At most this many runs with a browser at once. */
   maxRuns?: number;
+  /** This plugin instance's id (tests); by default read from, or created in, the state directory. */
+  instanceId?: string;
+  instanceFile?: string;
+}
+
+/**
+ * This plugin instance's id: `<host name>-<uuid>`, created once and kept in `file`, so every
+ * resource it starts can be told apart from another daemon's on the same Docker.
+ */
+export async function loadInstanceId(file: string, host = hostname(), uuid = randomUUID): Promise<string> {
+  try {
+    const stored = (await readFile(file, "utf8")).trim();
+    if (stored) return safeInstanceId(stored);
+  } catch {
+    // not created yet (or unreadable): make a new one
+  }
+  const name = host.replace(/[^A-Za-z0-9.-]/g, "-").replace(/^[^A-Za-z0-9]+/, "").slice(0, 60) || "host";
+  const id = safeInstanceId(`${name}-${uuid()}`);
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, `${id}\n`, { mode: 0o600 });
+  return id;
 }
 
 /**
@@ -206,10 +233,23 @@ export function createServerBrowser(options: ServerBrowserOptions = {}) {
   const runtimeDir = join(options.runtimeRoot ?? join(stateDir(), "server-browser"), `runtime-${contextHash(runtimeFiles).slice(0, 12)}`);
   const alive = options.alive ?? processAlive;
   const maxRuns = options.maxRuns ?? MAX_SERVER_BROWSER_RUNS;
+  const instanceFile = options.instanceFile ?? join(stateDir(), "server-browser", "instance-id");
+  let instancePromise: Promise<string> | null = null;
+  const instance = () => {
+    instancePromise ??= (options.instanceId ? Promise.resolve(safeInstanceId(options.instanceId)) : loadInstanceId(instanceFile)).catch((error: unknown) => {
+      instancePromise = null;
+      throw error;
+    });
+    return instancePromise;
+  };
+  /** Runs admitted in mcpServer whose browser container may not exist yet: agent id -> until. */
+  const starting = new Map<string, number>();
   let runtimeReady: Promise<void> | null = null;
   /** Writes the launcher and the seccomp profile once per process (the directory name carries their hash). */
   function writeRuntime(): Promise<void> {
     runtimeReady ??= (async () => {
+      const profile = runtimeFiles["seccomp.json"] ?? "";
+      if (createHash("sha256").update(profile).digest("hex") !== SECCOMP_PROFILE_SHA256) throw new Error("the seccomp profile is not the pinned one");
       await mkdir(runtimeDir, { recursive: true });
       for (const [name, content] of Object.entries(runtimeFiles)) await writeFile(join(runtimeDir, name), content);
     })().catch((error: unknown) => {
@@ -219,14 +259,18 @@ export function createServerBrowser(options: ServerBrowserOptions = {}) {
     return runtimeReady;
   }
 
-  /** `docker ps`/`docker network ls` lines of `{{.ID}}\t<label>...` for this plugin's resources. */
-  async function listResources(kind: "container" | "network", filter: string, labels: string[]) {
+  /**
+   * `docker ps`/`docker network ls` rows of `[id, ...labels]` for resources matching every filter.
+   * Throws when docker cannot be asked, so counting fails closed; cleanup callers catch it.
+   */
+  async function listResources(kind: "container" | "network", filters: string[], labels: string[]) {
     const { path, host } = await dockerCommand();
-    if (!path) return [];
+    if (!path) throw new Error("docker not found");
     const format = ["{{.ID}}", ...labels.map((label) => `{{.Label "${label}"}}`)].join("\t");
-    const args = kind === "container" ? ["ps", "-a", "--filter", filter, "--format", format] : ["network", "ls", "--filter", filter, "--format", format];
+    const filterArgs = filters.flatMap((filter) => ["--filter", filter]);
+    const args = kind === "container" ? ["ps", "-a", ...filterArgs, "--format", format] : ["network", "ls", ...filterArgs, "--format", format];
     const result = await run(path, args, { timeoutMs: 15_000, env: dockerEnv(host) });
-    if (result.code !== 0) return [];
+    if (result.code !== 0) throw new Error(`docker ${args[0]} failed`);
     return result.stdout
       .split("\n")
       .map((line) => line.split("\t").map((part) => part.trim()))
@@ -242,10 +286,24 @@ export function createServerBrowser(options: ServerBrowserOptions = {}) {
     return containers.length + networks.length;
   }
 
-  /** Distinct runs that have a browser container now. */
+  /**
+   * Runs that hold a browser: those with a browser container now (any instance: they all use this
+   * host's resources), plus runs admitted in the last STARTING_WINDOW_MS whose container is not up
+   * yet. `except` leaves one run out (the one being admitted). Throws when docker cannot be asked.
+   */
+  async function runsHoldingABrowser(except?: string): Promise<Set<string>> {
+    const rows = await listResources("container", [`label=${CONTAINER_LABEL}=browser`], [CONTAINER_AGENT_LABEL]);
+    const runs = new Set(rows.map(([, agent]) => agent!).filter(Boolean));
+    const t = now();
+    for (const [agent, until] of starting) {
+      if (until <= t || runs.has(agent)) starting.delete(agent);
+      else runs.add(agent);
+    }
+    if (except) runs.delete(except);
+    return runs;
+  }
   async function activeRuns(): Promise<number> {
-    const rows = await listResources("container", `label=${CONTAINER_LABEL}=browser`, [CONTAINER_AGENT_LABEL]);
-    return new Set(rows.map(([, agent]) => agent).filter(Boolean)).size;
+    return (await runsHoldingABrowser()).size;
   }
   let building: Promise<void> | null = null;
   let buildError: string | null = null;
@@ -329,20 +387,36 @@ export function createServerBrowser(options: ServerBrowserOptions = {}) {
       cached = null;
       const current = await status({ build: true });
       if (current.state !== "ready") return { ok: false as const, state: current.state, detail: current.detail };
-      // Runs with a browser now plus runs about to start (tickets not used yet) count.
-      if ((await activeRuns()) + tickets.pending() >= maxRuns) return { ok: false as const, state: "busy" as const, detail: "" };
+      // Runs with a browser now, runs starting, and runs about to start (tickets not used yet) count.
+      let held: number;
+      try {
+        held = await activeRuns();
+      } catch {
+        return { ok: false as const, state: "docker-unavailable" as const, detail: "could not count the running Server browsers" };
+      }
+      if (held + tickets.pending() >= maxRuns) return { ok: false as const, state: "busy" as const, detail: "" };
       return { ok: true as const, ticket: tickets.issue(target) };
     },
     activeRuns,
     consumeTicket: (ticket: string, target: { sourceId: string; cardId: string }) => tickets.consume(ticket, target),
     /**
-     * The MCP server for one session of this run (`node launch.mjs <plan>`), with the session name,
-     * or null without Docker or node.
+     * The MCP server for one session of this run (`node launch.mjs <plan>`), with the session name;
+     * `{ refused }` when the cap is reached or the running browsers cannot be counted (fails closed),
+     * for every open reason; null without Docker or node. An admitted run counts toward the cap
+     * from here until its browser container shows up.
      */
-    async mcpServer(agentId: string): Promise<{ server: StdioServer; session: string } | null> {
+    async mcpServer(agentId: string): Promise<{ server: StdioServer; session: string } | { refused: "busy" | "unavailable" } | null> {
       const { path, host } = await dockerCommand();
       const node = await (options.findNode ?? findNode)(env);
       if (!path || !node) return null;
+      let others: number;
+      try {
+        others = (await runsHoldingABrowser(agentId)).size;
+      } catch {
+        return { refused: "unavailable" };
+      }
+      // Tickets not used yet are runs the card is about to start; this run's own ticket is used by now.
+      if (others + tickets.pending() >= maxRuns) return { refused: "busy" };
       await writeRuntime();
       const nonce = random().slice(0, 12);
       const plan = serverBrowserPlan(path, {
@@ -351,7 +425,9 @@ export function createServerBrowser(options: ServerBrowserOptions = {}) {
         nonce,
         blockedIps: hostAddressesToBlock(interfaces()),
         seccompProfile: join(runtimeDir, "seccomp.json"),
+        instance: await instance(),
       });
+      starting.set(agentId, now() + STARTING_WINDOW_MS);
       return { server: serverBrowserMcpServer(node, join(runtimeDir, "launch.mjs"), plan, host), session: sessionNames(agentId, nonce).browser };
     },
     /**
@@ -359,22 +435,31 @@ export function createServerBrowser(options: ServerBrowserOptions = {}) {
      * session's launcher removes them when it ends, but a killed launcher leaves them behind).
      */
     async removeContainers(agentId: string, except?: string): Promise<number> {
-      const filter = `label=${CONTAINER_AGENT_LABEL}=${safeAgentId(agentId)}`;
+      const filters = [`label=${CONTAINER_AGENT_LABEL}=${safeAgentId(agentId)}`, `label=${INSTANCE_LABEL}=${await instance()}`];
       const keep = ([, session]: string[]) => !except || session !== except;
-      const containers = (await listResources("container", filter, [SESSION_LABEL])).filter(keep).map(([id]) => id!);
-      const networks = (await listResources("network", filter, [SESSION_LABEL])).filter(keep).map(([id]) => id!);
+      const containers = (await listResources("container", filters, [SESSION_LABEL]).catch(() => [])).filter(keep).map(([id]) => id!);
+      const networks = (await listResources("network", filters, [SESSION_LABEL]).catch(() => [])).filter(keep).map(([id]) => id!);
       if (containers.length + networks.length === 0) return 0;
       return removeIds(containers, networks);
     },
     /**
-     * Removes every Server browser container and network whose launcher process is gone (or that
-     * has none, from an older version). Run at start and every few minutes.
+     * Removes this instance's Server browser containers and networks whose launcher process is gone,
+     * once they are older than SWEEP_MIN_AGE_MS. Resources of another instance (another daemon on
+     * the same Docker), without this instance's label (one a person started by hand), or without a
+     * readable creation time are never touched. Run at start and every few minutes.
      */
     async sweep(): Promise<number> {
-      const filter = `label=${CONTAINER_LABEL}`;
-      const orphan = ([, pid]: string[]) => !alive(Number(pid));
-      const containers = (await listResources("container", filter, [LAUNCHER_PID_LABEL])).filter(orphan).map(([id]) => id!);
-      const networks = (await listResources("network", filter, [LAUNCHER_PID_LABEL])).filter(orphan).map(([id]) => id!);
+      const id = await instance();
+      const filters = [`label=${CONTAINER_LABEL}`, `label=${INSTANCE_LABEL}=${id}`];
+      const t = now();
+      // The instance is checked again here, not only in docker's filter.
+      const orphan = ([, pid, created, owner]: string[]) => {
+        const at = Number(created) * 1000;
+        return owner === id && Number.isFinite(at) && at > 0 && t - at >= SWEEP_MIN_AGE_MS && !alive(Number(pid));
+      };
+      const rows = (kind: "container" | "network") => listResources(kind, filters, [LAUNCHER_PID_LABEL, CREATED_LABEL, INSTANCE_LABEL]).catch(() => []);
+      const containers = (await rows("container")).filter(orphan).map(([id]) => id!);
+      const networks = (await rows("network")).filter(orphan).map(([id]) => id!);
       if (containers.length + networks.length === 0) return 0;
       return removeIds(containers, networks);
     },
@@ -424,6 +509,14 @@ export function registerServerBrowser(
     const mcp = await browser.mcpServer(request.agentId).catch(() => null);
     if (!mcp) {
       log(`run ${request.agentId} is a Server browser run, but docker or node was not found; no browser attached`);
+      return undefined;
+    }
+    if ("refused" in mcp) {
+      log(
+        mcp.refused === "busy"
+          ? `run ${request.agentId}: ${MAX_SERVER_BROWSER_RUNS} Server browser runs already have a browser; none attached (${request.reason})`
+          : `run ${request.agentId}: could not count the running Server browsers; none attached (${request.reason})`,
+      );
       return undefined;
     }
     remember(request.agentId);

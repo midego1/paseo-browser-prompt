@@ -18,13 +18,78 @@ import { pathToFileURL } from "node:url";
 const PID = "__BP_PID__";
 const SUBNET = "__BP_SUBNET__";
 const PROXY_IP = "__BP_PROXY_IP__";
+const CREATED = "__BP_CREATED__";
 
 /** Replaces the placeholders in every argument. */
 export function substitute(args, values) {
   return args.map((arg) => Object.entries(values).reduce((text, [key, value]) => text.split(key).join(value), arg));
 }
 
-/** Validates a decoded plan: an absolute docker path, names, and string arrays only. */
+const IMAGE_PREFIX = "browser-prompt-server-browser:";
+/** Flags that would reach the host or lift the isolation; never allowed in any command of a plan. */
+const FORBIDDEN_FLAGS = new Set([
+  "-v",
+  "--volume",
+  "--mount",
+  "--volumes-from",
+  "--privileged",
+  "--device",
+  "--device-cgroup-rule",
+  "--pid",
+  "--ipc",
+  "--uts",
+  "--userns",
+  "--cgroupns",
+  "-p",
+  "--publish",
+  "-P",
+  "--publish-all",
+  "--add-host",
+  "--gpus",
+  "-t",
+  "--tty",
+]);
+
+/** `--flag value` and `--flag=value` pairs of a docker command up to the image (which comes after the last flag). */
+function flagPairs(args) {
+  const pairs = [];
+  for (let i = 1; i < args.length; i++) {
+    const arg = args[i];
+    if (!arg.startsWith("-")) continue;
+    const eq = arg.indexOf("=");
+    if (eq > 0) pairs.push([arg.slice(0, eq), arg.slice(eq + 1)]);
+    else pairs.push([arg, args[i + 1] ?? ""]);
+  }
+  return pairs;
+}
+
+/**
+ * Checks a `docker run` of the plan (defense in depth: the plugin builds these, but the launcher
+ * refuses anything that would weaken the isolation): the pinned image, no forbidden flag, no host
+ * network, `--read-only` and `--cap-drop ALL`, `--cap-add` at most SYS_CHROOT (browser only), no
+ * unconfined seccomp or AppArmor, no privileged mode.
+ */
+export function checkRun(args, role, networkName) {
+  const pairs = flagPairs(args);
+  const values = (flag) => pairs.filter(([name]) => name === flag).map(([, value]) => value);
+  for (const [name] of pairs) if (FORBIDDEN_FLAGS.has(name)) throw new Error(`${role}: ${name} is not allowed`);
+  if (!args.includes("--read-only")) throw new Error(`${role}: --read-only is required`);
+  if (!values("--cap-drop").includes("ALL")) throw new Error(`${role}: --cap-drop ALL is required`);
+  const added = values("--cap-add").map((cap) => cap.toUpperCase().replace(/^CAP_/, ""));
+  if (added.some((cap) => cap !== "SYS_CHROOT") || (role !== "browser" && added.length > 0)) throw new Error(`${role}: --cap-add is limited to SYS_CHROOT for the browser`);
+  for (const opt of values("--security-opt")) {
+    if (/unconfined/i.test(opt) || /^apparmor[=:]/i.test(opt) || /^label[=:]disable/i.test(opt) || /^systempaths/i.test(opt)) throw new Error(`${role}: --security-opt ${opt} is not allowed`);
+  }
+  if (!values("--security-opt").includes("no-new-privileges")) throw new Error(`${role}: no-new-privileges is required`);
+  const networks = [...values("--network"), ...values("--net")];
+  const allowed = role === "browser" ? [networkName] : ["bridge"];
+  if (networks.length !== 1 || !allowed.includes(networks[0])) throw new Error(`${role}: network must be ${allowed.join(" or ")}`);
+  const image = role === "browser" ? args.at(-1) : args.at(-2);
+  if (typeof image !== "string" || !image.startsWith(IMAGE_PREFIX) || image.endsWith(":latest")) throw new Error(`${role}: only the pinned Server browser image`);
+  return args;
+}
+
+/** Validates a decoded plan: an absolute docker path, names, string arrays, and the isolation of every command. */
 export function checkPlan(plan) {
   const strings = (value) => Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === "string");
   const name = (value) => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value);
@@ -34,6 +99,11 @@ export function checkPlan(plan) {
   if (!name(plan.proxy?.name) || !strings(plan.proxy?.run)) throw new Error("bad proxy");
   if (!name(plan.browser?.name) || !strings(plan.browser?.run)) throw new Error("bad browser");
   if (plan.browser.run[0] !== "run" || plan.proxy.run[0] !== "run" || plan.network.create[0] !== "network") throw new Error("bad commands");
+  const create = plan.network.create;
+  if (create[1] !== "create" || !create.includes("--internal") || create.at(-1) !== plan.network.name) throw new Error("the session network must be created --internal");
+  checkRun(plan.proxy.run, "proxy", plan.network.name);
+  checkRun(plan.browser.run, "browser", plan.network.name);
+  if (plan.proxy.run.at(-1) !== "/opt/browser-prompt/proxy-main.mjs") throw new Error("proxy: only the proxy entry point");
   return plan;
 }
 
@@ -53,7 +123,7 @@ export async function launch(plan, deps = {}) {
   checkPlan(plan);
   const run = deps.run ?? defaultRun(plan.docker);
   const log = deps.log ?? ((message) => process.stderr.write(`[browser-prompt launcher] ${message}\n`));
-  const values = { [PID]: String(deps.pid ?? process.pid) };
+  const values = { [PID]: String(deps.pid ?? process.pid), [CREATED]: String(Math.floor((deps.now ?? Date.now)() / 1000)) };
   let cleaned = null;
   const cleanup = () =>
     (cleaned ??= (async () => {

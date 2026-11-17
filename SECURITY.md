@@ -41,16 +41,26 @@ Chrome run your real Chrome. A Server browser run instead gets a headless Chromi
 container on the daemon host. The agent's provider process starts the plugin's launcher
 (`node …/launch.mjs <plan>`) as an MCP server over stdio; per session the launcher creates an
 internal Docker network, a proxy sidecar and the browser container, and removes all three when the
-session ends. The plugin adds that MCP server only to agents that carry the plugin's run labels plus
+session ends. Before it runs anything it checks the plan again (defense in depth): the pinned image,
+an `--internal` network, `--read-only`, `--cap-drop ALL`, `no-new-privileges`, `--cap-add` at most
+`SYS_CHROOT` for the browser, the expected networks, and no mounts, devices, privileged mode, host
+namespaces, published ports or unconfined seccomp/AppArmor. The plugin adds that MCP server only to agents that carry the plugin's run labels plus
 `browser-prompt-browser: server`, and only with a one-time ticket the daemon issued for that chat
 and card right before the run was created, or, when an existing run's session opens again, with the
 card's run record marked `browser:server`. No other agent gets it, and an agent that copies the
-labels gets it only with a fresh, unused ticket. At most 3 runs have a browser at once.
+labels gets it only with a fresh, unused ticket. At most 3 runs have a browser at once: the cap is
+checked when the card asks for a ticket and again on every session open (create, resume, refresh,
+import); a run counts from the moment it is admitted until its browser container exists, and when
+Docker cannot be asked how many are running, no browser is given (fail closed).
 
 **What is isolated.**
 
 - The browser container is alone on an `--internal` Docker network: no gateway and no route to
-  anything but the sidecar, and names outside it do not resolve. Chromium and the Playwright MCP
+  anything but the sidecar, and names outside it do not resolve. Checked on rootless Docker 28.5:
+  in a throwaway container on an `--internal` network (resolver Docker's embedded `127.0.0.11`),
+  `getent hosts example.com`, `getent hosts paseo-box.tail60821.ts.net` and `getent hosts
+  one.one.one.one` all exit 2 (not resolved), and direct TCP connections to a tailnet, a private, a
+  public and the host's own address fail with "network unreachable". Chromium and the Playwright MCP
   process share that container, so a browser exploit or a misused tool has no network path except
   the proxy, which applies the rules below in a different container.
 - The proxy sidecar is the only container of the session with a route out (Docker's default bridge;
@@ -62,21 +72,29 @@ labels gets it only with a fresh, unused ticket. At most 3 runs have a browser a
   without extra swap, CPU and process limits (browser 1.5 GB / 1.5 CPUs / 512 processes, sidecar 256
   MB / 0.5 CPU / 64), no container log, never pulled.
 - The browser container uses Playwright's seccomp profile (Docker's default plus user namespaces;
-  Playwright's `utils/docker/seccomp_profile.json`, v1.65.1) and keeps `CAP_SYS_CHROOT` in its
+  Playwright's `utils/docker/seccomp_profile.json` at tag v1.65.1, byte for byte, pinned by its
+  sha256 `cc3e61ca…1cc7849`; the plugin refuses to write another) and keeps `CAP_SYS_CHROOT` in its
   bounding set only, so Chromium's own sandbox (namespace sandbox) runs; `pwuser` has no effective
   capability and cannot chroot. It does not start with `--cap-drop ALL` alone: the zygote cannot set
   up its sandbox without that capability inside its user namespace, and with Docker's default
   seccomp profile it cannot create the namespace at all. The sidecar keeps Docker's default profile.
 - The browser profile is in memory, downloads are refused, service workers are blocked, `file://`
   navigation is blocked, and Playwright MCP's files (screenshots, snapshots) stay in the container.
-  `browser_run_code_unsafe` (code in Playwright MCP's Node process), `browser_file_upload` and
-  `browser_drop` are removed from the tool list and refused by a filter on the MCP stream, because
-  Playwright MCP cannot turn them off. The browser is not signed in to anything and holds none of
+  A filter on the MCP stream lets only the tools the agent is told about through (an allowlist):
+  every other tool is removed from the tool list and refused, `browser_run_code_unsafe` (code in
+  Playwright MCP's Node process), `browser_file_upload` and `browser_drop` are also on a denylist
+  as a second check (Playwright MCP cannot turn them off), and batches, other JSON values and
+  non-JSON lines are dropped in both directions. The browser is not signed in to anything and holds none of
   your cookies.
 - Lifecycle: the launcher removes the session's containers and network when the session closes its
-  stdio. A killed launcher may leave them; the plugin removes resources whose launcher process is
-  gone when it starts and every 10 minutes, a run's earlier session resources when its session
-  reopens, and all of a run's resources when it is closed or archived. Each container stops itself
+  stdio. A killed launcher may leave them. Every resource is labelled with this plugin instance's id
+  (the daemon's host name plus a uuid kept in the plugin's state directory), its launcher's process
+  id and its creation time. When the plugin starts and every 10 minutes it removes only its own
+  instance's resources whose launcher process is gone and that are older than 2 minutes; another
+  daemon's resources on the same Docker, and anything without its instance label (such as a
+  container someone started from the image by hand), are never touched. It also removes a run's
+  earlier session resources when its session reopens, and all of a run's resources when it is
+  closed or archived (both limited to its own instance). Each container stops itself
   after 2 hours without an MCP message and after 12 hours in total; the agent then reports that its
   browser stopped and which step it reached.
 

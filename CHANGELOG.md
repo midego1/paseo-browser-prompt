@@ -18,12 +18,16 @@
   loopback, link-local, reserved and IPv6 local addresses, and the server's own addresses, also when
   a public name resolves to one of them, and connects only to the addresses it checked. SECURITY.md
   lists what is and is not blocked.
-- `file://` navigation is blocked; Playwright MCP's `browser_run_code_unsafe`, `browser_file_upload`
-  and `browser_drop` are filtered out of the tool list and refused.
-- At most 3 Server browser runs have a browser at once; the button says why when the limit is
-  reached. Leftover containers and networks (a killed launcher, a daemon restart) are removed when
-  the plugin starts and every 10 minutes, a run's earlier ones when its session reopens, and all of
-  a run's when it is closed or archived. Each container stops after 2 hours idle and 12 hours in
+- `file://` navigation is blocked. The MCP stream is filtered with an allowlist of the tools the
+  agent is told about (Playwright MCP's `browser_run_code_unsafe`, `browser_file_upload` and
+  `browser_drop` are also denylisted), and batches and non-object messages are dropped. The
+  launcher re-checks every docker command of its plan before running it.
+- At most 3 Server browser runs have a browser at once, checked for the ticket and on every session
+  open, failing closed when Docker cannot be asked; the button says why when the limit is reached.
+  Leftover containers and networks of this plugin instance (a killed launcher, a daemon restart) are
+  removed when the plugin starts and every 10 minutes once 2 minutes old, a run's earlier ones when
+  its session reopens, and all of a run's when it is closed or archived. Resources of another daemon
+  or without the instance label are never touched. Each container stops after 2 hours idle and 12 hours in
   total; the agent then reports the step it reached.
 - The image (`browser-prompt-server-browser:pw1.65.1-mcp0.0.84-<hash>`, never `latest`) is built
   locally from `server-browser/` on first use: Playwright 1.65.1 base image pinned by digest, and
