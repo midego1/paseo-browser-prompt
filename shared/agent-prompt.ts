@@ -33,11 +33,40 @@ export const DEFAULT_AGENT_SETTINGS = {
   chromeProvider: "",
 } as const;
 
-export const BROWSER_AGENTS = ["paseo", "chrome"] as const;
+export const BROWSER_AGENTS = ["paseo", "chrome", "server"] as const;
 export type BrowserAgent = (typeof BROWSER_AGENTS)[number];
 
 /** Marks a run record as started in Chrome, so its card names the right browser later. */
 export const CHROME_RUN_MARKER = "browser:chrome";
+/** Marks a run record as a Server browser run (shared/server-browser.ts uses the same value). */
+export const SERVER_RUN_MARKER_TEXT = "browser:server";
+
+/** Name of the Playwright MCP server a Server browser run gets; Claude Code prefixes its tools with it. */
+export const SERVER_BROWSER_MCP_NAME = "server-browser";
+export const SERVER_BROWSER_TOOL_PREFIX = `mcp__${SERVER_BROWSER_MCP_NAME}__`;
+/** The Playwright MCP tools a Server browser run may use, by their bare names. */
+export const SERVER_BROWSER_TOOLS = [
+  "browser_navigate",
+  "browser_snapshot",
+  "browser_click",
+  "browser_type",
+  "browser_fill_form",
+  "browser_select_option",
+  "browser_press_key",
+  "browser_hover",
+  "browser_drag",
+  "browser_wait_for",
+  "browser_navigate_back",
+  "browser_handle_dialog",
+  "browser_tabs",
+  "browser_take_screenshot",
+  "browser_console_messages",
+  "browser_network_requests",
+  "browser_evaluate",
+  "browser_resize",
+  "browser_close",
+] as const;
+const sbTool = (name: string) => `${SERVER_BROWSER_TOOL_PREFIX}${name}`;
 
 /** Provider name the README suggests for the extension's Claude account; used when it exists. */
 export const DEFAULT_CHROME_PROVIDER = "claude-chrome";
@@ -91,7 +120,9 @@ export function describeLaunch(config: ResolvedAgentConfig, browser: BrowserAgen
   const where =
     browser === "chrome"
       ? "It works in your real Chrome, with every account you are signed in to, and is told to stay on the sites in these steps."
-      : "It uses only the Paseo browser tabs.";
+      : browser === "server"
+        ? "It works in a fresh headless browser on the Paseo server, in an isolated container that is thrown away afterwards: no desktop app needed, but it is not signed in to any of your accounts, and it cannot reach your tailnet, private addresses or the server itself."
+        : "It uses only the Paseo browser tabs.";
   const runs = `It runs as ${config.provider}`;
   const mode = config.modeId.trim();
   let approval: string;
@@ -136,6 +167,17 @@ export function chromeAvailable(settings: AgentSettingsInput): boolean {
   }
 }
 
+/** The browser a run was started in, from its own record (never a newer run's); null when not recorded. */
+export function runBrowserOf(runs: readonly (readonly string[])[], runAgentId: string | null): BrowserAgent | null {
+  if (!runAgentId) return null;
+  const record = runs.find((entry) => entry[1] === runAgentId);
+  if (!record) return null;
+  const markers = record.slice(2);
+  if (markers.includes(CHROME_RUN_MARKER)) return "chrome";
+  if (markers.includes(SERVER_RUN_MARKER_TEXT)) return "server";
+  return "paseo";
+}
+
 /** Whether this run was started in Chrome: its own record decides, never a newer run's. */
 export function runStartedInChrome(runs: readonly (readonly string[])[], runAgentId: string | null): boolean | null {
   if (!runAgentId) return null;
@@ -145,13 +187,19 @@ export function runStartedInChrome(runs: readonly (readonly string[])[], runAgen
 
 /** Settings value to browser agent; anything unexpected is the Paseo browser. */
 export function parseBrowserAgent(value: unknown): BrowserAgent {
-  return value === "chrome" ? "chrome" : "paseo";
+  return value === "chrome" || value === "server" ? value : "paseo";
 }
 
 /** Rule asking the run for one viewport screenshot after each step, never of a page with secrets. */
 export const SCREENSHOT_RULE =
   "10. Screenshots: after you complete each numbered step, call browser_screenshot once for the current tab with fullPage false (only the visible part). " +
   "If a screenshot fails because the tab \"has not painted\" (the owner's Paseo app is not showing that tab), do not retry it, do not ask the owner and do not try to bring the tab to the front for it: take no more screenshots in this run and add \"(screenshots off: tab not visible)\" to your next step line. For screenshots this replaces rule 2's handling of an unpainted tab. " +
+  "Never take a screenshot while the page shows a password, token, API key, 2FA or recovery code or any other secret: skip it and say \"screenshot skipped\" in your next step line or your report. " +
+  "The screenshots are only for the owner's card: do not describe them in questions for the chat.";
+
+/** The screenshot rule for a Server browser run, with Playwright MCP's screenshot tool. */
+export const SERVER_SCREENSHOT_RULE =
+  `10. Screenshots: after you complete each numbered step, call ${sbTool("browser_take_screenshot")} once with type "png", without fullPage (only the visible part) and without filename. ` +
   "Never take a screenshot while the page shows a password, token, API key, 2FA or recovery code or any other secret: skip it and say \"screenshot skipped\" in your next step line or your report. " +
   "The screenshots are only for the owner's card: do not describe them in questions for the chat.";
 
@@ -353,6 +401,21 @@ export const CHROME_SAFETY_PREAMBLE = [
 ].join("\n");
 
 /**
+ * The rules for a run in the Server browser: a fresh headless Chromium in a throwaway container on
+ * the Paseo server, through Playwright MCP. It is signed in to nothing, the owner cannot see or type
+ * into it, and private and tailnet addresses are blocked.
+ */
+export const SERVER_SAFETY_PREAMBLE = [
+  "You are carrying out browser steps for the owner in the Server browser: a fresh headless Chromium in a throwaway container on the Paseo server. It is NOT signed in to any of the owner's accounts, the owner cannot see or type into it, and it is discarded when this agent session ends.",
+  "",
+  "Rules:",
+  `1. Use ONLY the tools of the MCP server named "${SERVER_BROWSER_MCP_NAME}": ${SERVER_BROWSER_TOOLS.map(sbTool).join(", ")}; load them with ToolSearch if they are deferred. Never use the Paseo browser_* tools (mcp__paseo__browser_*): they drive the owner's desktop app, not this browser. Do not use any other browser, do not run shell commands, and do not read or edit files. Do not use ${sbTool("browser_file_upload")} or ${sbTool("browser_install")}, and use ${sbTool("browser_evaluate")} only to read the page, never to read cookies, storage or tokens.`,
+  `2. Start with ${sbTool("browser_navigate")} to the first page the steps name, then ${sbTool("browser_snapshot")}. Always act on fresh element refs from the latest snapshot and take a new snapshot after every navigation or page change. This browser cannot reach the owner's tailnet, private or local addresses, or the Paseo server itself: such pages are blocked on purpose; do not try to get around the block, report it. If these tools are missing or fail to start, do not try another browser: end your turn with a report that quotes the error, so the owner can fix it.`,
+  "   This browser is not signed in to anything. If a step needs a login, an account, a password, a token, a 2FA code or any other secret, stop at that step: never ask for, type, guess or create credentials and do not sign up. The owner cannot type into this browser, so rule 3's \"type it into the page themselves\" does not apply here. End your turn with a report that says which step needs a login and that the owner should run these steps with the Paseo browser instead, which uses their signed-in Paseo app.",
+  ...SHARED_SAFETY_RULES,
+].join("\n");
+
+/**
  * Whether a browser run may be in `actualMode`: any ask-first or classifier mode of the provider
  * (for Claude `default`, `plan` and `auto`; drift between them is fine). Bypass, accept-edits and
  * every other mode are not.
@@ -423,15 +486,17 @@ export function buildAgentPrompt(
   browser: BrowserAgent = "paseo",
 ): string {
   const chrome = browser === "chrome";
+  const server = browser === "server";
   const task = cardTitle.trim() ? `Task: ${cardTitle.trim()}\n\n` : "";
-  const preamble = chrome ? CHROME_SAFETY_PREAMBLE : AGENT_SAFETY_PREAMBLE;
+  const preamble = chrome ? CHROME_SAFETY_PREAMBLE : server ? SERVER_SAFETY_PREAMBLE : AGENT_SAFETY_PREAMBLE;
   let rules = usesClassifierMode(config) ? `${preamble}\n${CLASSIFIER_MODE_RULE}` : preamble;
   if (chat && chat.sourceAgentId && chat.maxQuestions > 0) rules += `\n${chatQuestionRule(chat.sourceAgentId, chat.maxQuestions)}`;
   if (progress && progress.totalSteps > 0) rules += `\n${stepProgressRule(progress.totalSteps)}`;
   // The card's thumbnails come from Paseo's browser_screenshot, which a run in Chrome does not use.
-  if (screenshots && !chrome) rules += `\n${SCREENSHOT_RULE}`;
+  if (screenshots && !chrome) rules += `\n${server ? SERVER_SCREENSHOT_RULE : SCREENSHOT_RULE}`;
+  // The Server browser's container is discarded with the session: no tab cleanup needed.
   if (chrome) rules += `\n${closeTabs ? CHROME_CLOSE_TABS_RULE : CHROME_KEEP_TABS_RULE}`;
-  else if (closeTabs) rules += `\n${CLOSE_TABS_RULE}`;
+  else if (closeTabs && !server) rules += `\n${CLOSE_TABS_RULE}`;
   if (archiveOnSuccess) rules += `\n${RUN_SUCCESS_RULE}`;
   return (
     `${rules}\n\n` +

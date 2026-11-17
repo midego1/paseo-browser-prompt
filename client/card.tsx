@@ -4,7 +4,9 @@ import { Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
 import { z } from "zod";
-import { agentTitle, CHROME_RUN_MARKER, chromeAvailable, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, resolveAgentConfig, runStartedInChrome, describeLaunch, type BrowserAgent } from "../shared/agent-prompt";
+import { agentTitle, CHROME_RUN_MARKER, chromeAvailable, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, runBrowserOf, describeLaunch, type BrowserAgent } from "../shared/agent-prompt";
+import { SERVER_BROWSER_STATE_MESSAGES, SERVER_RUN_MARKER, serverRunLabels } from "../shared/server-browser";
+import { prepareServerBrowserRun, serverBrowserStatus } from "../shared/server-browser-rpc";
 import { MOST_RECENT_FALLBACK } from "../shared/report-back";
 import {
   addRunRecord,
@@ -52,6 +54,28 @@ const RUN_LOCK_RPC_TIMEOUT_MS = 5_000;
 
 const DESKTOP_HINT = "Your Paseo desktop app must be open: the agent drives the browser tabs there.";
 const CHROME_HINT = "Chrome must be open with the Claude extension signed in: the agent works there.";
+const SERVER_HINT = "Runs in a browser on the Paseo server: no desktop app needed, but not signed in to your accounts.";
+const HINTS: Record<BrowserAgent, string> = { paseo: DESKTOP_HINT, chrome: CHROME_HINT, server: SERVER_HINT };
+const BROWSER_NAMES: Record<BrowserAgent, string> = { paseo: "in Paseo browser", chrome: "in Chrome", server: "in server browser" };
+/** How long the card waits for the Server browser status or ticket. */
+const SERVER_BROWSER_RPC_TIMEOUT_MS = 20_000;
+
+/** Rejects when the RPC does not answer in time. */
+function within<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("The Paseo server did not answer in time.")), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
 
 type PreferenceValues = z.output<(typeof preferences)["schema"]>;
 /** The newest settings any card rendered, for saves retried after their own card unmounted. */
@@ -117,6 +141,8 @@ export function BrowserPromptCard({
   const stash = useRpc(stashPrompt);
   const mobile = Platform.OS === "ios" || Platform.OS === "android";
   const lockRun = useRpc(acquireRunLock);
+  const serverStatus = useRpc(serverBrowserStatus);
+  const prepareServerRun = useRpc(prepareServerBrowserRun);
   const unlockRun = useRpc(finishRunLock);
   const startMode = settings.status === "ready" ? settings.values.startMode : DEFAULT_MODES.startMode;
   const mobileStartMode =
@@ -201,12 +227,12 @@ export function BrowserPromptCard({
   // with exactly that config.
   const [pendingLaunch, setPendingLaunch] = useState<ResolvedLaunch | null>(null);
   const launchError = pendingLaunch && "error" in pendingLaunch ? pendingLaunch.error : null;
-  const inChrome = pendingLaunch?.browser === "chrome";
+  const pendingBrowser: BrowserAgent = pendingLaunch?.browser ?? "paseo";
   // The modal describes the next run; a started run's hint names the browser it was started in.
-  const [startedBrowser, setStartedBrowser] = useState<{ agentId: string; chrome: boolean } | null>(null);
-  const runInChrome =
-    runStartedInChrome(settings.status === "ready" ? settings.values.runs : [], runAgentId) ??
-    (startedBrowser?.agentId === runAgentId && startedBrowser.chrome);
+  const [startedBrowser, setStartedBrowser] = useState<{ agentId: string; browser: BrowserAgent } | null>(null);
+  const runBrowser: BrowserAgent =
+    runBrowserOf(settings.status === "ready" ? settings.values.runs : [], runAgentId) ??
+    (startedBrowser?.agentId === runAgentId ? startedBrowser.browser : "paseo");
 
   // A later copy of a block in this chat is a full card with a hint (its buttons share the first's
   // done mark and run), and with "Collapse repeated blocks that are done" a done copy is one line
@@ -336,17 +362,17 @@ export function BrowserPromptCard({
    * finds this entry, so an earlier run of this card keeps its own, and a save that loses a revision
    * race is retried against the newest settings (any mounted card's, also after this one unmounted).
    */
-  async function rememberRun(startedAgentId: string, fallback: boolean, chrome: boolean) {
+  async function rememberRun(startedAgentId: string, fallback: boolean, browser: BrowserAgent) {
     setLocalRun(startedAgentId);
     setStartedHere(startedAgentId);
-    setStartedBrowser({ agentId: startedAgentId, chrome });
+    setStartedBrowser({ agentId: startedAgentId, browser });
     // Position 2 stays the fallback marker the server reads; the content marker comes after it.
     const entry: [string, string, ...string[]] = [
       runKey,
       startedAgentId,
       ...(fallback ? [MOST_RECENT_FALLBACK] : []),
       runKeyMarker(key),
-      ...(chrome ? [CHROME_RUN_MARKER] : []),
+      ...(browser === "chrome" ? [CHROME_RUN_MARKER] : browser === "server" ? [SERVER_RUN_MARKER] : []),
     ];
     const saved = await saveWithRetries(newestSettings, (values) => ({ ...values, runs: addRunRecord(values.runs, entry, MAX_RUNS) }));
     if (!saved) toast.error("Could not record the agent on this card; it will not report back to this chat.");
@@ -397,6 +423,18 @@ export function BrowserPromptCard({
       if (!lock) return;
       lockToken = lock.token;
       const values = launch.settings;
+      // A Server browser run needs a ready image and a one-time ticket for this chat and card: the
+      // server attaches the browser to the run's first session only with it.
+      let extraLabels: Record<string, string> | undefined;
+      if (browser === "server") {
+        const prepared = await within(prepareServerRun({ sourceAgentId: agentId, cardId }), SERVER_BROWSER_RPC_TIMEOUT_MS);
+        if (!prepared.ok) {
+          const detail = prepared.detail ? ` (${prepared.detail})` : "";
+          toast.error(`${SERVER_BROWSER_STATE_MESSAGES[prepared.state]}${detail}`);
+          return;
+        }
+        extraLabels = serverRunLabels(prepared.ticket);
+      }
       const started = await startBrowserAgent(paseo, {
         sourceAgentId: agentId,
         cardId,
@@ -406,13 +444,14 @@ export function BrowserPromptCard({
         steps: text,
         settings: values,
         launch,
+        extraLabels,
         // Recorded as soon as it exists, before its mode check: the server's guard and report back
         // then cover it even when that check is slow or cannot read its mode.
         onCreated: async (createdId, workspaceSource) => {
           // The lock now names the run, so a copy pressed before the record arrives shows this run.
           finishLock(lockToken, createdId);
           lockToken = null;
-          await rememberRun(createdId, workspaceSource === "most-recent", browser === "chrome");
+          await rememberRun(createdId, workspaceSource === "most-recent", browser);
         },
       });
       if (!started.modeCheck.ok) {
@@ -425,7 +464,7 @@ export function BrowserPromptCard({
       const where = started.workspaceSource === "most-recent" ? " in your most recent workspace" : "";
       // Background by default: the card shows the run's status and its Open link.
       const open = opensAgentOnStart(values);
-      toast.show(`Paseo agent started${where}.`, { variant: "success", durationMs: 3000 });
+      toast.show(`Paseo agent started${where}${browser === "server" ? " with the server browser" : ""}.`, { variant: "success", durationMs: 3000 });
       if (open) openRunScreen(started.agentId, agentTitle(title, displayTitle), true);
     } catch (error) {
       const message = `Could not start a Paseo agent: ${error instanceof Error ? error.message : String(error)}`;
@@ -452,6 +491,20 @@ export function BrowserPromptCard({
     setResolving(true);
     let launch: ResolvedLaunch;
     try {
+      if (browser === "server") {
+        // No run without Docker and the image; a missing image starts building now.
+        let reason: string | null = null;
+        try {
+          const status = await within(serverStatus({ build: true }), SERVER_BROWSER_RPC_TIMEOUT_MS);
+          if (status.state !== "ready") reason = `${SERVER_BROWSER_STATE_MESSAGES[status.state]}${status.detail ? ` (${status.detail})` : ""}`;
+        } catch (error) {
+          reason = `Could not check the Server browser: ${error instanceof Error ? error.message : String(error)}`;
+        }
+        if (reason) {
+          if (seq === pressSeq.current) toast.error(reason);
+          return;
+        }
+      }
       launch = await resolveLaunch(paseo, settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS, browser);
     } finally {
       if (seq === pressSeq.current) setResolving(false);
@@ -524,6 +577,15 @@ export function BrowserPromptCard({
             disabled={busy || resolving || runBlocked}
             styles={styles}
             onPress={() => void onRunPress("paseo")}
+          />
+          <WayButton
+            label={runAgentId ? "Again: Server browser" : "Server browser"}
+            a11y={`Run ${displayTitle} with a Paseo agent in a browser on the Paseo server, not signed in to your accounts`}
+            hint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
+            highlighted={defaultMode === "server"}
+            disabled={busy || resolving || runBlocked}
+            styles={styles}
+            onPress={() => void onRunPress("server")}
           />
         </View>
         <View style={styles.group} accessibilityRole="toolbar" accessibilityLabel="ChatGPT">
@@ -622,7 +684,7 @@ export function BrowserPromptCard({
           >
             {shownState === "asking" ? "Waiting for the chat's answer" : RUN_LABELS[runState]}
           </Text>
-          <Text style={styles.hint}>{runInChrome ? "in Chrome" : "in Paseo browser"}</Text>
+          <Text style={styles.hint}>{BROWSER_NAMES[runBrowser]}</Text>
           <Text style={styles.hint}>·</Text>
           <Pressable
             accessibilityRole="link"
@@ -687,7 +749,7 @@ export function BrowserPromptCard({
           <Text style={[styles.hint, { color: theme.colors.statusDanger, flexShrink: 1 }]}>{runError}</Text>
         </View>
       ) : null}
-      {runAgentId && layout.compact ? <Text style={styles.hint}>{runInChrome ? CHROME_HINT : DESKTOP_HINT}</Text> : null}
+      {runAgentId && layout.compact ? <Text style={styles.hint}>{HINTS[runBrowser]}</Text> : null}
       <Modal
         title="Run with Paseo agent"
         icon={<Icon name="Bot" size={18} color={theme.colors.foreground} />}
@@ -695,14 +757,18 @@ export function BrowserPromptCard({
         onOpenChange={setConfirmOpen}
       >
         <Modal.Content>
-          <Text style={styles.modalText}>Start a Paseo agent to do these steps in your browser?</Text>
+          <Text style={styles.modalText}>
+            {pendingBrowser === "server"
+              ? "Start a Paseo agent to do these steps in a browser on the Paseo server? It is not signed in to your accounts."
+              : "Start a Paseo agent to do these steps in your browser?"}
+          </Text>
           {active ? <Text style={[styles.hint, { color: theme.colors.statusWarning }]}>A run of these steps is still going. This starts a second one.</Text> : null}
           {launchError ? (
             <Text style={[styles.hint, { color: theme.colors.statusDanger }]}>{launchError}</Text>
           ) : pendingLaunch && "config" in pendingLaunch ? (
             <Text style={styles.hint}>{describeLaunch(pendingLaunch.config, pendingLaunch.browser)}</Text>
           ) : null}
-          {layout.compact ? <Text style={styles.hint}>{inChrome ? CHROME_HINT : DESKTOP_HINT}</Text> : null}
+          {layout.compact || pendingBrowser === "server" ? <Text style={styles.hint}>{HINTS[pendingBrowser]}</Text> : null}
           <View style={styles.modalActions}>
             <Pressable accessibilityRole="button" onPress={() => setConfirmOpen(false)} style={styles.secondary}>
               <Text style={styles.secondaryText}>Cancel</Text>

@@ -62,5 +62,7 @@ export function migratePreferences(values: unknown, fromVersion: number): unknow
   }
   // v18 drops the ChatGPT extension way: a stored "extension" becomes the ChatGPT app.
   if (fromVersion < 18 && next.startMode === "extension") next = { ...next, startMode: "app" };
+  // v19 adds "server" (the Server browser) to both usual ways. Nothing stored changes: every older
+  // value is still valid, and no older document can hold "server".
   return next;
 }

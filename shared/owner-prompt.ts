@@ -230,7 +230,8 @@ interface FieldSpec {
 
 const TYPED_TEXT_TOOL = /(^|__)browser_(fill|type)$|^mcp__claude-in-chrome__(form_input|computer)$/;
 const CHROME_FORM_TOOL = /^mcp__claude-in-chrome__form_input$/;
-const KEYPRESS_TOOL = /(^|__)browser_keypress$/;
+/** Paseo's browser_keypress and the Server browser's (Playwright MCP) browser_press_key. */
+const KEYPRESS_TOOL = /(^|__)browser_(keypress|press_key)$/;
 /** One key, optionally with modifiers: a single character or a named key such as Enter, ArrowDown, F5, KeyA. */
 const KEY_NAME =
   /^(?:(?:Control|Shift|Alt|Meta|ControlOrMeta)\+)*(?:[^\s]|Enter|Tab|Escape|Backspace|Delete|Insert|Home|End|PageUp|PageDown|Arrow(?:Up|Down|Left|Right)|F(?:[1-9]|1[0-9]|2[0-4])|Space|Control|Shift|Alt|Meta|ControlOrMeta|CapsLock|NumLock|ScrollLock|ContextMenu|Pause|PrintScreen|Key[A-Z]|Digit[0-9]|Numpad(?:[0-9]|Add|Subtract|Multiply|Divide|Decimal|Enter)|Minus|Equal|Comma|Period|Slash|Backslash|Semicolon|Quote|Backquote|BracketLeft|BracketRight)$/u;
@@ -267,6 +268,17 @@ const SUMMARY_FIELDS: FieldSpec[] = [
   { field: "timeout", label: "Timeout", max: 50 },
   { field: "timeoutMs", label: "Timeout (ms)", max: 50 },
   { field: "fullPage", label: "Full page", max: 10 },
+  // Playwright MCP (Server browser) fields. Its form filling (`fields`), dialog text (`promptText`)
+  // and screenshot type (`type`, which Paseo's tool-call detail also uses) are not listed, so those
+  // requests never offer Allow on the card.
+  { field: "element", label: "Target", max: 200 },
+  { field: "values", label: "Options", block: true, list: true },
+  { field: "width", label: "Width", max: 20 },
+  { field: "height", label: "Height", max: 20 },
+  { field: "time", label: "Wait (s)", max: 20 },
+  { field: "textGone", label: "Wait until gone", max: 200 },
+  { field: "index", label: "Tab index", max: 20 },
+  { field: "accept", label: "Accept", max: 10 },
 ];
 const RENDERED_FIELDS = new Set([...SUMMARY_FIELDS.map((spec) => spec.field), "deltaX", "deltaY"]);
 /** Input fields hidden on purpose because they do not change what is allowed. */

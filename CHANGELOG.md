@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.21.0 (unreleased)
+
+- New: Paseo › **Server browser** on the card, next to Paseo browser. It starts a Paseo agent with
+  its own headless Chromium in a throwaway Docker container on the Paseo server, driven by a pinned
+  Playwright MCP, so no desktop app is needed (on phones it is the only agent way that works without
+  your Mac). That browser is not signed in to any of your accounts: for public pages and checks. A
+  run that needs a login stops and says to use the Paseo browser; it never asks for or types
+  credentials.
+- The container has no host mounts, every capability dropped, no new privileges, a read-only root
+  file system, an unprivileged user, memory, CPU and process limits, public DNS and no log, and it
+  is removed when the run's session ends. A filtering proxy in the container refuses `*.ts.net` and
+  other local names, tailnet (100.64.0.0/10), private, loopback, link-local, reserved and IPv6
+  local addresses, and the server's own addresses, also when a public name resolves to one of them.
+  SECURITY.md lists what is and is not blocked.
+- The image (`browser-prompt-server-browser:pw1.56.0-mcp0.0.41-<hash>`, never `latest`) is built
+  locally from `server-browser/` on first use: Playwright 1.56 base image pinned by digest, and
+  `@playwright/mcp` 0.0.41 from a lock file. Settings › Server browser shows ready, building, failed
+  or Docker missing, with a Build button; `npm run server-browser:image` builds it by hand. Until it
+  is ready the button explains why and starts nothing.
+- The browser's MCP server is added only to Server browser runs a card started: the plugin's run
+  labels plus `browser-prompt-browser: server`, with a one-time ticket on the run's first session
+  and its run record (marker `browser:server`) after that. Other agents get nothing.
+- Server browser runs get their own preamble: only the `mcp__server-browser__browser_*` tools, never
+  the Paseo browser tools, shell or files, with the same rules for secrets, risky actions, questions
+  to the chat, step lines and the report. Screenshots after each step use Playwright's
+  `browser_take_screenshot` and show on the card; there is no tab cleanup.
+- **Usual way to start** offers Server browser on desktop and on iOS and Android (settings v19;
+  nothing stored changes).
+- The card's permission box shows Playwright's element and option fields, and masks keys typed with
+  `browser_press_key` like `browser_keypress`.
+
 ## 0.20.5 (unreleased)
 
 - Fixed: the card no longer offers an Allow button whose text it cannot show exactly. A long

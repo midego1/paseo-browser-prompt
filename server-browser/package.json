@@ -1,0 +1,10 @@
+{
+  "name": "browser-prompt-server-browser",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Pinned Playwright MCP for the browser-prompt Server browser container.",
+  "license": "MIT",
+  "dependencies": {
+    "@playwright/mcp": "0.0.41"
+  }
+}

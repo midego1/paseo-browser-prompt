@@ -6,8 +6,8 @@ import { LAUNCHER_UNAVAILABLE_MESSAGES } from "../shared/trampoline-host";
 
 export type StartMode = "app" | "web-agent" | "copy-only";
 
-/** The way highlighted on the card: ChatGPT, the Claude desktop app, or a Paseo agent in either browser. */
-export type UsualWay = StartMode | "claude-desktop" | "paseo" | "chrome";
+/** The way highlighted on the card: ChatGPT, the Claude desktop app, or a Paseo agent in one of its browsers. */
+export type UsualWay = StartMode | "claude-desktop" | "paseo" | "chrome" | "server";
 
 export interface ModeSettings {
   startMode: UsualWay;
@@ -23,7 +23,7 @@ export function effectiveMode(settings: ModeSettings): UsualWay {
 
 /** How the Command Center opens ChatGPT when the usual way is a Paseo agent, which it cannot start. */
 export function chatGptMode(way: UsualWay): StartMode {
-  if (way !== "paseo" && way !== "chrome" && way !== "claude-desktop") return way;
+  if (way !== "paseo" && way !== "chrome" && way !== "server" && way !== "claude-desktop") return way;
   return Platform.OS === "ios" || Platform.OS === "android" ? "copy-only" : "app";
 }
 
