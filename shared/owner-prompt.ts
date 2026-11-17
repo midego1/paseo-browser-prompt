@@ -271,7 +271,14 @@ const SUMMARY_FIELDS: FieldSpec[] = [
   // Playwright MCP (Server browser) fields. Its form filling (`fields`), dialog text (`promptText`)
   // and screenshot type (`type`, which Paseo's tool-call detail also uses) are not listed, so those
   // requests never offer Allow on the card.
-  { field: "element", label: "Target", max: 200 },
+  { field: "element", label: "Element (description)", max: 200 },
+  { field: "target", label: "Element", max: 200 },
+  { field: "startElement", label: "From (description)", max: 200 },
+  { field: "startTarget", label: "From element", max: 200 },
+  { field: "endElement", label: "To (description)", max: 200 },
+  { field: "endTarget", label: "To element", max: 200 },
+  { field: "submit", label: "Submit", max: 10 },
+  { field: "slowly", label: "Type slowly", max: 10 },
   { field: "values", label: "Options", block: true, list: true },
   { field: "width", label: "Width", max: 20 },
   { field: "height", label: "Height", max: 20 },

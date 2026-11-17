@@ -1,15 +1,20 @@
-// Run: npm test. The Server browser: the docker arguments and their isolation flags, the network
-// policy of the in-container proxy (also end to end on 127.0.0.1), which agent sessions get the MCP
-// server (labels, one-time ticket, run record), status and build handling, the prompt variant, and
-// that the embedded build context matches server-browser/.
+// Run: npm test. The Server browser: the docker arguments of the browser container, the proxy
+// sidecar and the internal network, the host launcher that wires them up and tears them down, the
+// MCP stdio filter, the network policy of the proxy (also end to end on 127.0.0.1), which agent
+// sessions get the MCP server (labels, one-time ticket, run record), status, build, the run cap and
+// the sweep of leftovers, the prompt variant, and that the embedded files match server-browser/.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
 import { connect, createServer as createTcpServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { EventEmitter } from "node:events";
 import {
   AGENT_SAFETY_PREAMBLE,
   buildAgentPrompt,
+  CHROME_SAFETY_PREAMBLE,
   CLOSE_TABS_RULE,
   describeLaunch,
   parseBrowserAgent,
@@ -17,6 +22,7 @@ import {
   runBrowserOf,
   RUN_SUCCESS_RULE,
   SCREENSHOT_RULE,
+  SERVER_BROWSER_DENIED_TOOLS,
   SERVER_BROWSER_TOOLS,
   SERVER_SAFETY_PREAMBLE,
   SERVER_SCREENSHOT_RULE,
@@ -34,7 +40,10 @@ import {
   createTicketStore,
   hostAddressesToBlock,
   isServerBrowserRun,
+  LAUNCHER_PID_LABEL,
+  MAX_SERVER_BROWSER_RUNS,
   PLAYWRIGHT_MCP_VERSION,
+  PLAYWRIGHT_VERSION,
   SERVER_BROWSER_MCP_NAME,
   SERVER_BROWSER_STATE_MESSAGES,
   SERVER_BROWSER_STATES,
@@ -42,8 +51,13 @@ import {
   serverBrowserDockerArgs,
   serverBrowserImageTag,
   serverBrowserMcpServer,
+  serverBrowserNetworkArgs,
+  serverBrowserPlan,
+  serverBrowserProxyArgs,
   serverRunLabels,
   serverRunRecorded,
+  SESSION_LABEL,
+  sessionNames,
   shouldAttachServerBrowser,
   TICKET_LABEL,
 } from "../shared/server-browser.ts";
@@ -53,34 +67,49 @@ import {
   createServerBrowser,
   currentImageTag,
   findDocker,
+  findNode,
+  processAlive,
   registerServerBrowser,
   resolveDockerHost,
   shortError,
 } from "../server/server-browser.ts";
-import { SERVER_BROWSER_FILES } from "../server/server-browser-files.ts";
-import { renderEmbedded, SERVER_BROWSER_FILE_NAMES } from "../scripts/embed-server-browser.mjs";
+import { SERVER_BROWSER_FILES, SERVER_BROWSER_RUNTIME_FILES } from "../server/server-browser-files.ts";
+import { renderEmbedded, SERVER_BROWSER_FILE_NAMES, SERVER_BROWSER_RUNTIME_FILE_NAMES } from "../scripts/embed-server-browser.mjs";
 import {
   BLOCKED_HOST_SUFFIXES,
+  connectFirst,
+  createClientCheck,
   createPolicy,
   normalizeAddress,
   parseAuthority,
   resolveTarget,
   startProxy,
 } from "../server-browser/proxy.mjs";
+import { DENIED_TOOLS, DENIED_TEXT, filterClientLine, filterServerLine, lineSplitter } from "../server-browser/mcp-filter.mjs";
+import { checkPlan, launch, substitute } from "../server-browser/launch.mjs";
 
 const IMAGE = serverBrowserImageTag("ab".repeat(32));
-const argsFor = (extra = {}) => serverBrowserDockerArgs({ image: IMAGE, agentId: "agent-1", nonce: "n0nce", blockedIps: ["100.96.145.38", "152.53.114.172"], ...extra });
+const SECCOMP = "/state/server-browser/runtime-x/seccomp.json";
+const input = (extra = {}) => ({ image: IMAGE, agentId: "agent-1", nonce: "n0nce", blockedIps: ["100.96.145.38", "152.53.114.172"], seccompProfile: SECCOMP, ...extra });
+const argsFor = (extra = {}) => serverBrowserDockerArgs(input(extra));
 const flagValues = (args, flag) => args.flatMap((arg, i) => (arg === flag ? [args[i + 1]] : []));
+const FORBIDDEN = ["-v", "--volume", "--mount", "--device", "--privileged", "--pid", "--ipc", "--userns", "-p", "--publish", "-P", "-t", "--add-host", "--net", "--volumes-from"];
+const noHostAccess = (args) => {
+  for (const flag of FORBIDDEN) assert.ok(!args.includes(flag), flag);
+  assert.ok(!args.some((arg) => /^host$|unconfined|docker\.sock|apparmor/.test(arg)), "no host network, no unconfined profile, no socket");
+};
+const sessionLabelsOf = (role) => [`${CONTAINER_LABEL}=${role}`, `${CONTAINER_AGENT_LABEL}=agent-1`, `${SESSION_LABEL}=bp-sb-agent-1-n0nce`, `${LAUNCHER_PID_LABEL}=__BP_PID__`];
 
-test("docker arguments: every isolation flag, the pinned image last", () => {
+test("browser container: internal network only, Chromium sandbox, every other isolation flag, the pinned image last", () => {
   const args = argsFor();
   assert.deepEqual(args.slice(0, 4), ["run", "-i", "--rm", "--init"]);
   assert.equal(args.at(-1), IMAGE, "the image comes last, nothing after it");
   assert.deepEqual(flagValues(args, "--pull"), ["never"]);
-  assert.deepEqual(flagValues(args, "--network"), ["bridge"]);
-  assert.deepEqual(flagValues(args, "--dns"), ["1.1.1.1", "9.9.9.9"]);
+  assert.deepEqual(flagValues(args, "--network"), ["bp-sb-agent-1-n0nce-net"], "the session's internal network, never bridge or host");
+  assert.deepEqual(flagValues(args, "--dns"), [], "no resolver: external names do not resolve on the internal network");
   assert.deepEqual(flagValues(args, "--cap-drop"), ["ALL"]);
-  assert.deepEqual(flagValues(args, "--security-opt"), ["no-new-privileges"]);
+  assert.deepEqual(flagValues(args, "--cap-add"), ["SYS_CHROOT"], "only for Chromium's sandbox inside its user namespace");
+  assert.deepEqual(flagValues(args, "--security-opt"), ["no-new-privileges", `seccomp=${SECCOMP}`]);
   assert.ok(args.includes("--read-only"));
   assert.deepEqual(flagValues(args, "--tmpfs"), ["/tmp:rw,nosuid,nodev,size=512m"]);
   assert.deepEqual(flagValues(args, "--memory"), ["1536m"]);
@@ -90,81 +119,230 @@ test("docker arguments: every isolation flag, the pinned image last", () => {
   assert.deepEqual(flagValues(args, "--user"), ["pwuser"]);
   assert.deepEqual(flagValues(args, "--log-driver"), ["none"]);
   assert.deepEqual(flagValues(args, "--name"), ["bp-sb-agent-1-n0nce"]);
-  assert.deepEqual(flagValues(args, "--label"), [`${CONTAINER_LABEL}=1`, `${CONTAINER_AGENT_LABEL}=agent-1`]);
+  assert.deepEqual(flagValues(args, "--label"), sessionLabelsOf("browser"));
   const env = flagValues(args, "--env");
+  assert.ok(env.includes("BP_PROXY=http://__BP_PROXY_IP__:3128"), "the sidecar is its proxy");
   assert.ok(env.includes("BP_BLOCKED_IPS=100.96.145.38,152.53.114.172"));
   assert.ok(env.includes("BP_MAX_LIFETIME_S=43200"));
   assert.ok(env.includes("BP_IDLE_TIMEOUT_S=7200"));
-  // Nothing that reaches the host: no mounts, devices, host namespaces or extra privileges.
-  for (const forbidden of ["-v", "--volume", "--mount", "--device", "--privileged", "--cap-add", "--pid", "--ipc", "--userns", "-p", "--publish", "-t", "--add-host"]) {
-    assert.ok(!args.includes(forbidden), forbidden);
-  }
-  assert.ok(!args.some((arg) => /host|unconfined|docker\.sock/.test(arg) && !arg.startsWith("--hostname") && arg !== "server-browser"), "no host network, no unconfined profile, no socket");
+  noHostAccess(args);
 });
 
-test("docker arguments refuse other images, odd agent ids and non-addresses", () => {
+test("proxy sidecar: the only container with a route out, hardened the same way, clients only from the internal network", () => {
+  const args = serverBrowserProxyArgs(input());
+  assert.deepEqual(args.slice(0, 4), ["run", "-d", "--rm", "--init"]);
+  assert.deepEqual(args.slice(-3), ["node", IMAGE, "/opt/browser-prompt/proxy-main.mjs"]);
+  assert.deepEqual(flagValues(args, "--entrypoint"), ["node"]);
+  assert.deepEqual(flagValues(args, "--pull"), ["never"]);
+  assert.deepEqual(flagValues(args, "--network"), ["bridge"]);
+  assert.deepEqual(flagValues(args, "--dns"), ["1.1.1.1", "9.9.9.9"]);
+  assert.deepEqual(flagValues(args, "--cap-drop"), ["ALL"]);
+  assert.deepEqual(flagValues(args, "--cap-add"), []);
+  assert.deepEqual(flagValues(args, "--security-opt"), ["no-new-privileges"]);
+  assert.ok(args.includes("--read-only"));
+  assert.deepEqual(flagValues(args, "--memory"), ["256m"]);
+  assert.deepEqual(flagValues(args, "--memory-swap"), ["256m"]);
+  assert.deepEqual(flagValues(args, "--pids-limit"), ["64"]);
+  assert.deepEqual(flagValues(args, "--user"), ["pwuser"]);
+  assert.deepEqual(flagValues(args, "--log-driver"), ["none"]);
+  assert.deepEqual(flagValues(args, "--name"), ["bp-sb-agent-1-n0nce-proxy"]);
+  assert.deepEqual(flagValues(args, "--label"), sessionLabelsOf("proxy"));
+  const env = flagValues(args, "--env");
+  assert.ok(env.includes("BP_ALLOW_CLIENTS=__BP_SUBNET__"));
+  assert.ok(env.includes("BP_BLOCKED_IPS=100.96.145.38,152.53.114.172"));
+  noHostAccess(args);
+  const network = serverBrowserNetworkArgs(input());
+  assert.deepEqual(network.slice(0, 5), ["network", "create", "--internal", "--driver", "bridge"]);
+  assert.equal(network.at(-1), "bp-sb-agent-1-n0nce-net");
+  assert.deepEqual(flagValues(network, "--label"), sessionLabelsOf("network"));
+  assert.deepEqual(sessionNames("agent-1", "n0nce"), { browser: "bp-sb-agent-1-n0nce", proxy: "bp-sb-agent-1-n0nce-proxy", network: "bp-sb-agent-1-n0nce-net" });
+});
+
+test("docker arguments refuse other images, odd agent ids, odd profile paths and non-addresses", () => {
   assert.throws(() => argsFor({ image: "browser-prompt-server-browser:latest" }), /pinned image/);
-  assert.throws(() => argsFor({ image: "mcr.microsoft.com/playwright:v1.56.0-noble" }), /pinned image/);
+  assert.throws(() => argsFor({ image: "mcr.microsoft.com/playwright:v1.65.1-noble" }), /pinned image/);
+  assert.throws(() => serverBrowserProxyArgs(input({ image: "alpine:3" })), /pinned image/);
   assert.throws(() => argsFor({ agentId: "a; rm -rf /" }), /agent id/);
   assert.throws(() => argsFor({ agentId: "" }), /agent id/);
+  assert.throws(() => argsFor({ seccompProfile: "relative.json" }), /absolute path/);
+  assert.throws(() => argsFor({ seccompProfile: "/x.json,unconfined" }), /absolute path/);
   const env = flagValues(argsFor({ blockedIps: ["10.0.0.1", "x,y", "1.2.3.4 --privileged"] }), "--env");
   assert.ok(env.includes("BP_BLOCKED_IPS=10.0.0.1"), env.join(" "));
   assert.equal(containerName("a".repeat(100), "zz-99!"), `bp-sb-${"a".repeat(36)}-zz99`);
+  assert.throws(() => serverBrowserPlan("docker", input()), /absolute path/);
+});
+
+test("the plan and the MCP server: node runs the launcher with the plan; DOCKER_HOST only when known", () => {
+  const plan = serverBrowserPlan("/usr/bin/docker", input());
+  assert.deepEqual(Object.keys(plan), ["docker", "network", "proxy", "browser"]);
+  assert.equal(checkPlan(plan), plan, "the launcher accepts what the plugin builds");
+  const server = serverBrowserMcpServer("/usr/bin/node", "/state/launch.mjs", plan, null);
+  assert.equal(server.type, "stdio");
+  assert.equal(server.command, "/usr/bin/node");
+  assert.equal(server.args[0], "/state/launch.mjs");
+  assert.deepEqual(JSON.parse(Buffer.from(server.args[1], "base64").toString("utf8")), plan);
+  assert.equal(server.env, undefined);
+  assert.deepEqual(serverBrowserMcpServer("/usr/bin/node", "/l.mjs", plan, "unix:///run/user/1001/docker.sock").env, { DOCKER_HOST: "unix:///run/user/1001/docker.sock" });
+  for (const bad of [null, {}, { ...plan, docker: "docker" }, { ...plan, browser: { name: "x; y", run: ["run"] } }, { ...plan, proxy: { name: "p", run: ["exec"] } }, { ...plan, network: { name: "n", create: [] } }]) {
+    assert.throws(() => checkPlan(bad), undefined, JSON.stringify(bad)?.slice(0, 60));
+  }
+});
+
+/** A fake docker for the launcher: records commands, answers inspect, and a browser child it controls. */
+function fakeLauncherDeps({ fail = "" } = {}) {
+  const calls = [];
+  const child = new EventEmitter();
+  child.killed = [];
+  child.kill = (signal) => child.killed.push(signal);
+  let signalHandler = null;
+  const deps = {
+    pid: 4242,
+    log: () => {},
+    onSignal: (handler) => (signalHandler = handler),
+    run: async (args) => {
+      calls.push(args);
+      if (fail && args.join(" ").includes(fail)) return { ok: false, stdout: "", stderr: "boom" };
+      if (args[0] === "network" && args[1] === "inspect") return { ok: true, stdout: "172.19.0.0/16 fd00::/64 ", stderr: "" };
+      if (args[0] === "inspect") return { ok: true, stdout: "172.19.0.2\n", stderr: "" };
+      return { ok: true, stdout: "", stderr: "" };
+    },
+    spawnBrowser: (args) => {
+      calls.push(["SPAWN", ...args]);
+      return child;
+    },
+  };
+  return { deps, calls, child, signal: (s) => signalHandler(s) };
+}
+
+test("the launcher creates the network, starts and connects the sidecar, runs the browser with its address, and removes everything after", async () => {
+  const plan = serverBrowserPlan("/usr/bin/docker", input());
+  const fake = fakeLauncherDeps();
+  const done = launch(plan, fake.deps);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const steps = fake.calls.map((call) => call.slice(0, 2).join(" "));
+  assert.deepEqual(steps, ["network create", "network inspect", "run -d", "network connect", "inspect --format", "SPAWN run"]);
+  assert.ok(fake.calls[0].includes(`${LAUNCHER_PID_LABEL}=4242`), "the launcher's pid goes on every resource");
+  assert.ok(fake.calls[2].includes("BP_ALLOW_CLIENTS=172.19.0.0/16"), "the sidecar serves only the internal network");
+  assert.deepEqual(fake.calls[3], ["network", "connect", "bp-sb-agent-1-n0nce-net", "bp-sb-agent-1-n0nce-proxy"]);
+  const browser = fake.calls[5];
+  assert.ok(browser.includes("BP_PROXY=http://172.19.0.2:3128"));
+  assert.ok(!browser.some((arg) => arg.includes("__BP_")), "no placeholder left");
+  fake.signal("SIGTERM");
+  assert.deepEqual(fake.child.killed, ["SIGTERM"], "a signal goes to the browser container");
+  fake.child.emit("exit", 0, null);
+  assert.equal(await done, 0);
+  assert.deepEqual(fake.calls.slice(-2), [["rm", "-f", "bp-sb-agent-1-n0nce", "bp-sb-agent-1-n0nce-proxy"], ["network", "rm", "bp-sb-agent-1-n0nce-net"]]);
+  assert.deepEqual(substitute(["a__BP_PID__b", "x"], { __BP_PID__: "7" }), ["a7b", "x"]);
+});
+
+test("the launcher cleans up when a step fails or a signal arrives before the browser runs", async () => {
+  const plan = serverBrowserPlan("/usr/bin/docker", input());
+  const failing = fakeLauncherDeps({ fail: "network connect" });
+  assert.equal(await launch(plan, failing.deps), 1);
+  assert.ok(!failing.calls.some((call) => call[0] === "SPAWN"), "no browser without its proxy");
+  assert.deepEqual(failing.calls.slice(-2), [["rm", "-f", "bp-sb-agent-1-n0nce", "bp-sb-agent-1-n0nce-proxy"], ["network", "rm", "bp-sb-agent-1-n0nce-net"]]);
+  const stopped = fakeLauncherDeps();
+  const originalRun = stopped.deps.run;
+  stopped.deps.run = async (args) => {
+    const result = await originalRun(args);
+    if (args[0] === "network" && args[1] === "create") stopped.signal("SIGTERM");
+    return result;
+  };
+  assert.equal(await launch(plan, stopped.deps), 1);
+  assert.ok(!stopped.calls.some((call) => call[0] === "SPAWN"));
+  assert.deepEqual(stopped.calls.at(-1), ["network", "rm", "bp-sb-agent-1-n0nce-net"]);
+});
+
+test("the MCP filter removes and refuses the tools that run code or pick files", () => {
+  for (const tool of SERVER_BROWSER_DENIED_TOOLS) assert.ok(DENIED_TOOLS.has(tool), tool);
+  const list = JSON.stringify({ jsonrpc: "2.0", id: 2, result: { tools: [{ name: "browser_navigate" }, { name: "browser_run_code_unsafe" }, { name: "browser_file_upload" }, { name: "browser_drop" }, { name: "browser_snapshot" }] } });
+  assert.deepEqual(JSON.parse(filterServerLine(list)).result.tools.map((tool) => tool.name), ["browser_navigate", "browser_snapshot"]);
+  const other = JSON.stringify({ jsonrpc: "2.0", id: 3, result: { content: [] } });
+  assert.equal(filterServerLine(other), other, "other messages pass unchanged");
+  assert.equal(filterServerLine("not json"), "not json");
+  const call = JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "browser_run_code_unsafe", arguments: { code: "async () => require('fs')" } } });
+  const verdict = filterClientLine(call);
+  assert.deepEqual(JSON.parse(verdict.reply), { jsonrpc: "2.0", id: 7, result: { content: [{ type: "text", text: DENIED_TEXT }], isError: true } });
+  assert.deepEqual(filterClientLine(JSON.stringify({ jsonrpc: "2.0", method: "tools/call", params: { name: "browser_file_upload" } })), { drop: true });
+  const allowed = JSON.stringify({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "browser_navigate", arguments: { url: "https://example.com" } } });
+  assert.deepEqual(filterClientLine(allowed), { forward: allowed });
+  const lines = [];
+  const split = lineSplitter((line) => lines.push(line));
+  split.push('{"a":1}\n{"b"');
+  split.push(':2}\n{"c":3}');
+  split.end();
+  assert.deepEqual(lines, ['{"a":1}', '{"b":2}', '{"c":3}']);
 });
 
 test("the image tag is pinned and versioned, never latest", () => {
-  assert.equal(IMAGE, `browser-prompt-server-browser:pw1.56.0-mcp${PLAYWRIGHT_MCP_VERSION}-abababababab`);
+  assert.equal(IMAGE, `browser-prompt-server-browser:pw${PLAYWRIGHT_VERSION}-mcp${PLAYWRIGHT_MCP_VERSION}-abababababab`);
   assert.throws(() => serverBrowserImageTag(""), /hash/);
   const tag = currentImageTag();
-  assert.match(tag, /^browser-prompt-server-browser:pw1\.56\.0-mcp0\.0\.41-[0-9a-f]{12}$/);
+  assert.match(tag, /^browser-prompt-server-browser:pw1\.65\.1-mcp0\.0\.84-[0-9a-f]{12}$/);
   assert.equal(currentImageTag({ ...SERVER_BROWSER_FILES }), tag, "same files, same tag");
   assert.notEqual(currentImageTag({ ...SERVER_BROWSER_FILES, "proxy.mjs": "changed" }), tag, "any change rebuilds");
   assert.equal(contextHash({ b: "2", a: "1" }), contextHash({ a: "1", b: "2" }), "order does not matter");
 });
 
-test("the build context is pinned: base image digest, exact Playwright MCP version, lock file", () => {
+test("the build context is pinned: base image digest, exact Playwright MCP version, Playwright overridden to the image's, lock file", () => {
   const dockerfile = readFileSync(new URL("../server-browser/Dockerfile", import.meta.url), "utf8");
   assert.ok(dockerfile.includes(`FROM ${BASE_IMAGE}`), "FROM by digest");
-  assert.match(BASE_IMAGE, /@sha256:[0-9a-f]{64}$/);
+  assert.match(BASE_IMAGE, /^mcr\.microsoft\.com\/playwright:v1\.65\.1-noble@sha256:[0-9a-f]{64}$/);
   assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts/);
   assert.match(dockerfile, /^USER pwuser$/m);
+  assert.match(dockerfile, /COPY proxy\.mjs proxy-main\.mjs mcp-filter\.mjs entrypoint\.mjs \.\//);
   const pkg = JSON.parse(readFileSync(new URL("../server-browser/package.json", import.meta.url), "utf8"));
   assert.equal(pkg.dependencies["@playwright/mcp"], PLAYWRIGHT_MCP_VERSION, "exact version, no range");
+  assert.deepEqual(pkg.overrides, { playwright: PLAYWRIGHT_VERSION, "playwright-core": PLAYWRIGHT_VERSION }, "the browser the image ships");
   const lock = JSON.parse(readFileSync(new URL("../server-browser/package-lock.json", import.meta.url), "utf8"));
   assert.equal(lock.packages["node_modules/@playwright/mcp"].version, PLAYWRIGHT_MCP_VERSION);
   assert.match(lock.packages["node_modules/@playwright/mcp"].integrity, /^sha512-/);
-  assert.equal(lock.packages["node_modules/playwright-core"].version, "1.56.0-alpha-2025-10-01");
+  assert.equal(lock.packages["node_modules/playwright-core"].version, PLAYWRIGHT_VERSION);
+  assert.equal(lock.packages["node_modules/playwright"].version, PLAYWRIGHT_VERSION);
+  for (const doc of ["../SECURITY.md", "../README.md"]) {
+    assert.match(readFileSync(new URL(doc, import.meta.url), "utf8"), /[Rr]elease checklist/, `${doc} has the bump-on-release line`);
+  }
 });
 
-test("the embedded build context matches server-browser/ (run scripts/embed-server-browser.mjs)", () => {
+test("the embedded files match server-browser/ (run scripts/embed-server-browser.mjs)", () => {
   const generated = readFileSync(new URL("../server/server-browser-files.ts", import.meta.url), "utf8");
   assert.equal(generated, renderEmbedded());
   assert.deepEqual(Object.keys(SERVER_BROWSER_FILES).sort(), [...SERVER_BROWSER_FILE_NAMES].sort());
+  assert.deepEqual(Object.keys(SERVER_BROWSER_RUNTIME_FILES).sort(), [...SERVER_BROWSER_RUNTIME_FILE_NAMES].sort());
+  assert.ok(!("launch.mjs" in SERVER_BROWSER_FILES), "the launcher is not part of the image or its tag");
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.ok(pkg.files.includes("server-browser/"), "the Dockerfile ships with the plugin");
 });
 
-test("the entrypoint keeps Chromium headless, isolated, proxied, and its files in the container", () => {
+test("the seccomp profile is Playwright's: Docker's default plus user namespaces, nothing unconfined", () => {
+  const profile = JSON.parse(SERVER_BROWSER_RUNTIME_FILES["seccomp.json"]);
+  assert.equal(profile.defaultAction, "SCMP_ACT_ERRNO", "deny by default");
+  const unconditional = profile.syscalls.filter((rule) => rule.action === "SCMP_ACT_ALLOW" && !rule.includes?.caps?.length && !rule.args?.length);
+  const names = new Set(unconditional.flatMap((rule) => rule.names));
+  for (const call of ["clone", "unshare", "setns"]) assert.ok(names.has(call), call);
+  for (const call of ["mount", "bpf", "kexec_load", "init_module", "chroot", "pivot_root"]) assert.ok(!names.has(call), `${call} stays behind a capability`);
+});
+
+test("the entrypoint: headless, isolated, Chromium sandbox on, only the sidecar as proxy, file:// blocked, filtered stdio", () => {
   const entry = readFileSync(new URL("../server-browser/entrypoint.mjs", import.meta.url), "utf8");
   for (const flag of ['"--headless"', '"--isolated"', '"--output-dir"', '"--block-service-workers"']) assert.ok(entry.includes(flag), flag);
-  assert.match(entry, /proxy: \{ server: `http:\/\/127\.0\.0\.1:\$\{proxy\.port\}` \}/);
+  assert.match(entry, /chromiumSandbox: true/);
+  assert.match(entry, /proxy: \{ server: proxyServer \}/);
+  assert.match(entry, /refusing to start without the proxy/, "no proxy, no browser");
+  assert.match(entry, /allowUnrestrictedFileAccess: false/);
   assert.match(entry, /disable_non_proxied_udp/);
   assert.match(entry, /acceptDownloads: false/);
   assert.match(entry, /const work = "\/tmp\/browser-prompt";/, "output only under the container's tmpfs");
-  assert.match(entry, /stdio: \["pipe", "inherit", "inherit"\]/, "stdout straight through; stdin through the idle timer");
+  assert.match(entry, /stdio: \["pipe", "pipe", "inherit"\]/, "both MCP directions go through the filter");
+  assert.match(entry, /filterClientLine\(line\)/);
+  assert.match(entry, /filterServerLine\(line\)/);
   assert.match(entry, /BP_IDLE_TIMEOUT_S/);
-  assert.match(entry, /process\.stdin\.on\("end", \(\) => child\.stdin\.end\(\)\)/, "a closed session ends Playwright MCP");
   assert.doesNotMatch(entry, /console\.log/, "stdout stays JSON-RPC");
-});
-
-test("the MCP server is docker over stdio, with DOCKER_HOST only when known", () => {
-  assert.deepEqual(serverBrowserMcpServer("/usr/bin/docker", ["run"], null), { type: "stdio", command: "/usr/bin/docker", args: ["run"] });
-  assert.deepEqual(serverBrowserMcpServer("/usr/bin/docker", ["run"], "unix:///run/user/1001/docker.sock"), {
-    type: "stdio",
-    command: "/usr/bin/docker",
-    args: ["run"],
-    env: { DOCKER_HOST: "unix:///run/user/1001/docker.sock" },
-  });
+  const main = readFileSync(new URL("../server-browser/proxy-main.mjs", import.meta.url), "utf8");
+  assert.match(main, /refusing to start an open proxy/);
+  assert.match(main, /host: "0\.0\.0\.0", port, allowClients/);
+  const launcher = readFileSync(new URL("../server-browser/launch.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(launcher, /console\.log|process\.stdout/, "the launcher never writes to the MCP stream");
 });
 
 test("network policy: private, tailnet, loopback, link-local and reserved addresses are blocked", () => {
@@ -199,7 +377,12 @@ test("resolveTarget connects only to the checked address and refuses names with 
     if (!(host in map)) throw new Error("ENOTFOUND");
     return map[host];
   };
-  assert.deepEqual(await resolveTarget(policy, "example.com", dns({ "example.com": ["93.184.215.14"] })), { address: "93.184.215.14", family: 4 });
+  assert.deepEqual(await resolveTarget(policy, "example.com", dns({ "example.com": ["93.184.215.14"] })), { address: "93.184.215.14", family: 4, addresses: ["93.184.215.14"] });
+  assert.deepEqual(
+    await resolveTarget(policy, "two.example", dns({ "two.example": ["93.184.215.14", "2606:4700::1111"] })),
+    { address: "93.184.215.14", family: 4, addresses: ["93.184.215.14", "2606:4700::1111"] },
+    "every checked address is kept for fallback",
+  );
   assert.deepEqual(await resolveTarget(policy, "rebind.example", dns({ "rebind.example": ["127.0.0.1"] })), { refused: "blocked address" });
   assert.deepEqual(await resolveTarget(policy, "mixed.example", dns({ "mixed.example": ["93.184.215.14", "10.0.0.5"] })), { refused: "blocked address" });
   assert.deepEqual(await resolveTarget(policy, "mapped.example", dns({ "mapped.example": ["::ffff:192.168.0.10"] })), { refused: "blocked address" });
@@ -207,7 +390,7 @@ test("resolveTarget connects only to the checked address and refuses names with 
   assert.deepEqual(await resolveTarget(policy, "empty.example", dns({ "empty.example": [] })), { refused: "not found" });
   assert.deepEqual(await resolveTarget(policy, "x.tail1234.ts.net", dns({ "x.tail1234.ts.net": ["93.184.215.14"] })), { refused: "blocked host" });
   assert.deepEqual(await resolveTarget(policy, "100.96.145.38", dns({})), { refused: "blocked host" });
-  assert.deepEqual(await resolveTarget(policy, "[2606:4700::1111]", dns({})), { address: "2606:4700::1111", family: 6 });
+  assert.deepEqual(await resolveTarget(policy, "[2606:4700::1111]", dns({})), { address: "2606:4700::1111", family: 6, addresses: ["2606:4700::1111"] });
   assert.deepEqual(parseAuthority("example.com:443"), { host: "example.com", port: 443 });
   assert.deepEqual(parseAuthority("[::1]:8080"), { host: "::1", port: 8080 });
   for (const bad of ["example.com", "a:0", "a:70000", ":443", "a:b:443", ""]) assert.equal(parseAuthority(bad), null, bad);
@@ -290,6 +473,40 @@ test("the proxy tunnels and forwards when the policy allows the target", async (
   }
 });
 
+test("connectFirst tries the checked addresses in order and stops at the first that connects", async () => {
+  const tried = [];
+  const fakeConnect = (ok) => ({ host }) => {
+    tried.push(host);
+    const socket = new EventEmitter();
+    socket.destroy = () => {};
+    socket.removeListener = EventEmitter.prototype.removeListener;
+    setTimeout(() => (ok(host) ? socket.emit("connect") : socket.emit("error", new Error("ECONNREFUSED"))), 1);
+    return socket;
+  };
+  const socket = await connectFirst(["203.0.113.1", "93.184.215.14", "1.1.1.1"], 443, { connectTo: fakeConnect((host) => host === "93.184.215.14") });
+  assert.ok(socket);
+  assert.deepEqual(tried, ["203.0.113.1", "93.184.215.14"], "the second address after the first failed; not the third");
+  tried.length = 0;
+  await assert.rejects(connectFirst(["a", "b"], 80, { connectTo: fakeConnect(() => false) }), /no address connected/);
+  assert.deepEqual(tried, ["a", "b"]);
+});
+
+test("the proxy serves only clients from the session's internal network", async () => {
+  const check = createClientCheck("172.19.0.0/16");
+  assert.equal(check("172.19.0.3"), true);
+  assert.equal(check("::ffff:172.19.0.3"), true);
+  assert.equal(check("172.17.0.5"), false, "another container on the default bridge");
+  assert.equal(check("127.0.0.1"), false);
+  assert.equal(createClientCheck("garbage")("172.19.0.3"), false, "a bad range lets nobody in");
+  const proxy = await startProxy({ allowClients: "10.99.0.0/16", resolve: async () => ["93.184.215.14"] });
+  try {
+    const reply = await rawRequest(proxy.port, "CONNECT example.com:443 HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert.equal(reply, "", "a client outside the range is disconnected without an answer");
+  } finally {
+    await proxy.close();
+  }
+});
+
 test("host addresses for the block list: every interface address, without zone ids", () => {
   const list = hostAddressesToBlock({
     eth0: [{ address: "152.53.114.172" }, { address: "fe80::1%eth0" }],
@@ -366,9 +583,24 @@ test("a run record counts only with the Server browser marker, for that card and
 });
 
 /** Fake docker for the status and build tests. */
-function fakeDocker({ info = 0, image = false, build = 0, ps = "" } = {}) {
+/**
+ * Fake docker for the status, build, cap and sweep tests. `containers` and `networks` are
+ * `{ id, labels }`; `ps` and `network ls` filter them by `label=k` or `label=k=v` and print the
+ * requested `{{.ID}}\t{{.Label "..."}}` columns, like docker does.
+ */
+function fakeDocker({ info = 0, image = false, build = 0, containers = [], networks = [] } = {}) {
   const calls = [];
-  const state = { image };
+  const state = { image, containers: [...containers], networks: [...networks] };
+  const list = (items, args) => {
+    const filter = args[args.indexOf("--filter") + 1].replace(/^label=/, "");
+    const [key, value] = filter.split(/=(.*)/s);
+    const format = args[args.indexOf("--format") + 1];
+    const columns = [...format.matchAll(/\{\{\.Label "([^"]+)"\}\}/g)].map((m) => m[1]);
+    return items
+      .filter((item) => key in item.labels && (value === undefined || item.labels[key] === value))
+      .map((item) => [item.id, ...columns.map((label) => item.labels[label] ?? "")].join("\t"))
+      .join("\n");
+  };
   const run = async (command, args) => {
     calls.push([command, ...args]);
     const [sub] = args;
@@ -379,12 +611,24 @@ function fakeDocker({ info = 0, image = false, build = 0, ps = "" } = {}) {
       if (build === 0) state.image = true;
       return build === 0 ? { code: 0, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: "ERROR: failed to solve: token=abc123 pull access denied" };
     }
-    if (sub === "ps") return { code: 0, stdout: ps, stderr: "" };
-    if (sub === "rm") return { code: 0, stdout: "", stderr: "" };
+    if (sub === "ps") return { code: 0, stdout: list(state.containers, args), stderr: "" };
+    if (sub === "network" && args[1] === "ls") return { code: 0, stdout: list(state.networks, args), stderr: "" };
+    if (sub === "rm") {
+      state.containers = state.containers.filter((item) => !args.includes(item.id));
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    if (sub === "network" && args[1] === "rm") {
+      state.networks = state.networks.filter((item) => item.id !== args[2]);
+      return { code: 0, stdout: "", stderr: "" };
+    }
     return { code: 1, stdout: "", stderr: "unexpected" };
   };
   return { run, calls, state };
 }
+const browserContainer = (id, agent, { session = `bp-sb-${agent}-s`, pid = "100", role = "browser" } = {}) => ({
+  id,
+  labels: { [CONTAINER_LABEL]: role, [CONTAINER_AGENT_LABEL]: agent, [SESSION_LABEL]: session, [LAUNCHER_PID_LABEL]: pid },
+});
 
 const quiet = () => {};
 /** Waits until the browser's build has finished (polls; no fixed sleep). */
@@ -404,6 +648,9 @@ const makeBrowser = (docker, extra = {}) =>
     log: quiet,
     cacheMs: 0,
     findDocker: async () => "/usr/bin/docker",
+    findNode: async () => "/usr/bin/node",
+    runtimeRoot: mkdtempSync(join(tmpdir(), "bp-sb-runtime-")),
+    alive: () => true,
     dockerHost: async () => "unix:///run/user/1001/docker.sock",
     interfaces: () => ({ eth0: [{ address: "152.53.114.172" }] }),
     random: (() => {
@@ -449,7 +696,8 @@ test("a failed build is reported without credentials, and Build tries again", as
 
 test("prepare issues a ticket only when the image is ready; the ticket opens the session once", async () => {
   const docker = fakeDocker();
-  const browser = makeBrowser(docker);
+  const runtimeRoot = mkdtempSync(join(tmpdir(), "bp-sb-runtime-"));
+  const browser = makeBrowser(docker, { runtimeRoot });
   const notYet = await browser.prepare({ sourceId: "chat", cardId: "card" });
   assert.deepEqual(notYet, { ok: false, state: "building", detail: "" }, "a missing image starts building");
   await settled(browser);
@@ -458,10 +706,54 @@ test("prepare issues a ticket only when the image is ready; the ticket opens the
   assert.equal(browser.consumeTicket(ready.ticket, { sourceId: "chat", cardId: "card" }), true);
   assert.equal(browser.consumeTicket(ready.ticket, { sourceId: "chat", cardId: "card" }), false);
   const mcp = await browser.mcpServer("run-1");
-  assert.equal(mcp.command, "/usr/bin/docker");
-  assert.deepEqual(mcp.env, { DOCKER_HOST: "unix:///run/user/1001/docker.sock" });
-  assert.equal(mcp.args.at(-1), browser.image);
-  assert.ok(mcp.args.includes("BP_BLOCKED_IPS=152.53.114.172"));
+  assert.equal(mcp.server.command, "/usr/bin/node");
+  assert.deepEqual(mcp.server.env, { DOCKER_HOST: "unix:///run/user/1001/docker.sock" });
+  const launcher = mcp.server.args[0];
+  assert.ok(launcher.startsWith(runtimeRoot) && launcher.endsWith("/launch.mjs"));
+  assert.equal(readFileSync(launcher, "utf8"), SERVER_BROWSER_RUNTIME_FILES["launch.mjs"], "the launcher is written to the state directory");
+  const plan = JSON.parse(Buffer.from(mcp.server.args[1], "base64").toString("utf8"));
+  assert.equal(plan.docker, "/usr/bin/docker");
+  assert.equal(plan.browser.run.at(-1), browser.image);
+  assert.ok(plan.browser.run.includes("BP_BLOCKED_IPS=152.53.114.172"));
+  const seccomp = plan.browser.run.find((arg) => arg.startsWith("seccomp="))?.slice("seccomp=".length);
+  assert.equal(readFileSync(seccomp, "utf8"), SERVER_BROWSER_RUNTIME_FILES["seccomp.json"], "the seccomp profile is written next to it");
+  assert.equal(mcp.session, plan.browser.name);
+});
+
+test("at most three runs have a browser at once; the card is told why", async () => {
+  assert.equal(MAX_SERVER_BROWSER_RUNS, 3);
+  const docker = fakeDocker({ image: true, containers: [browserContainer("a1a1a1", "run-a"), browserContainer("b2b2b2", "run-b"), browserContainer("c3c3c3", "run-b", { role: "proxy" })] });
+  const browser = makeBrowser(docker);
+  assert.equal(await browser.activeRuns(), 2, "two runs; a proxy is not a run");
+  const third = await browser.prepare({ sourceId: "chat", cardId: "card-3" });
+  assert.equal(third.ok, true, "the third run may start");
+  assert.deepEqual(await browser.prepare({ sourceId: "chat", cardId: "card-4" }), { ok: false, state: "busy", detail: "" }, "a ticket not used yet counts");
+  assert.match(SERVER_BROWSER_STATE_MESSAGES.busy, /3 Server browser runs already have a browser/);
+  assert.match(SERVER_BROWSER_STATE_MESSAGES.busy, /Archive or close/);
+  docker.state.containers = docker.state.containers.filter((item) => item.labels[CONTAINER_AGENT_LABEL] !== "run-a");
+  browser.consumeTicket(third.ticket, { sourceId: "chat", cardId: "card-3" });
+  assert.equal((await browser.prepare({ sourceId: "chat", cardId: "card-4" })).ok, true, "a slot frees up when a run ends");
+});
+
+test("the sweep removes containers and networks whose launcher is gone, and keeps live sessions", async () => {
+  const docker = fakeDocker({
+    containers: [
+      browserContainer("aaaaaa", "run-a", { pid: "100" }),
+      browserContainer("bbbbbb", "run-a", { pid: "100", role: "proxy" }),
+      browserContainer("cccccc", "run-b", { pid: "200" }),
+      { id: "dddddd", labels: { [CONTAINER_LABEL]: "1", [CONTAINER_AGENT_LABEL]: "old" } },
+    ],
+    networks: [browserContainer("eeeeee", "run-a", { pid: "100", role: "network" }), browserContainer("ffffff", "run-b", { pid: "200", role: "network" })],
+  });
+  const browser = makeBrowser(docker, { alive: (pid) => pid === 100 });
+  assert.equal(await browser.sweep(), 3, "run-b's container and network, and a container from before the launcher");
+  assert.deepEqual(docker.state.containers.map((item) => item.id), ["aaaaaa", "bbbbbb"]);
+  assert.deepEqual(docker.state.networks.map((item) => item.id), ["eeeeee"]);
+  const rm = docker.calls.filter((call) => call[1] === "rm" || call[2] === "rm").map((call) => call.slice(1));
+  assert.deepEqual(rm, [["rm", "-f", "cccccc", "dddddd"], ["network", "rm", "ffffff"]], "containers first, then their networks");
+  assert.equal(processAlive(process.pid), true);
+  assert.equal(processAlive(0), false);
+  assert.equal(processAlive(Number.NaN), false);
 });
 
 /** A host with addHook, recording registrations. */
@@ -482,10 +774,18 @@ function fakeHost({ addHook = true, before = false } = {}) {
 const settingsWith = (runs) => ({ read: async () => ({ status: "ready", values: { runs }, revision: "1" }) });
 
 test("the session-open hook adds the server-browser MCP server only for the run it gated in", async () => {
-  const docker = fakeDocker({ image: true, ps: "abc123def456 bp-sb-run-1-old\n" });
+  const docker = fakeDocker({
+    image: true,
+    containers: [browserContainer("abc123def456", "run-1", { session: "bp-sb-run-1-old", pid: "999" })],
+    networks: [browserContainer("0e0e0e7", "run-1", { session: "bp-sb-run-1-old", pid: "999", role: "network" })],
+  });
   const browser = makeBrowser(docker);
   const { host, hooks } = fakeHost();
   const reg = registerServerBrowser(host, settingsWith([]), browser, { log: quiet });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.ok(docker.calls.some((call) => call[1] === "ps"), "the start sweep ran");
+  assert.equal(docker.state.containers.length, 1, "a live launcher's container is kept by the sweep");
+  docker.calls.length = 0;
   assert.equal(reg.supported, true);
   const open = hooks.get("agent.open.before");
   assert.equal(typeof open, "function");
@@ -500,15 +800,16 @@ test("the session-open hook adds the server-browser MCP server only for the run 
   assert.equal(await open({ request: { ...request, agentId: "run-2" } }, {}), undefined);
   assert.equal(docker.calls.some((call) => call[1] === "rm"), false, "a new run has no earlier containers to remove");
   // Later opens of the same run in this process keep the browser and remove the earlier session's
-  // container (a killed docker client can leave it running), never the new one.
+  // container and network (a killed launcher can leave them), never the new session's.
   const reopened = await open({ request: { ...request, reason: "resume" } }, {});
   assert.ok(reopened?.mcpServers[SERVER_BROWSER_MCP_NAME]);
   await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.deepEqual(docker.calls.filter((call) => call[1] === "rm"), [["/usr/bin/docker", "rm", "-f", "abc123def456"]]);
-  const newName = reopened.mcpServers[SERVER_BROWSER_MCP_NAME].args[reopened.mcpServers[SERVER_BROWSER_MCP_NAME].args.indexOf("--name") + 1];
+  assert.deepEqual(docker.calls.filter((call) => call[1] === "rm" || call[2] === "rm").map((call) => call.slice(1)), [["rm", "-f", "abc123def456"], ["network", "rm", "0e0e0e7"]]);
+  const plan = JSON.parse(Buffer.from(reopened.mcpServers[SERVER_BROWSER_MCP_NAME].args[1], "base64").toString("utf8"));
   docker.calls.length = 0;
-  const keep = makeBrowser(fakeDocker({ ps: `fff000fff000 ${newName}\n` }));
-  assert.equal(await keep.removeContainers("run-1", newName), 0, "the current session's container stays");
+  const keep = makeBrowser(fakeDocker({ containers: [browserContainer("fff000fff000", "run-1", { session: plan.browser.name })] }));
+  assert.equal(await keep.removeContainers("run-1", plan.browser.name), 0, "the current session's container stays");
+  docker.state.containers.push(browserContainer("abc123def456", "run-1", { session: "bp-sb-run-1-old2" }));
   assert.equal(await open({ request: { ...request, agentId: "other", reason: "resume" } }, {}), undefined);
   assert.equal(await open({ request: { ...request, labels: {}, agentId: "plain" } }, {}), undefined);
   // Closing the run removes its containers.
@@ -578,6 +879,24 @@ test("the Server browser prompt: its own tools by their prefixed names, not sign
   const quiet = buildAgentPrompt("T", "1. x", AUTO, undefined, undefined, false, true, false, "server");
   assert.ok(!quiet.includes("10. Screenshots"), "screenshots off: no rule");
   assert.ok(AGENT_SAFETY_PREAMBLE.includes("browser_list_tabs"), "the Paseo browser prompt is unchanged");
+  for (const tool of SERVER_BROWSER_DENIED_TOOLS) assert.ok(prompt.includes(`mcp__server-browser__${tool}`) && !SERVER_BROWSER_TOOLS.includes(tool), tool);
+  assert.match(prompt, /are turned off\./);
+  assert.doesNotMatch(prompt, /browser_install/);
+  assert.match(prompt, /stopped after 2 hours without use and after 12 hours in total/);
+  assert.match(prompt, /do not try to restart it: end your turn with a report that quotes the error and names the last step you completed/);
+});
+
+test("rule 3 is consistent per browser: the owner types secrets in the Paseo browser and Chrome, never in the Server browser", () => {
+  const typeIt = /Ask them to type it into the page themselves and reply "done"/;
+  assert.match(AGENT_SAFETY_PREAMBLE, typeIt);
+  assert.match(CHROME_SAFETY_PREAMBLE, typeIt);
+  assert.doesNotMatch(SERVER_SAFETY_PREAMBLE, typeIt);
+  assert.doesNotMatch(SERVER_SAFETY_PREAMBLE, /type it into the page/);
+  assert.match(SERVER_SAFETY_PREAMBLE, /3\. HARD RULE[^]*any step that needs a password, token, API key, 2FA code or other secret\. In this browser the owner cannot type it in, so do not ask for it: stop at that step/);
+  for (const preamble of [AGENT_SAFETY_PREAMBLE, CHROME_SAFETY_PREAMBLE, SERVER_SAFETY_PREAMBLE]) {
+    assert.match(preamble, /confirming anything destructive or irreversible/);
+    assert.match(preamble, /Never ask the owner to paste a secret into the chat/);
+  }
 });
 
 test("the launch says where a Server browser run works, and the browser setting parses", () => {
@@ -607,11 +926,13 @@ test("Playwright tools: screenshots reach the card, typed keys are masked, form 
   assert.equal(click.complete, true);
 });
 
-test("settings v19: the Server browser is a usual way on desktop and phones; older documents stay as they are", () => {
+test("settings: the Server browser is a usual way on desktop and phones without a version bump, so a rollback keeps reading them", () => {
   const v18 = { startMode: "paseo", mobileStartMode: "copy-only", runs: [["a:c", "r", "browser:chrome"]], done: [] };
-  assert.deepEqual(migratePreferences(v18, 18), v18);
+  assert.deepEqual(migratePreferences(v18, 17), { ...v18 });
   const settings = readFileSync(new URL("../shared/settings.ts", import.meta.url), "utf8");
-  assert.match(settings, /version: 19,/);
+  assert.match(settings, /version: 18,/, "an older plugin refuses any document saved by a newer settings version");
+  const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
+  assert.match(changelog.slice(0, changelog.indexOf("## 0.20.5")), /[Rr]ollback/);
   const launch = readFileSync(new URL("../client/launch.ts", import.meta.url), "utf8");
   assert.match(launch, /way !== "server"/, "the Command Center opens ChatGPT when the usual way is the Server browser");
 });

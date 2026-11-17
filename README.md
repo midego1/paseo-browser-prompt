@@ -202,7 +202,7 @@ connected app shares them.
 | Setting | Default | What it does |
 | --- | --- | --- |
 | Status | – | Ready, Building the image…, Image not built yet, Image build failed (with the reason), Docker missing or Docker not reachable, and whether Docker runs rootless. |
-| Build the image | – | Builds the pinned image on the Paseo server (also started by the first press of the Server browser button). |
+| Build the image | – | Builds the pinned image on the Paseo server (also started by the first press of the Server browser button). At most 3 Server browser runs have a browser at once. |
 
 **ChatGPT launcher**
 
@@ -262,10 +262,11 @@ Rules:
   calls), or in Always Ask or Plan when you choose them, and always prepends the fixed safety
   preamble. Bypass and accept-edits modes are refused, and a run that ends up in one is stopped.
 - A Server browser run gets its own headless Chromium in a throwaway Docker container on the Paseo
-  server, with no host mounts, every capability dropped, a read-only root file system and memory,
-  CPU and process limits. Its traffic goes through a filtering proxy that refuses tailnet, private,
-  loopback and link-local addresses and the server's own addresses (see
-  [Server browser](#server-browser) and [SECURITY.md](SECURITY.md)). It is signed in to nothing.
+  server, alone on an internal network with no route out, with no host mounts, a read-only root
+  file system, Chromium's own sandbox and memory, CPU and process limits. A separate proxy sidecar
+  is its only way out and refuses tailnet, private, loopback and link-local addresses and the
+  server's own addresses (see [Server browser](#server-browser) and [SECURITY.md](SECURITY.md)). It
+  is signed in to nothing.
 - The preamble's rules (only the Paseo browser tools, the Server browser's Playwright tools, or the extension's with Claude in Chrome; ask before secrets and risky actions) are
   instructions to the model, not a tool sandbox: whether they are followed depends on the selected
   provider and model. Always Ask lets you approve each new tool yourself.
@@ -736,57 +737,95 @@ is a fresh, isolated profile that is **not signed in to any of your accounts**: 
 pages and checks, and the Paseo browser for anything behind a login. A run that hits a login stops
 there and tells you to use the Paseo browser; it never asks for, types or creates credentials.
 
-**Needs:** Docker on the Paseo server (rootless Docker works and is recommended) and a Paseo that
-offers agent session hooks (`agent.open.before`, or `agent.session_open` on older hosts). The first
-press of the button (or **Build** under Settings › Server browser) builds the image
-`browser-prompt-server-browser:pw1.56.0-mcp0.0.41-<hash>` from [`server-browser/`](server-browser/)
-in this repository: `FROM mcr.microsoft.com/playwright:v1.56.0-noble` pinned by digest, plus
-`@playwright/mcp` 0.0.41 installed with `npm ci` from a lock file, plus the plugin's proxy and entry
-point. The tag carries the pinned versions and a hash of the build context, never `latest`, and the
-container is started with `--pull never`. To build by hand: `npm run server-browser:image`. Until the
+**Needs:** Docker on the Paseo server (rootless Docker works and is recommended), `node` on the
+server (the daemon's own), and a Paseo that offers agent session hooks (`agent.open.before`, or
+`agent.session_open` on older hosts). The first press of the button (or **Build** under Settings ›
+Server browser) builds the image `browser-prompt-server-browser:pw1.65.1-mcp0.0.84-<hash>` from
+[`server-browser/`](server-browser/) in this repository: `FROM mcr.microsoft.com/playwright:v1.65.1-noble`
+pinned by digest, plus `@playwright/mcp` 0.0.84 installed with `npm ci` from a lock file, with npm
+`overrides` pinning its Playwright to 1.65.1 so it uses exactly the image's Chromium (revision
+1255). The tag carries the pinned versions and a hash of the build context, never `latest`, and
+containers start with `--pull never`. To build by hand: `npm run server-browser:image`. Until the
 image is ready, or when Docker is missing, the button explains why and starts nothing.
+
+**Release checklist:** on every plugin release, bump the base image to the newest
+`mcr.microsoft.com/playwright:vX.Y.Z-noble` (pin its digest in the Dockerfile and `BASE_IMAGE`),
+move `@playwright/mcp` and the `overrides` to the matching Playwright version, regenerate
+`server-browser/package-lock.json`, run `node scripts/embed-server-browser.mjs`, build the image and
+run the smoke test (a page loads; tailnet, private and host addresses are refused).
 
 **How it runs.** Before creating the agent the card asks the daemon for a one-time ticket
 (`server-browser.prepare`, valid 5 minutes, bound to this chat and card, issued only when the image
-is ready). The run is created with the labels above. When its session opens, the plugin's
-`agent.open.before` hook adds an MCP server named `server-browser` (stdio: `docker run -i --rm --init
-… <image>`) only for an agent with the run labels and `browser-prompt-browser: server`, and only
-with the ticket (on create, before the card can record the run) or the card's run record with the
-`browser:server` marker (resume and reload). Every other agent gets nothing. Each session open
-starts its own container; it ends when the session closes its stdio. Because a killed `docker run`
-client can leave its container running for a while, the plugin also removes a run's earlier
-containers when its session opens again and all of them when the run is closed or archived, and
-each container stops itself after 2 hours without an MCP message and after 12 hours in total.
+is ready and fewer than 3 Server browser runs have a browser). The run is created with the labels
+above. When its session opens, the plugin's `agent.open.before` hook adds an MCP server named
+`server-browser` only for an agent with the run labels and `browser-prompt-browser: server`, and
+only with the ticket (on create, before the card can record the run) or the card's run record with
+the `browser:server` marker (resume and reload). Every other agent gets nothing.
 
-**Isolation** (all in `shared/server-browser.ts`, `serverBrowserDockerArgs`): no host mounts (only a
-512 MB tmpfs on `/tmp`), the default bridge network (never `host`), public DNS (1.1.1.1, 9.9.9.9)
-instead of the host's or the tailnet's, `--cap-drop ALL`, `--security-opt no-new-privileges`,
-`--read-only`, the unprivileged `pwuser`, 1.5 GB memory without extra swap, 1.5 CPUs, 512 processes,
-no container log. Chromium runs headless with an in-memory profile, no downloads, service workers
-blocked, WebRTC limited to proxied UDP, and Playwright MCP's output directory inside the container.
-File uploads can only pick files inside the container, and screenshots are saved there too.
-Chromium's own sandbox is off (it cannot start without user namespaces or privileges); the container
-is the sandbox.
+The MCP server is a small launcher on the host (`node <state dir>/server-browser/runtime-<hash>/launch.mjs <plan>`,
+[`server-browser/launch.mjs`](server-browser/launch.mjs); the plan holds every docker argument). Per
+session it creates:
 
-**Network.** Chromium sends every request (loopback included) through a small filtering proxy in the
-container ([`server-browser/proxy.mjs`](server-browser/proxy.mjs)). For each request it resolves the
-host itself, refuses `localhost`, `*.ts.net`, `*.local`, `*.internal`, `*.home.arpa`, `*.lan` and
-the other names in the list, refuses the name when any of its addresses is in 10/8, 100.64/10
-(Tailscale), 127/8, 169.254/16, 172.16/12, 192.168/16, 0/8, multicast, reserved or documentation
-ranges, `::1`, `fc00::/7` (Tailscale's `fd7a:115c:a1e0::/48`), `fe80::/10`, NAT64, 6to4 or
-IPv4-mapped forms, or is one of the Paseo server's own addresses, and then connects to exactly the
-address it checked. A refused page shows "Blocked by the browser-prompt Server browser". Playwright
-MCP's origin block list repeats the name rules. What is not blocked is listed in
+1. an **internal Docker network** (`--internal`: no gateway, no route out, no outside DNS);
+2. a **proxy sidecar** container on Docker's default bridge, connected to that internal network; it
+   is the only container with a way out, and it serves only clients from the internal network;
+3. the **browser container**, on the internal network only, attached to the launcher's stdio (the
+   MCP transport), with the sidecar as Chromium's proxy.
+
+When the session closes its stdio (or the launcher gets a signal) the launcher removes the browser
+container, the sidecar and the network. Every resource carries the launcher's process id as a label:
+when the plugin starts, and every 10 minutes, it removes resources whose launcher is gone (after a
+daemon restart, or a killed launcher), and it removes a run's earlier session resources when its
+session opens again and all of them when the run is closed or archived. Each container also stops
+itself after 2 hours without an MCP message and after 12 hours in total. The agent then sees its
+browser tools fail; it is told not to restart anything and to end with a report that quotes the
+error and names the last step it completed, so you can run the rest again.
+
+At most **3** Server browser runs have a browser at once on a host. A press beyond that shows "3
+Server browser runs already have a browser on the server …"; archive or close a finished run (or
+turn on **Archive the agent after a successful run**), or wait until one ends.
+
+**Isolation** (`shared/server-browser.ts`, `serverBrowserDockerArgs` and `serverBrowserProxyArgs`):
+no host mounts (only tmpfs on `/tmp`), no published ports or devices, `--cap-drop ALL`,
+`--security-opt no-new-privileges`, `--read-only`, the unprivileged `pwuser`, memory without extra
+swap, CPU and process limits, no container log, never pulls. The browser container: 1.5 GB, 1.5
+CPUs, 512 processes, Playwright's seccomp profile
+([`server-browser/seccomp.json`](server-browser/seccomp.json), Playwright's
+`utils/docker/seccomp_profile.json` from v1.65.1, Apache-2.0: Docker's default profile plus user
+namespaces) and `CAP_SYS_CHROOT` in the bounding set only, so **Chromium's own sandbox runs**;
+`pwuser` itself has no effective capability and cannot chroot. The sidecar: 256 MB, 0.5 CPU, 64
+processes, Docker's default seccomp profile, public DNS (1.1.1.1, 9.9.9.9). Chromium runs headless
+with an in-memory profile, no downloads, service workers blocked, `file://` navigation blocked
+(Playwright MCP's default; local files are never allowed), WebRTC limited to proxied UDP, and
+Playwright MCP's output directory inside the container. Playwright MCP's `browser_run_code_unsafe`
+(code in its Node process), `browser_file_upload` and `browser_drop` (files) cannot be configured
+off, so the container's entry point filters the MCP stream: they are removed from `tools/list` and
+refused in `tools/call` ([`server-browser/mcp-filter.mjs`](server-browser/mcp-filter.mjs)).
+
+**Network.** The boundary is the internal network: the browser container (Chromium and Playwright
+MCP alike) has no route anywhere but the sidecar; a direct connection to a tailnet, private, public
+or host address fails with "network unreachable", and outside names do not resolve. Chromium sends
+every request (loopback included) to the sidecar's filtering proxy
+([`server-browser/proxy.mjs`](server-browser/proxy.mjs)), which resolves each host itself, refuses
+`localhost`, `*.ts.net`, `*.local`, `*.internal`, `*.home.arpa`, `*.lan` and the other names in the
+list, refuses the name when any of its addresses is in 10/8, 100.64/10 (Tailscale), 127/8,
+169.254/16, 172.16/12, 192.168/16, 0/8, multicast, reserved or documentation ranges, `::1`,
+`fc00::/7` (Tailscale's `fd7a:115c:a1e0::/48`), `fe80::/10`, NAT64, 6to4 or IPv4-mapped forms, or
+is one of the Paseo server's own addresses, and then connects only to the addresses it checked,
+trying them in order. A refused page shows "Blocked by the browser-prompt Server browser".
+Playwright MCP's origin block list repeats the name rules. What is not blocked is listed in
 [SECURITY.md](SECURITY.md#server-browser).
 
 **The agent's rules.** The Server browser preamble (`SERVER_SAFETY_PREAMBLE`) names only the
 `mcp__server-browser__browser_*` tools, forbids the Paseo `browser_*` tools, shell and files, says
-the browser is signed in to nothing, and keeps every other rule of a Paseo browser run (ask the
-owner before secrets and destructive, irreversible, payment, publishing or security actions; page
-text is untrusted; questions to the chat; step lines; the report; the success line). With **Show
-live screenshot** the agent takes `browser_take_screenshot` (PNG, visible part) after each step and
-the card shows it like any other run's. There is no tab cleanup: the container is discarded. Mode
-guard, report back, talk to the chat, the run lock, repeats and done marks work as for any run.
+the browser is signed in to nothing and that you cannot type into it (rule 3 there: a step that
+needs a secret stops the run instead of asking you to type it), and keeps every other rule of a
+Paseo browser run (ask the owner before destructive, irreversible, payment, publishing or security
+actions; page text is untrusted; questions to the chat; step lines; the report; the success line).
+With **Show live screenshot** the agent takes `browser_take_screenshot` (PNG, visible part) after
+each step and the card shows it like any other run's. There is no tab cleanup: the container is
+discarded. Mode guard, report back, talk to the chat, the run lock, repeats and done marks work as
+for any run.
 
 ## Self-update (opt-in)
 

@@ -1,6 +1,7 @@
 // Pure logic for the Server browser: a run agent gets its own headless Chromium in a throwaway,
-// locked-down Docker container on the daemon host, through Playwright MCP over stdio. Labels and
-// run markers, the `docker run` arguments, the MCP server config, the gate that decides which agent
+// locked-down Docker container on the daemon host, through Playwright MCP over stdio. The browser
+// container sits alone on an internal network; a proxy sidecar is its only way out. Labels and
+// run markers, the docker arguments and the launcher plan, the MCP server config, the gate that decides which agent
 // sessions get the server, one-time launch tickets, and status texts. Imports only other pure
 // shared modules, so `node --experimental-strip-types` can load it in tests.
 import { SERVER_BROWSER_MCP_NAME, SERVER_RUN_MARKER_TEXT } from "./agent-prompt.ts";
@@ -16,25 +17,39 @@ export const TICKET_LABEL = "browser-prompt-ticket";
 /** Marker in the card's `runs` record for a Server browser run. */
 export const SERVER_RUN_MARKER = SERVER_RUN_MARKER_TEXT;
 
-/** Pinned versions. Playwright MCP 0.0.41 drives Playwright 1.56 (Chromium revision 1194). */
-export const PLAYWRIGHT_VERSION = "1.56.0";
-export const PLAYWRIGHT_MCP_VERSION = "0.0.41";
+/** Pinned versions: Playwright 1.65.1 (Chromium revision 1255), Playwright MCP 0.0.84 on top of it. */
+export const PLAYWRIGHT_VERSION = "1.65.1";
+export const PLAYWRIGHT_MCP_VERSION = "0.0.84";
 export const BASE_IMAGE =
-  "mcr.microsoft.com/playwright:v1.56.0-noble@sha256:35246d87a7c88ea9b771c65d33171b2611b02a8253b4b12ce6f94376c55f99f2";
+  "mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579";
 export const IMAGE_REPOSITORY = "browser-prompt-server-browser";
 
-/** `browser-prompt-server-browser:pw1.56.0-mcp0.0.41-<12 hex of the build context hash>`, never `latest`. */
+/** `browser-prompt-server-browser:pw<playwright>-mcp<mcp>-<12 hex of the build context hash>`, never `latest`. */
 export function serverBrowserImageTag(contextHash: string): string {
   const hash = contextHash.toLowerCase().replace(/[^0-9a-f]/g, "").slice(0, 12);
   if (hash.length < 12) throw new Error("The image tag needs a build context hash.");
   return `${IMAGE_REPOSITORY}:pw${PLAYWRIGHT_VERSION}-mcp${PLAYWRIGHT_MCP_VERSION}-${hash}`;
 }
 
-/** Docker labels on every Server browser container, so they can be found and removed. */
+/**
+ * Docker labels on every Server browser resource. CONTAINER_LABEL's value is the role (`browser`,
+ * `proxy`, `network`, `image`); the launcher label holds the host pid of the session's launcher, so
+ * resources whose launcher is gone can be removed.
+ */
 export const CONTAINER_LABEL = "browser-prompt.server-browser";
 export const CONTAINER_AGENT_LABEL = "browser-prompt.agent";
+export const SESSION_LABEL = "browser-prompt.session";
+export const LAUNCHER_PID_LABEL = "browser-prompt.launcher-pid";
+/** Placeholders the launcher fills in (see server-browser/launch.mjs). */
+export const PID_PLACEHOLDER = "__BP_PID__";
+export const SUBNET_PLACEHOLDER = "__BP_SUBNET__";
+export const PROXY_IP_PLACEHOLDER = "__BP_PROXY_IP__";
+export const PROXY_PORT = 3128;
 
-/** Resource limits per container. */
+/** At most this many Server browser runs have a browser at the same time on one host. */
+export const MAX_SERVER_BROWSER_RUNS = 3;
+
+/** Resource limits per browser container, and the stops every container applies to itself. */
 export const CONTAINER_LIMITS = {
   memory: "1536m",
   cpus: "1.5",
@@ -47,19 +62,22 @@ export const CONTAINER_LIMITS = {
   idleTimeoutSeconds: 2 * 60 * 60,
 } as const;
 
-/** Public resolvers for the container, so it never uses the host's (or the tailnet's) DNS. */
+/** Limits of the proxy sidecar. */
+export const PROXY_LIMITS = { memory: "256m", cpus: "0.5", pids: 64, tmpfs: "16m" } as const;
+
+/** Public resolvers for the sidecar, so names never go to the host's (or the tailnet's) resolver. */
 export const CONTAINER_DNS = ["1.1.1.1", "9.9.9.9"] as const;
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const IP_TEXT = /^[0-9A-Fa-f:.]{2,45}$/;
 
-/** Agent ids go into a container name and a label; anything unusual is refused. */
+/** Agent ids go into container names and labels; anything unusual is refused. */
 export function safeAgentId(agentId: string): string {
   if (!SAFE_ID.test(agentId)) throw new Error("Unexpected agent id for a Server browser container.");
   return agentId;
 }
 
-/** `bp-sb-<agent id>-<nonce>`: unique per session open, at most 63 characters. */
+/** `bp-sb-<agent id>-<nonce>`: unique per session open, at most 63 characters with a suffix. */
 export function containerName(agentId: string, nonce: string): string {
   const id = safeAgentId(agentId).replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 36);
   const suffix = nonce.replace(/[^A-Za-z0-9]/g, "").slice(0, 12) || "0";
@@ -67,9 +85,9 @@ export function containerName(agentId: string, nonce: string): string {
 }
 
 /**
- * The daemon host's own addresses, for the container's block list: a service on the host that
- * listens on all interfaces is then not reachable through its public address either. Takes the
- * shape of `os.networkInterfaces()`; drops zone ids and anything that does not look like an address.
+ * The daemon host's own addresses, for the block list: a service on the host that listens on all
+ * interfaces is then not reachable through its public address either. Takes the shape of
+ * `os.networkInterfaces()`; drops zone ids and anything that does not look like an address.
  */
 export function hostAddressesToBlock(interfaces: Record<string, readonly { address: string }[] | undefined>): string[] {
   const out = new Set<string>();
@@ -85,23 +103,115 @@ export function hostAddressesToBlock(interfaces: Record<string, readonly { addre
 export interface DockerArgsInput {
   image: string;
   agentId: string;
-  /** Unique part of the container name. */
+  /** Unique part of the resource names. */
   nonce: string;
   /** The host's own addresses (see `hostAddressesToBlock`). */
   blockedIps: readonly string[];
+  /** Host path of the seccomp profile the browser container uses (Playwright's, allowing user namespaces). */
+  seccompProfile: string;
+}
+
+function checkImage(image: string) {
+  if (!image.startsWith(`${IMAGE_REPOSITORY}:`) || image.endsWith(":latest")) throw new Error("The Server browser only runs its own pinned image.");
+}
+
+function sessionLabels(input: DockerArgsInput, role: string): string[] {
+  return [
+    "--label",
+    `${CONTAINER_LABEL}=${role}`,
+    "--label",
+    `${CONTAINER_AGENT_LABEL}=${safeAgentId(input.agentId)}`,
+    "--label",
+    `${SESSION_LABEL}=${containerName(input.agentId, input.nonce)}`,
+    "--label",
+    `${LAUNCHER_PID_LABEL}=${PID_PLACEHOLDER}`,
+  ];
+}
+
+/** The session's names: browser container, proxy sidecar and internal network. */
+export function sessionNames(agentId: string, nonce: string) {
+  const base = containerName(agentId, nonce);
+  return { browser: base, proxy: `${base}-proxy`, network: `${base}-net` };
+}
+
+/** `docker network create` for the session's internal network: no gateway, no route out. */
+export function serverBrowserNetworkArgs(input: DockerArgsInput): string[] {
+  return ["network", "create", "--internal", "--driver", "bridge", ...sessionLabels(input, "network"), sessionNames(input.agentId, input.nonce).network];
 }
 
 /**
- * `docker run` arguments for one Server browser session. Isolation: no host mounts (only tmpfs),
- * default bridge network (never `host`), public DNS, every capability dropped, no new privileges,
- * read-only root file system, an unprivileged user, memory, CPU and process limits, no log kept,
- * never pulls (the image is built locally), and `--rm --init -i`: the container ends with the
- * session's stdio and is removed.
+ * `docker run -d` for the proxy sidecar: the only container of the session with a route out (the
+ * default bridge; the launcher then connects it to the internal network). It accepts clients only
+ * from the internal network. Same hardening as the browser: no mounts, every capability dropped, no
+ * new privileges, read-only root, unprivileged user, limits, no log, never pulls.
+ */
+export function serverBrowserProxyArgs(input: DockerArgsInput): string[] {
+  checkImage(input.image);
+  const ips = input.blockedIps.filter((ip) => IP_TEXT.test(ip));
+  return [
+    "run",
+    "-d",
+    "--rm",
+    "--init",
+    "--pull",
+    "never",
+    "--name",
+    sessionNames(input.agentId, input.nonce).proxy,
+    ...sessionLabels(input, "proxy"),
+    "--network",
+    "bridge",
+    ...CONTAINER_DNS.flatMap((dns) => ["--dns", dns]),
+    "--cap-drop",
+    "ALL",
+    "--security-opt",
+    "no-new-privileges",
+    "--read-only",
+    "--tmpfs",
+    `/tmp:rw,nosuid,nodev,size=${PROXY_LIMITS.tmpfs}`,
+    "--memory",
+    PROXY_LIMITS.memory,
+    "--memory-swap",
+    PROXY_LIMITS.memory,
+    "--cpus",
+    PROXY_LIMITS.cpus,
+    "--pids-limit",
+    String(PROXY_LIMITS.pids),
+    "--user",
+    "pwuser",
+    "--workdir",
+    "/tmp",
+    "--hostname",
+    "server-browser-proxy",
+    "--env",
+    `BP_BLOCKED_IPS=${ips.join(",")}`,
+    "--env",
+    `BP_ALLOW_CLIENTS=${SUBNET_PLACEHOLDER}`,
+    "--env",
+    `BP_PROXY_PORT=${PROXY_PORT}`,
+    "--env",
+    `BP_MAX_LIFETIME_S=${CONTAINER_LIMITS.maxLifetimeSeconds}`,
+    "--log-driver",
+    "none",
+    "--stop-timeout",
+    "2",
+    "--entrypoint",
+    "node",
+    input.image,
+    "/opt/browser-prompt/proxy-main.mjs",
+  ];
+}
+
+/**
+ * `docker run -i` for the browser container, attached to the session's stdio. It is on the internal
+ * network only, so it reaches nothing but the sidecar; external names do not even resolve there.
+ * No mounts (only tmpfs), every capability dropped except CAP_SYS_CHROOT in the bounding set (for
+ * Chromium's own sandbox inside its user namespace; the container user has no effective
+ * capabilities), no new privileges, Playwright's seccomp profile, read-only root, unprivileged user,
+ * memory, CPU and process limits, no log, never pulls, and `--rm --init`.
  */
 export function serverBrowserDockerArgs(input: DockerArgsInput): string[] {
-  if (!input.image.startsWith(`${IMAGE_REPOSITORY}:`) || input.image.endsWith(":latest")) {
-    throw new Error("The Server browser only runs its own pinned image.");
-  }
+  checkImage(input.image);
+  if (!input.seccompProfile.startsWith("/") || /[,\s]/.test(input.seccompProfile)) throw new Error("The seccomp profile needs an absolute path.");
   const ips = input.blockedIps.filter((ip) => IP_TEXT.test(ip));
   const limits = CONTAINER_LIMITS;
   return [
@@ -112,18 +222,18 @@ export function serverBrowserDockerArgs(input: DockerArgsInput): string[] {
     "--pull",
     "never",
     "--name",
-    containerName(input.agentId, input.nonce),
-    "--label",
-    `${CONTAINER_LABEL}=1`,
-    "--label",
-    `${CONTAINER_AGENT_LABEL}=${safeAgentId(input.agentId)}`,
+    sessionNames(input.agentId, input.nonce).browser,
+    ...sessionLabels(input, "browser"),
     "--network",
-    "bridge",
-    ...CONTAINER_DNS.flatMap((dns) => ["--dns", dns]),
+    sessionNames(input.agentId, input.nonce).network,
     "--cap-drop",
     "ALL",
+    "--cap-add",
+    "SYS_CHROOT",
     "--security-opt",
     "no-new-privileges",
+    "--security-opt",
+    `seccomp=${input.seccompProfile}`,
     "--read-only",
     "--tmpfs",
     `/tmp:rw,nosuid,nodev,size=${limits.tmpfs}`,
@@ -146,6 +256,8 @@ export function serverBrowserDockerArgs(input: DockerArgsInput): string[] {
     "--env",
     "HOME=/tmp/home",
     "--env",
+    `BP_PROXY=http://${PROXY_IP_PLACEHOLDER}:${PROXY_PORT}`,
+    "--env",
     `BP_BLOCKED_IPS=${ips.join(",")}`,
     "--env",
     `BP_MAX_LIFETIME_S=${limits.maxLifetimeSeconds}`,
@@ -159,6 +271,25 @@ export function serverBrowserDockerArgs(input: DockerArgsInput): string[] {
   ];
 }
 
+/** Everything the launcher (server-browser/launch.mjs) runs for one session. */
+export interface ServerBrowserPlan {
+  docker: string;
+  network: { name: string; create: string[] };
+  proxy: { name: string; run: string[] };
+  browser: { name: string; run: string[] };
+}
+
+export function serverBrowserPlan(docker: string, input: DockerArgsInput): ServerBrowserPlan {
+  if (!docker.startsWith("/")) throw new Error("docker must be an absolute path");
+  const names = sessionNames(input.agentId, input.nonce);
+  return {
+    docker,
+    network: { name: names.network, create: serverBrowserNetworkArgs(input) },
+    proxy: { name: names.proxy, run: serverBrowserProxyArgs(input) },
+    browser: { name: names.browser, run: serverBrowserDockerArgs(input) },
+  };
+}
+
 export interface StdioServer {
   type: "stdio";
   command: string;
@@ -166,9 +297,17 @@ export interface StdioServer {
   env?: Record<string, string>;
 }
 
-/** The MCP server a Server browser run gets: `docker run ...` over stdio. */
-export function serverBrowserMcpServer(docker: string, args: string[], dockerHost?: string | null): StdioServer {
-  return { type: "stdio", command: docker, args, ...(dockerHost ? { env: { DOCKER_HOST: dockerHost } } : {}) };
+/** Base64 of UTF-8 JSON, without Node's Buffer (this module also runs in the app). */
+function base64Json(value: unknown): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+/** The MCP server a Server browser run gets: `node launch.mjs <plan>` over stdio. */
+export function serverBrowserMcpServer(node: string, launcher: string, plan: ServerBrowserPlan, dockerHost?: string | null): StdioServer {
+  return { type: "stdio", command: node, args: [launcher, base64Json(plan)], ...(dockerHost ? { env: { DOCKER_HOST: dockerHost } } : {}) };
 }
 
 /** Labels that mark a run as a Server browser run, with its launch ticket. */
@@ -251,15 +390,23 @@ export function createTicketStore(options: { ttlMs?: number; max?: number; now?:
       return entry.expires > now() && entry.sourceId === target.sourceId && entry.cardId === target.cardId;
     },
     size: () => tickets.size,
+    /** Tickets issued and not used or expired yet: runs about to start. */
+    pending(): number {
+      const t = now();
+      let count = 0;
+      for (const entry of tickets.values()) if (entry.expires > t) count++;
+      return count;
+    },
   };
 }
 
-export const SERVER_BROWSER_STATES = ["ready", "building", "no-image", "build-failed", "docker-missing", "docker-unavailable", "unsupported"] as const;
+export const SERVER_BROWSER_STATES = ["ready", "building", "no-image", "build-failed", "docker-missing", "docker-unavailable", "unsupported", "busy"] as const;
 export type ServerBrowserState = (typeof SERVER_BROWSER_STATES)[number];
 
 /** What the card and the settings say for each state. */
 export const SERVER_BROWSER_STATE_MESSAGES: Record<ServerBrowserState, string> = {
   ready: "Ready.",
+  busy: `${MAX_SERVER_BROWSER_RUNS} Server browser runs already have a browser on the server (the limit). Archive or close a finished Server browser run (or turn on Archive the agent after a successful run), or wait until one ends, then try again.`,
   building: "The Server browser image is being built on the server (first use; a few minutes). Try again when Settings shows it ready.",
   "no-image": "The Server browser image is not built yet. Building it starts now; try again in a few minutes.",
   "build-failed": "Building the Server browser image failed. See the plugin settings, fix the cause and build again.",

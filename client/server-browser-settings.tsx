@@ -17,6 +17,7 @@ const STATE_LABELS = {
   "docker-missing": "Docker missing: the docker command was not found on the Paseo server",
   "docker-unavailable": "Docker not reachable on the Paseo server",
   unsupported: "Not available: this Paseo has no agent session hooks",
+  busy: "Ready; the limit of runs with a browser at the same time is reached",
 } as const;
 
 /** Server browser status (Docker and its image on the daemon host), with a build button. */

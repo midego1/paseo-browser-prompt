@@ -1,12 +1,13 @@
-// Filtering HTTP proxy for the browser-prompt Server browser. It runs inside the container next to
-// Playwright MCP, and Chromium sends every HTTP(S) and WebSocket request through it (Playwright
+// Filtering HTTP proxy for the browser-prompt Server browser. It runs in its own sidecar container
+// (proxy-main.mjs), the only one of a session with a route out: the browser container sits alone on
+// an internal Docker network and Chromium sends every HTTP(S) and WebSocket request here (Playwright
 // also proxies loopback for Chromium). For each request it resolves the host itself, refuses
 // tailnet and local names and every private, loopback, link-local, CGNAT (Tailscale), multicast,
 // documentation or otherwise reserved address, plus the daemon host's own addresses, and then
 // connects to exactly the address it checked, so a name that resolves (or re-resolves) to a
 // private address is refused too. No dependencies: Node's standard library only.
 import { lookup } from "node:dns/promises";
-import { createServer, request as httpRequest } from "node:http";
+import { Agent, createServer, request as httpRequest } from "node:http";
 import { BlockList, connect, isIP } from "node:net";
 
 /** IPv4 ranges that are never reachable from the Server browser. */
@@ -140,7 +141,58 @@ export async function resolveTarget(policy, host, resolve = systemResolve) {
   }
   if (addresses.length === 0) return { refused: "not found" };
   if (addresses.some((address) => policy.blockedAddress(address))) return { refused: "blocked address" };
-  return { address: addresses[0], family: isIP(addresses[0]) };
+  return { address: addresses[0], family: isIP(addresses[0]), addresses };
+}
+
+/**
+ * Connects to the checked addresses in order and resolves with the first socket that connects, or
+ * rejects when none does. Only addresses `resolveTarget` checked are ever tried.
+ */
+export function connectFirst(addresses, port, { timeoutMs = 10_000, connectTo = connect } = {}) {
+  return new Promise((resolve, reject) => {
+    let index = 0;
+    const next = () => {
+      if (index >= addresses.length) {
+        reject(new Error("no address connected"));
+        return;
+      }
+      const address = addresses[index++];
+      const socket = connectTo({ host: address, port, family: isIP(address) || undefined });
+      const timer = setTimeout(() => socket.destroy(new Error("timeout")), timeoutMs);
+      const failed = () => {
+        clearTimeout(timer);
+        socket.removeAllListeners("connect");
+        socket.destroy();
+        next();
+      };
+      socket.once("error", failed);
+      socket.once("connect", () => {
+        clearTimeout(timer);
+        socket.removeListener("error", failed);
+        resolve(socket);
+      });
+    };
+    next();
+  });
+}
+
+/**
+ * Which clients may use the proxy: only addresses in `cidr` (the session's internal network). Other
+ * containers on Docker's default bridge can reach the sidecar too and are turned away.
+ */
+export function createClientCheck(cidr) {
+  if (!cidr) return () => true;
+  const match = /^([0-9a-fA-F:.]+)\/(\d{1,3})$/.exec(String(cidr).trim());
+  if (!match) return () => false;
+  const family = isIP(match[1]);
+  if (!family) return () => false;
+  const list = new BlockList();
+  list.addSubnet(match[1], Number(match[2]), family === 4 ? "ipv4" : "ipv6");
+  return (remote) => {
+    const address = normalizeAddress(remote);
+    const kind = isIP(address);
+    return kind !== 0 && list.check(address, kind === 4 ? "ipv4" : "ipv6");
+  };
 }
 
 /** `host:port` of a CONNECT request, with bracketed IPv6; null when malformed. */
@@ -174,15 +226,32 @@ function forwardHeaders(rawHeaders) {
 }
 
 /**
- * Starts the proxy on 127.0.0.1 (a random port unless `port` is given). Handles CONNECT tunnels
- * (HTTPS, WSS, also ws:// from Chromium) and absolute-form plain HTTP requests. Returns
+ * Starts the proxy on `host` (127.0.0.1 unless given; the sidecar uses 0.0.0.0) and `port` (random
+ * unless given). Handles CONNECT tunnels (HTTPS, WSS, also ws:// from Chromium) and absolute-form
+ * plain HTTP requests. Clients outside `allowClients` (a CIDR) are disconnected at once. Returns
  * `{ port, close() }`.
  */
-export async function startProxy({ extraBlocked = [], port = 0, resolve = systemResolve, log = () => {}, policy: given } = {}) {
+export async function startProxy({
+  extraBlocked = [],
+  host = "127.0.0.1",
+  port = 0,
+  allowClients = "",
+  resolve = systemResolve,
+  log = () => {},
+  policy: given,
+  connectTo,
+} = {}) {
   const policy = given ?? createPolicy(extraBlocked);
+  const clientAllowed = createClientCheck(allowClients);
   const server = createServer();
   server.maxConnections = 512;
   server.keepAliveTimeout = 30_000;
+  server.on("connection", (socket) => {
+    if (!clientAllowed(socket.remoteAddress)) {
+      log(`refused client ${normalizeAddress(socket.remoteAddress)}`);
+      socket.destroy();
+    }
+  });
 
   server.on("connect", (req, clientSocket, head) => {
     clientSocket.on("error", () => {});
@@ -200,19 +269,21 @@ export async function startProxy({ extraBlocked = [], port = 0, resolve = system
         );
         return;
       }
-      const upstream = connect({ host: resolved.address, port: target.port, family: resolved.family });
-      upstream.setTimeout(300_000, () => upstream.destroy());
-      upstream.on("error", () => {
-        if (!clientSocket.destroyed) clientSocket.end("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-      });
-      upstream.on("connect", () => {
-        clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-        if (head && head.length) upstream.write(head);
-        upstream.pipe(clientSocket);
-        clientSocket.pipe(upstream);
-      });
-      clientSocket.on("close", () => upstream.destroy());
-      upstream.on("close", () => clientSocket.destroy());
+      connectFirst(resolved.addresses, target.port, { connectTo }).then(
+        (upstream) => {
+          upstream.setTimeout(300_000, () => upstream.destroy());
+          upstream.on("error", () => clientSocket.destroy());
+          clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+          if (head && head.length) upstream.write(head);
+          upstream.pipe(clientSocket);
+          clientSocket.pipe(upstream);
+          clientSocket.on("close", () => upstream.destroy());
+          upstream.on("close", () => clientSocket.destroy());
+        },
+        () => {
+          if (!clientSocket.destroyed) clientSocket.end("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        },
+      );
     });
   });
 
@@ -235,25 +306,36 @@ export async function startProxy({ extraBlocked = [], port = 0, resolve = system
         res.writeHead(403, { "Content-Type": "text/plain", "X-Browser-Prompt-Blocked": resolved.refused.replace(/\s/g, "-") }).end(BLOCKED_MESSAGE);
         return;
       }
-      const upstream = httpRequest({
-        host: resolved.address,
-        family: resolved.family,
-        port,
-        method: req.method,
-        path: `${url.pathname}${url.search}`,
-        headers: forwardHeaders(req.rawHeaders),
-        setHost: false,
-      });
-      upstream.setTimeout(300_000, () => upstream.destroy());
-      upstream.on("response", (response) => {
-        res.writeHead(response.statusCode ?? 502, response.statusMessage, forwardHeaders(response.rawHeaders));
-        response.pipe(res);
-      });
-      upstream.on("error", () => {
-        if (!res.headersSent) res.writeHead(502, { "Content-Type": "text/plain" }).end("Upstream error.");
-        else res.destroy();
-      });
-      req.pipe(upstream);
+      connectFirst(resolved.addresses, port, { connectTo }).then(
+        (socket) => {
+          // A one-off agent whose only connection is the checked socket: nothing is pooled, so a
+          // later request can never reuse a connection made for another host.
+          const agent = new Agent({ keepAlive: false, maxSockets: 1 });
+          agent.createConnection = () => socket;
+          const upstream = httpRequest({
+            agent,
+            host: resolved.address,
+            port,
+            method: req.method,
+            path: `${url.pathname}${url.search}`,
+            headers: forwardHeaders(req.rawHeaders),
+            setHost: false,
+          });
+          upstream.setTimeout(300_000, () => upstream.destroy());
+          upstream.on("response", (response) => {
+            res.writeHead(response.statusCode ?? 502, response.statusMessage, forwardHeaders(response.rawHeaders));
+            response.pipe(res);
+          });
+          upstream.on("error", () => {
+            if (!res.headersSent) res.writeHead(502, { "Content-Type": "text/plain" }).end("Upstream error.");
+            else res.destroy();
+          });
+          req.pipe(upstream);
+        },
+        () => {
+          if (!res.headersSent) res.writeHead(502, { "Content-Type": "text/plain" }).end("Upstream error.");
+        },
+      );
     });
   });
 
@@ -268,7 +350,7 @@ export async function startProxy({ extraBlocked = [], port = 0, resolve = system
 
   await new Promise((resolveListen, reject) => {
     server.once("error", reject);
-    server.listen(port, "127.0.0.1", () => resolveListen());
+    server.listen(port, host, () => resolveListen());
   });
   const address = server.address();
   return {

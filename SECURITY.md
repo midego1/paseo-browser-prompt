@@ -38,29 +38,50 @@ The plugin does not read the clipboard, does not log prompt text, and sends no t
 **What runs where.** The run's agent runs on your Paseo daemon like any run. A Paseo browser run
 drives the tabs of your Paseo desktop app (that browser lives only in the desktop app), a Claude in
 Chrome run your real Chrome. A Server browser run instead gets a headless Chromium in its own Docker
-container on the daemon host, started by the agent's provider process as an MCP server over stdio
-(`docker run -i --rm --init … browser-prompt-server-browser:<pinned tag>`). The plugin adds that
-server only to agents that carry the plugin's run labels plus `browser-prompt-browser: server`, and
-only with a one-time ticket the daemon issued for that chat and card right before the run was
-created, or, when an existing run's session opens again, with the card's run record marked
-`browser:server`. No other agent gets it, and an agent that copies the labels gets it only with a
-fresh, unused ticket.
+container on the daemon host. The agent's provider process starts the plugin's launcher
+(`node …/launch.mjs <plan>`) as an MCP server over stdio; per session the launcher creates an
+internal Docker network, a proxy sidecar and the browser container, and removes all three when the
+session ends. The plugin adds that MCP server only to agents that carry the plugin's run labels plus
+`browser-prompt-browser: server`, and only with a one-time ticket the daemon issued for that chat
+and card right before the run was created, or, when an existing run's session opens again, with the
+card's run record marked `browser:server`. No other agent gets it, and an agent that copies the
+labels gets it only with a fresh, unused ticket. At most 3 runs have a browser at once.
 
-**What is isolated.** The container has no host mounts (only a tmpfs on `/tmp`), no published ports,
-no devices and no host network: it uses Docker's default bridge (with rootless Docker, user-mode
-networking whose host-loopback access is off by default). It runs as the image's unprivileged
-`pwuser` with every capability dropped, `no-new-privileges`, a read-only root file system, Docker's
-default seccomp profile, 1.5 GB of memory without extra swap, 1.5 CPUs, at most 512 processes and no
-container log, and it never pulls an image. The browser profile is in memory, downloads are refused,
-service workers are blocked, and Playwright MCP's files (screenshots, any upload choice) stay in the
-container, which is removed when the session ends. A killed `docker run` client may leave it
-running briefly; the plugin removes a run's earlier containers when its session reopens and all of
-them when the run is closed or archived, and the container stops itself after 2 hours without an MCP
-message and after 12 hours in total. The browser is not
-signed in to anything and holds none of your cookies.
+**What is isolated.**
 
-**What is blocked.** Every Chromium request (HTTP, HTTPS, WebSocket, also to loopback) goes through
-a proxy inside the container that resolves the name itself and refuses:
+- The browser container is alone on an `--internal` Docker network: no gateway and no route to
+  anything but the sidecar, and names outside it do not resolve. Chromium and the Playwright MCP
+  process share that container, so a browser exploit or a misused tool has no network path except
+  the proxy, which applies the rules below in a different container.
+- The proxy sidecar is the only container of the session with a route out (Docker's default bridge;
+  with rootless Docker, user-mode networking whose host-loopback access is off by default). It
+  accepts connections only from the session's internal network, so other containers on the bridge
+  cannot use it.
+- Both containers: no host mounts (only tmpfs on `/tmp`), no published ports, no devices, the image's
+  unprivileged `pwuser`, `--cap-drop ALL`, `no-new-privileges`, a read-only root file system, memory
+  without extra swap, CPU and process limits (browser 1.5 GB / 1.5 CPUs / 512 processes, sidecar 256
+  MB / 0.5 CPU / 64), no container log, never pulled.
+- The browser container uses Playwright's seccomp profile (Docker's default plus user namespaces;
+  Playwright's `utils/docker/seccomp_profile.json`, v1.65.1) and keeps `CAP_SYS_CHROOT` in its
+  bounding set only, so Chromium's own sandbox (namespace sandbox) runs; `pwuser` has no effective
+  capability and cannot chroot. It does not start with `--cap-drop ALL` alone: the zygote cannot set
+  up its sandbox without that capability inside its user namespace, and with Docker's default
+  seccomp profile it cannot create the namespace at all. The sidecar keeps Docker's default profile.
+- The browser profile is in memory, downloads are refused, service workers are blocked, `file://`
+  navigation is blocked, and Playwright MCP's files (screenshots, snapshots) stay in the container.
+  `browser_run_code_unsafe` (code in Playwright MCP's Node process), `browser_file_upload` and
+  `browser_drop` are removed from the tool list and refused by a filter on the MCP stream, because
+  Playwright MCP cannot turn them off. The browser is not signed in to anything and holds none of
+  your cookies.
+- Lifecycle: the launcher removes the session's containers and network when the session closes its
+  stdio. A killed launcher may leave them; the plugin removes resources whose launcher process is
+  gone when it starts and every 10 minutes, a run's earlier session resources when its session
+  reopens, and all of a run's resources when it is closed or archived. Each container stops itself
+  after 2 hours without an MCP message and after 12 hours in total; the agent then reports that its
+  browser stopped and which step it reached.
+
+**What is blocked.** Every Chromium request (HTTP, HTTPS, WebSocket, also to loopback) goes to the
+sidecar's proxy, which resolves the name itself and refuses:
 
 - names: `localhost`, `ts.net`, `beta.tailscale.net`, `local`, `internal`, `home.arpa`, `lan`,
   `localdomain` and every subdomain of them (so every `*.ts.net` MagicDNS name), whatever they
@@ -74,36 +95,39 @@ a proxy inside the container that resolves the name itself and refuses:
   `fec0::/10`, `ff00::/8`, and IPv4-mapped addresses checked as IPv4;
 - every address on the Paseo server's own network interfaces (for example its public address, where
   services that listen on all interfaces could otherwise be reached);
-- a name for which any resolved address is in those ranges. The proxy then connects to the very
-  address it checked, so DNS rebinding cannot swap it in between, and a public name that points to
-  127.0.0.1 or a tailnet address (`127.0.0.1.nip.io`, `localtest.me`) is refused.
+- a name for which any resolved address is in those ranges. The proxy then connects only to the
+  addresses it checked (in order, the next one when one fails), so DNS rebinding cannot swap them
+  in between, and a public name that points to 127.0.0.1 or a tailnet address (`127.0.0.1.nip.io`,
+  `localtest.me`) is refused.
 
-Playwright MCP's origin block list repeats the name rules and the server's addresses. The container
+Playwright MCP's origin block list repeats the name rules and the server's addresses. The sidecar
 uses public DNS (1.1.1.1, 9.9.9.9), never the host's resolver or Tailscale's MagicDNS, and Chromium
-may not send WebRTC UDP around the proxy.
+may not send WebRTC UDP around the proxy (it has no route for it anyway).
 
 **What is not blocked.**
 
-- The public internet: any public address and site, including your own services that are reachable
-  publicly (other servers' public addresses, a public IP of this server that is not on one of its
-  interfaces, such as a NAT or floating IP), and any port Chromium allows. A page or a misled agent
-  can send what it saw to any public site.
-- Host names are sent to the public resolvers (and to the sites). Names on the block list are refused
-  before any lookup.
-- Only Chromium's traffic goes through the proxy. The two Node processes in the container (the
-  proxy and Playwright MCP) have the container's unfiltered network. Playwright MCP 0.0.41 has no tool
-  that runs code in Node (`browser_evaluate` runs in the page, through the proxy), and
-  `browser_install` cannot write to the read-only file system; a newer Playwright MCP may change
-  this, which is one reason the version is pinned.
-- Chromium's own sandbox is off, because it cannot start without user namespaces or extra
-  privileges in this container; a browser exploit gets the container, not the host. With rootless
-  Docker a container escape would get the daemon user's rights (with rootful Docker, root's): Docker
-  is the isolation boundary here, so keep it updated.
+- The public internet, through the proxy: any public address and site, including your own services
+  that are reachable publicly (other servers' public addresses, a public IP of this server that is
+  not on one of its interfaces, such as a NAT or floating IP), and any port Chromium allows. A page
+  or a misled agent can send what it saw to any public site.
+- Host names are sent to the public resolvers (and to the sites). Names on the block list are
+  refused before any lookup.
+- The proxy sidecar itself can reach every address (its rules are what stops it); a flaw in the
+  proxy's code is therefore the remaining path to private addresses. It is small, uses only Node's
+  standard library, and runs in its own locked-down container.
+- Docker is the isolation boundary. With rootless Docker a container escape would get the daemon
+  user's rights (with rootful Docker, root's), so keep Docker and the pinned images updated (see the
+  release checklist below).
 - Page content and screenshots reach the agent's model provider, as in any run, and the agent's
   rules (no secrets, ask before risky actions, stop at a login) are instructions to a model, not
   enforced controls. The agent keeps its other tools as in any run; Always Ask lets you approve each
   one.
-- Each session gets its own container, so several runs at once each use up to the limits above.
+
+**Release checklist.** On every plugin release, bump the Server browser's base image to the newest
+`mcr.microsoft.com/playwright:vX.Y.Z-noble`, pinned by digest (`server-browser/Dockerfile` and
+`BASE_IMAGE`), move `@playwright/mcp` and its `overrides` to the matching Playwright version, update
+`seccomp.json` from that Playwright tag, regenerate the lock file and the embedded copy
+(`node scripts/embed-server-browser.mjs`), and rerun the smoke test.
 
 ## Design limits
 
