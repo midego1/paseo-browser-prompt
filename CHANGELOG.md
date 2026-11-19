@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.21.1 (unreleased)
+
+- The Server browser image is downloaded (about 2.6 GB) and built only when you choose to:
+  Settings › Server browser › **Download and build**, then **Confirm download**. Pressing Server
+  browser on a card never starts a download any more; until the image is there it says how to set
+  it up.
+
 ## 0.21.0 (unreleased)
 
 - New: Paseo › **Server browser** on the card, next to Paseo browser. It starts a Paseo agent with

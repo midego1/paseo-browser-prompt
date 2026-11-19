@@ -4,7 +4,7 @@ import { SERVER_BROWSER_STATES } from "./server-browser";
 
 const state = z.enum(SERVER_BROWSER_STATES);
 
-/** The Server browser's state on this host; `build: true` starts building a missing image. */
+/** The Server browser's state on this host; `build: true` (only from the settings' Download and build, the owner's explicit choice) starts building a missing image. */
 export const serverBrowserStatus = defineRpc({
   name: "server-browser.status",
   input: z.object({ build: z.boolean().optional() }),

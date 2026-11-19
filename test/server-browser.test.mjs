@@ -743,7 +743,9 @@ test("prepare issues a ticket only when the image is ready; the ticket opens the
   const runtimeRoot = mkdtempSync(join(tmpdir(), "bp-sb-runtime-"));
   const browser = makeBrowser(docker, { runtimeRoot });
   const notYet = await browser.prepare({ sourceId: "chat", cardId: "card" });
-  assert.deepEqual(notYet, { ok: false, state: "building", detail: "" }, "a missing image starts building");
+  assert.deepEqual(notYet, { ok: false, state: "no-image", detail: "" }, "a missing image is reported, never built from a run");
+  assert.equal(docker.calls.filter((c) => c[1] === "build").length, 0, "prepare downloads nothing");
+  await browser.status({ build: true });
   await settled(browser);
   const ready = await browser.prepare({ sourceId: "chat", cardId: "card" });
   assert.equal(ready.ok, true);
@@ -1086,7 +1088,8 @@ test("the card checks Docker before a Server browser run and starts it only with
   const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
   assert.match(card, /onRunPress\("server"\)/);
   assert.match(card, /"Again: Server browser" : "Server browser"/);
-  assert.match(card, /serverStatus\(\{ build: true \}\)/);
+  assert.match(card, /serverStatus\(\{\}\)/);
+  assert.doesNotMatch(card, /build: true/, "the card never starts a download or build");
   assert.match(card, /if \(status\.state !== "ready"\) reason =/);
   assert.match(card, /prepareServerRun\(\{ sourceAgentId: agentId, cardId \}\)/);
   assert.match(card, /extraLabels = serverRunLabels\(prepared\.ticket\)/);
@@ -1101,4 +1104,11 @@ test("the card checks Docker before a Server browser run and starts it only with
   assert.match(entry, /server\.handle\(serverBrowserStatus/);
   assert.match(entry, /server\.handle\(prepareServerBrowserRun/);
   assert.ok(TICKET_LABEL.startsWith("browser-prompt"));
+});
+
+test("the image is downloaded only after two presses in the settings", () => {
+  const settings = readFileSync(new URL("../client/server-browser-settings.tsx", import.meta.url), "utf8");
+  assert.match(settings, /"Confirm download"/);
+  assert.match(settings, /if \(!confirmBuild\) \{\s*setConfirmBuild\(true\);\s*return;/);
+  assert.match(settings, /about 2\.6 GB/);
 });

@@ -382,10 +382,10 @@ export function createServerBrowser(options: ServerBrowserOptions = {}) {
   return {
     image,
     status,
-    /** Fresh check, starts a build when the image is missing, and issues a ticket only when ready. */
+    /** Fresh check; issues a ticket only when ready. Never builds: only the settings' Build does. */
     async prepare(target: { sourceId: string; cardId: string }) {
       cached = null;
-      const current = await status({ build: true });
+      const current = await status();
       if (current.state !== "ready") return { ok: false as const, state: current.state, detail: current.detail };
       // Runs with a browser now, runs starting, and runs about to start (tickets not used yet) count.
       let held: number;

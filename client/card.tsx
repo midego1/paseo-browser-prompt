@@ -492,10 +492,11 @@ export function BrowserPromptCard({
     let launch: ResolvedLaunch;
     try {
       if (browser === "server") {
-        // No run without Docker and the image; a missing image starts building now.
+        // No run without Docker and the image. The card never downloads or builds it: that is the
+        // owner's explicit choice in the plugin settings (it downloads about 2.6 GB).
         let reason: string | null = null;
         try {
-          const status = await within(serverStatus({ build: true }), SERVER_BROWSER_RPC_TIMEOUT_MS);
+          const status = await within(serverStatus({}), SERVER_BROWSER_RPC_TIMEOUT_MS);
           if (status.state !== "ready") reason = `${SERVER_BROWSER_STATE_MESSAGES[status.state]}${status.detail ? ` (${status.detail})` : ""}`;
         } catch (error) {
           reason = `Could not check the Server browser: ${error instanceof Error ? error.message : String(error)}`;
