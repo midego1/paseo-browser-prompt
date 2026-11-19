@@ -17,8 +17,8 @@ export const serverBrowserStatus = defineRpc({
 });
 
 /**
- * Right before a Server browser run is created: checks Docker and the image again (building it when
- * missing) and returns a one-time ticket for this chat and card. The run's first session open needs
+ * Right before a Server browser run is created: checks Docker and the image again (never building
+ * it) and returns a one-time ticket for this chat and card. The run's first session open needs
  * it, because the card can only record the run after it exists.
  */
 export const prepareServerBrowserRun = defineRpc({

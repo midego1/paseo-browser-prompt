@@ -2,7 +2,7 @@ import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useRpc } from "@getpaseo/plugin/client";
 import { SettingsAction, SettingsCard, SettingsRow, SettingsSection } from "@getpaseo/plugin/client/ui";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Text } from "react-native";
 import { SERVER_BROWSER_STATE_MESSAGES } from "../shared/server-browser";
 import { serverBrowserStatus } from "../shared/server-browser-rpc";
@@ -37,6 +37,14 @@ export function ServerBrowserSettings({ theme }: Pick<PluginSurfaceProps, "theme
   const rootless = info?.rootless === true ? " · rootless Docker" : info?.rootless === false ? " · Docker is not rootless" : "";
   const canBuild = info?.state === "no-image" || info?.state === "build-failed";
   const [confirmBuild, setConfirmBuild] = useState(false);
+  // An armed confirmation is dropped when the state changes and after 10 seconds, so an old first
+  // press never turns a later single press into a download.
+  useEffect(() => setConfirmBuild(false), [info?.state]);
+  useEffect(() => {
+    if (!confirmBuild) return;
+    const timer = setTimeout(() => setConfirmBuild(false), 10_000);
+    return () => clearTimeout(timer);
+  }, [confirmBuild]);
 
   return (
     <SettingsSection title="Server browser">
@@ -54,7 +62,7 @@ export function ServerBrowserSettings({ theme }: Pick<PluginSurfaceProps, "theme
               ? `Downloads the pinned Playwright base image from Microsoft's registry (about 2.6 GB) and builds ${info.image} on the Paseo server from the plugin's Dockerfile. Nothing is downloaded until you confirm.`
               : undefined
           }
-          actionLabel={info?.state === "building" ? "Building…" : confirmBuild ? "Confirm download" : "Download and build"}
+          actionLabel={info?.state === "building" ? "Building…" : confirmBuild ? "Confirm download (2.6 GB)" : "Download and build"}
           disabled={!canBuild}
           onPress={async () => {
             // Two presses: the download happens only on the owner's explicit confirmation.

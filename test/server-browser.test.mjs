@@ -1108,7 +1108,17 @@ test("the card checks Docker before a Server browser run and starts it only with
 
 test("the image is downloaded only after two presses in the settings", () => {
   const settings = readFileSync(new URL("../client/server-browser-settings.tsx", import.meta.url), "utf8");
-  assert.match(settings, /"Confirm download"/);
+  assert.match(settings, /"Confirm download \(2\.6 GB\)"/);
+  assert.match(settings, /useEffect\(\(\) => setConfirmBuild\(false\), \[info\?\.state\]\)/, "a state change drops an armed confirmation");
+  assert.match(settings, /setTimeout\(\(\) => setConfirmBuild\(false\), 10_000\)/, "and so do 10 seconds");
   assert.match(settings, /if \(!confirmBuild\) \{\s*setConfirmBuild\(true\);\s*return;/);
   assert.match(settings, /about 2\.6 GB/);
+});
+
+test("status without build never starts a download", async () => {
+  const docker = fakeDocker();
+  const browser = makeBrowser(docker, {});
+  assert.equal((await browser.status()).state, "no-image");
+  assert.equal((await browser.status({})).state, "no-image");
+  assert.equal(docker.calls.filter((c) => c[1] === "build").length, 0);
 });

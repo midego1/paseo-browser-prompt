@@ -37,7 +37,7 @@
   or without the instance label are never touched. Each container stops after 2 hours idle and 12 hours in
   total; the agent then reports the step it reached.
 - The image (`browser-prompt-server-browser:pw1.65.1-mcp0.0.84-<hash>`, never `latest`) is built
-  locally from `server-browser/` on first use: Playwright 1.65.1 base image pinned by digest, and
+  locally from `server-browser/` (from 0.21.1 only after Download and build in the settings): Playwright 1.65.1 base image pinned by digest, and
   `@playwright/mcp` 0.0.84 on the same Playwright 1.65.1 from a lock file. Settings › Server browser
   shows ready, building, failed or Docker missing, with a Build button; `npm run server-browser:image`
   builds it by hand. Until it is ready the button explains why and starts nothing. The release
