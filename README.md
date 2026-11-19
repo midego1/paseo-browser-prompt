@@ -202,7 +202,7 @@ connected app shares them.
 | Setting | Default | What it does |
 | --- | --- | --- |
 | Status | – | Ready, Building the image…, Image not built yet, Image build failed (with the reason), Docker missing or Docker not reachable, and whether Docker runs rootless. |
-| Build the image | – | Builds the pinned image on the Paseo server (also started by the first press of the Server browser button). At most 3 Server browser runs have a browser at once. |
+| Download and build | – | Downloads the pinned base image (about 2.6 GB) and builds the Server browser image on the Paseo server, only after a second press (Confirm download). The card never downloads or builds it. At most 3 Server browser runs have a browser at once. |
 
 **ChatGPT launcher**
 

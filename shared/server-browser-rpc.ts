@@ -4,7 +4,7 @@ import { SERVER_BROWSER_STATES } from "./server-browser";
 
 const state = z.enum(SERVER_BROWSER_STATES);
 
-/** The Server browser's state on this host; `build: true` starts building a missing image. */
+/** The Server browser's state on this host; `build: true` (only from the settings' Download and build, the owner's explicit choice) starts building a missing image. */
 export const serverBrowserStatus = defineRpc({
   name: "server-browser.status",
   input: z.object({ build: z.boolean().optional() }),
@@ -17,8 +17,8 @@ export const serverBrowserStatus = defineRpc({
 });
 
 /**
- * Right before a Server browser run is created: checks Docker and the image again (building it when
- * missing) and returns a one-time ticket for this chat and card. The run's first session open needs
+ * Right before a Server browser run is created: checks Docker and the image again (never building
+ * it) and returns a one-time ticket for this chat and card. The run's first session open needs
  * it, because the card can only record the run after it exists.
  */
 export const prepareServerBrowserRun = defineRpc({

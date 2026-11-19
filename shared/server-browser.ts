@@ -443,8 +443,8 @@ export type ServerBrowserState = (typeof SERVER_BROWSER_STATES)[number];
 export const SERVER_BROWSER_STATE_MESSAGES: Record<ServerBrowserState, string> = {
   ready: "Ready.",
   busy: `${MAX_SERVER_BROWSER_RUNS} Server browser runs already have a browser on the server (the limit). Archive or close a finished Server browser run (or turn on Archive the agent after a successful run), or wait until one ends, then try again.`,
-  building: "The Server browser image is being built on the server (first use; a few minutes). Try again when Settings shows it ready.",
-  "no-image": "The Server browser image is not built yet. Building it starts now; try again in a few minutes.",
+  building: "The Server browser image is being downloaded and built on the server (a few minutes). Try again when Settings shows it ready.",
+  "no-image": "The Server browser is not set up on this server yet. Set it up once in the plugin settings (Server browser → Download and build; about 2.6 GB), then try again.",
   "build-failed": "Building the Server browser image failed. See the plugin settings, fix the cause and build again.",
   "docker-missing": "The Server browser needs Docker on the Paseo server, and the docker command was not found there.",
   "docker-unavailable": "The Server browser needs Docker on the Paseo server, and Docker is not reachable there (is the rootless Docker service running?).",
