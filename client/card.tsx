@@ -1,5 +1,5 @@
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
-import { useAgent, usePaseo, useRpc, useSettings } from "@getpaseo/plugin/client";
+import { openExternalUrl, useAgent, usePaseo, useRpc, useSettings } from "@getpaseo/plugin/client";
 import { Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
@@ -7,6 +7,8 @@ import { z } from "zod";
 import { agentTitle, CHROME_RUN_MARKER, chromeAvailable, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, runBrowserOf, describeLaunch, type BrowserAgent } from "../shared/agent-prompt";
 import { SERVER_BROWSER_STATE_MESSAGES, SERVER_RUN_MARKER, serverRunLabels } from "../shared/server-browser";
 import { prepareServerBrowserRun, serverBrowserStatus } from "../shared/server-browser-rpc";
+import { SIGNED_IN_RUN_MARKER, SIGNED_IN_STATE_MESSAGES, signedInRunLabels } from "../shared/signed-in";
+import { prepareSignedInRun, signedInStatus, signedInViewerLink } from "../shared/signed-in-rpc";
 import { MOST_RECENT_FALLBACK } from "../shared/report-back";
 import {
   addRunRecord,
@@ -55,10 +57,19 @@ const RUN_LOCK_RPC_TIMEOUT_MS = 5_000;
 const DESKTOP_HINT = "Your Paseo desktop app must be open: the agent drives the browser tabs there.";
 const CHROME_HINT = "Chrome must be open with the Claude extension signed in: the agent works there.";
 const SERVER_HINT = "Runs in a browser on the Paseo server: no desktop app needed, but not signed in to your accounts.";
-const HINTS: Record<BrowserAgent, string> = { paseo: DESKTOP_HINT, chrome: CHROME_HINT, server: SERVER_HINT };
-const BROWSER_NAMES: Record<BrowserAgent, string> = { paseo: "in Paseo browser", chrome: "in Chrome", server: "in server browser" };
+const SIGNED_IN_HINT =
+  "Runs in your signed-in browser on the Paseo server: no desktop app needed. Use Take over to watch it, or to log in or enter a 2FA code from any device (in a new tab: the agent cannot see tabs you open).";
+const HINTS: Record<BrowserAgent, string> = { paseo: DESKTOP_HINT, chrome: CHROME_HINT, server: SERVER_HINT, "signed-in": SIGNED_IN_HINT };
+const BROWSER_NAMES: Record<BrowserAgent, string> = {
+  paseo: "in Paseo browser",
+  chrome: "in Chrome",
+  server: "in server browser",
+  "signed-in": "in signed-in server browser",
+};
 /** How long the card waits for the Server browser status or ticket. */
 const SERVER_BROWSER_RPC_TIMEOUT_MS = 20_000;
+/** The signed-in browser may have to start first (up to about a minute and a half). */
+const SIGNED_IN_RPC_TIMEOUT_MS = 150_000;
 
 /** Rejects when the RPC does not answer in time. */
 function within<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -143,6 +154,10 @@ export function BrowserPromptCard({
   const lockRun = useRpc(acquireRunLock);
   const serverStatus = useRpc(serverBrowserStatus);
   const prepareServerRun = useRpc(prepareServerBrowserRun);
+  const signedInState = useRpc(signedInStatus);
+  const prepareSignedIn = useRpc(prepareSignedInRun);
+  const viewerLink = useRpc(signedInViewerLink);
+  const [openingViewer, setOpeningViewer] = useState(false);
   const unlockRun = useRpc(finishRunLock);
   const startMode = settings.status === "ready" ? settings.values.startMode : DEFAULT_MODES.startMode;
   const mobileStartMode =
@@ -372,7 +387,13 @@ export function BrowserPromptCard({
       startedAgentId,
       ...(fallback ? [MOST_RECENT_FALLBACK] : []),
       runKeyMarker(key),
-      ...(browser === "chrome" ? [CHROME_RUN_MARKER] : browser === "server" ? [SERVER_RUN_MARKER] : []),
+      ...(browser === "chrome"
+        ? [CHROME_RUN_MARKER]
+        : browser === "server"
+          ? [SERVER_RUN_MARKER]
+          : browser === "signed-in"
+            ? [SIGNED_IN_RUN_MARKER]
+            : []),
     ];
     const saved = await saveWithRetries(newestSettings, (values) => ({ ...values, runs: addRunRecord(values.runs, entry, MAX_RUNS) }));
     if (!saved) toast.error("Could not record the agent on this card; it will not report back to this chat.");
@@ -435,6 +456,16 @@ export function BrowserPromptCard({
         }
         extraLabels = serverRunLabels(prepared.ticket);
       }
+      // A signed-in run: the browser starts if needed, and only one run at a time may hold it.
+      if (browser === "signed-in") {
+        const prepared = await within(prepareSignedIn({ sourceAgentId: agentId, cardId }), SIGNED_IN_RPC_TIMEOUT_MS);
+        if (!prepared.ok) {
+          const detail = prepared.detail ? ` (${prepared.detail})` : "";
+          toast.error(`${SIGNED_IN_STATE_MESSAGES[prepared.state]}${detail}`);
+          return;
+        }
+        extraLabels = signedInRunLabels(prepared.ticket);
+      }
       const started = await startBrowserAgent(paseo, {
         sourceAgentId: agentId,
         cardId,
@@ -464,7 +495,8 @@ export function BrowserPromptCard({
       const where = started.workspaceSource === "most-recent" ? " in your most recent workspace" : "";
       // Background by default: the card shows the run's status and its Open link.
       const open = opensAgentOnStart(values);
-      toast.show(`Paseo agent started${where}${browser === "server" ? " with the server browser" : ""}.`, { variant: "success", durationMs: 3000 });
+      const withBrowser = browser === "server" ? " with the server browser" : browser === "signed-in" ? " with your signed-in server browser" : "";
+      toast.show(`Paseo agent started${where}${withBrowser}.`, { variant: "success", durationMs: 3000 });
       if (open) openRunScreen(started.agentId, agentTitle(title, displayTitle), true);
     } catch (error) {
       const message = `Could not start a Paseo agent: ${error instanceof Error ? error.message : String(error)}`;
@@ -506,6 +538,22 @@ export function BrowserPromptCard({
           return;
         }
       }
+      if (browser === "signed-in") {
+        // Never downloads or builds: that is the owner's explicit choice in the plugin settings.
+        let reason: string | null = null;
+        try {
+          const status = await within(signedInState({}), SERVER_BROWSER_RPC_TIMEOUT_MS);
+          if (status.state !== "ready" && status.state !== "running" && status.state !== "failed") {
+            reason = `${SIGNED_IN_STATE_MESSAGES[status.state]}${status.detail ? ` (${status.detail})` : ""}`;
+          } else if (status.busy) reason = SIGNED_IN_STATE_MESSAGES.busy;
+        } catch (error) {
+          reason = `Could not check the signed-in browser: ${error instanceof Error ? error.message : String(error)}`;
+        }
+        if (reason) {
+          if (seq === pressSeq.current) toast.error(reason);
+          return;
+        }
+      }
       launch = await resolveLaunch(paseo, settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS, browser);
     } finally {
       if (seq === pressSeq.current) setResolving(false);
@@ -515,6 +563,24 @@ export function BrowserPromptCard({
     if (confirmLaunch) setConfirmOpen(true);
     else if ("error" in launch) toast.error(`Could not start a Paseo agent: ${launch.error}`);
     else void launchAgent(launch);
+  }
+
+  /** Opens the owner's viewer of the signed-in browser (a one-time link from the daemon, never shown in chat). */
+  async function takeOver() {
+    if (openingViewer) return;
+    setOpeningViewer(true);
+    try {
+      const link = await within(viewerLink({ purpose: "takeover", portrait: mobile }), SIGNED_IN_RPC_TIMEOUT_MS);
+      if (!link.ok) {
+        toast.error(`${SIGNED_IN_STATE_MESSAGES[link.state]}${link.detail ? ` (${link.detail})` : ""}`);
+        return;
+      }
+      await openExternalUrl(link.url);
+    } catch (error) {
+      toast.error(`Could not open the signed-in browser: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setOpeningViewer(false);
+    }
   }
 
   const runVisuals = shownState === "asking" ? { icon: "CircleAlert", color: theme.colors.statusWarning } : runVisual(runState, theme);
@@ -587,6 +653,15 @@ export function BrowserPromptCard({
             disabled={busy || resolving || runBlocked}
             styles={styles}
             onPress={() => void onRunPress("server")}
+          />
+          <WayButton
+            label={runAgentId ? "Again: Signed in" : "Server (signed in)"}
+            a11y={`Run ${displayTitle} with a Paseo agent in your signed-in browser on the Paseo server, which you can take over from any device`}
+            hint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
+            highlighted={defaultMode === "signed-in"}
+            disabled={busy || resolving || runBlocked}
+            styles={styles}
+            onPress={() => void onRunPress("signed-in")}
           />
         </View>
         <View style={styles.group} accessibilityRole="toolbar" accessibilityLabel="ChatGPT">
@@ -696,6 +771,20 @@ export function BrowserPromptCard({
           >
             <Text style={styles.link}>Open</Text>
           </Pressable>
+          {runBrowser === "signed-in" && (active || runState === "needs-input" || shownState === "asking") ? (
+            <>
+              <Text style={styles.hint}>·</Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Take over the signed-in browser for ${displayTitle}`}
+                accessibilityHint="Opens the signed-in browser on the Paseo server, where you can watch, log in or enter a code"
+                disabled={openingViewer}
+                onPress={() => void takeOver()}
+              >
+                <Text style={styles.link}>{openingViewer ? "Opening…" : "Take over"}</Text>
+              </Pressable>
+            </>
+          ) : null}
         </View>
       ) : null}
       {runAgentId && showSteps ? (
@@ -761,7 +850,9 @@ export function BrowserPromptCard({
           <Text style={styles.modalText}>
             {pendingBrowser === "server"
               ? "Start a Paseo agent to do these steps in a browser on the Paseo server? It is not signed in to your accounts."
-              : "Start a Paseo agent to do these steps in your browser?"}
+              : pendingBrowser === "signed-in"
+                ? "Start a Paseo agent to do these steps in your signed-in browser on the Paseo server? It works with the sites you logged in to there."
+                : "Start a Paseo agent to do these steps in your browser?"}
           </Text>
           {active ? <Text style={[styles.hint, { color: theme.colors.statusWarning }]}>A run of these steps is still going. This starts a second one.</Text> : null}
           {launchError ? (
@@ -769,7 +860,7 @@ export function BrowserPromptCard({
           ) : pendingLaunch && "config" in pendingLaunch ? (
             <Text style={styles.hint}>{describeLaunch(pendingLaunch.config, pendingLaunch.browser)}</Text>
           ) : null}
-          {layout.compact || pendingBrowser === "server" ? <Text style={styles.hint}>{HINTS[pendingBrowser]}</Text> : null}
+          {layout.compact || pendingBrowser === "server" || pendingBrowser === "signed-in" ? <Text style={styles.hint}>{HINTS[pendingBrowser]}</Text> : null}
           <View style={styles.modalActions}>
             <Pressable accessibilityRole="button" onPress={() => setConfirmOpen(false)} style={styles.secondary}>
               <Text style={styles.secondaryText}>Cancel</Text>

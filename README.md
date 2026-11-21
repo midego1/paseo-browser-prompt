@@ -7,6 +7,7 @@ into a card with a button for each way to run the steps, in three groups, each w
 | --- | --- |
 | Paseo › **Paseo browser** | Starts a Paseo agent that works in the browser tabs of your Paseo desktop app, with step progress and a screenshot per step on the card. |
 | Paseo › **Server browser** | Starts a Paseo agent with its own headless Chromium in a throwaway Docker container on the Paseo server: no desktop app needed (also on phones), but not signed in to any of your accounts, and tailnet and private addresses are blocked. For public pages and checks. See [Server browser](#server-browser). |
+| Paseo › **Server (signed in)** | Starts a Paseo agent in your own persistent, signed-in Chromium on the Paseo server. You log in to sites there once (2FA included) and can watch and **Take over** a run live from your phone or any device on your tailnet: no Mac needed. One run at a time; tailnet and private addresses stay blocked. See [Signed-in Server browser](#signed-in-server-browser). |
 | ChatGPT › **Desktop** | Opens the ChatGPT desktop app with the steps in a new chat, asking ChatGPT to use its own computer use (`@Computer`). You press send. Desktop only. |
 | ChatGPT › **Web** | Opens chatgpt.com in agent mode, with the steps in the URL when they are short and look secret-free. |
 | Claude › **Desktop** | Opens the Claude desktop app with the steps in a new chat (`claude://claude.ai/new?q=…`), asking Claude to use Claude in Chrome. You press send. Desktop only. |
@@ -169,8 +170,8 @@ connected app shares them.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Usual way to start (desktop) | ChatGPT desktop | The button highlighted on the card: ChatGPT desktop or Claude desktop (both through the launcher), ChatGPT web, Paseo browser, Server browser, Claude Chrome tab or Copy only. The other ways stay on the card, except the Chrome tab button, which shows only when the Provider (or Claude in Chrome provider) is a Claude provider. The Command Center opens ChatGPT this way, or the ChatGPT desktop app for any other choice. |
-| Usual way to start (iOS and Android) | Copy only | Copy only, ChatGPT web, Paseo browser, Server browser or Claude in Chrome. Phones get no Desktop buttons (ChatGPT or Claude): ChatGPT documents no mobile deep link for a new prompt. Server browser needs no Mac, so on a phone it is the agent way that works with your desktop app closed. |
+| Usual way to start (desktop) | ChatGPT desktop | The button highlighted on the card: ChatGPT desktop or Claude desktop (both through the launcher), ChatGPT web, Paseo browser, Server browser, Server browser (signed in), Claude Chrome tab or Copy only. The other ways stay on the card, except the Chrome tab button, which shows only when the Provider (or Claude in Chrome provider) is a Claude provider. The Command Center opens ChatGPT this way, or the ChatGPT desktop app for any other choice. |
+| Usual way to start (iOS and Android) | Copy only | Copy only, ChatGPT web, Paseo browser, Server browser, Server browser (signed in) or Claude in Chrome. Phones get no Desktop buttons (ChatGPT or Claude): ChatGPT documents no mobile deep link for a new prompt. Both Server browsers need no Mac, so on a phone they are the agent ways that work with your desktop app closed; the signed-in one also works with your logins. |
 | ChatGPT app deep link | `codex://new?prompt={prompt}` | `{prompt}` is replaced by the encoded prompt; only `codex:` and `https:` are accepted. Save and Reset to default. |
 | Collapse repeated blocks that are done | on | A later copy of a block in the chat is a full card with "Also shown earlier in this chat"; once done, copies collapse to "✓ Already done · Show". Off: every copy is a plain full card. |
 | Done marks | – | How many cards are marked done on this host; Clear removes all marks. |
@@ -203,6 +204,19 @@ connected app shares them.
 | --- | --- | --- |
 | Status | – | Ready, Building the image…, Image not built yet, Image build failed (with the reason), Docker missing or Docker not reachable, and whether Docker runs rootless. |
 | Download and build | – | Downloads the pinned base image (about 2.6 GB) and builds the Server browser image on the Paseo server, only after a second press (Confirm download). The card never downloads or builds it. At most 3 Server browser runs have a browser at once. |
+
+**Signed-in Server browser**
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Status | – | Ready (stopped; starts when needed), Running (with viewers, and whether a run uses it), Downloading and building…, Images not built yet, Image build failed, No Tailscale address, Docker missing or not reachable, Could not start (with the reason). |
+| Download and build | – | Downloads the pinned neko image (about 1.5 GB) and builds the signed-in image, plus the Server browser image when that is not built yet (about 2.6 GB more), only after a second press (Confirm download). The card never downloads or builds. |
+| Log in to sites | – | Opens the signed-in browser on this device (portrait on phones) with a one-time link, so you can log in to the sites runs should use, including 2FA. Starts the browser when it is stopped. |
+| Stop now | – | Stops the browser; your logins are kept. It also stops by itself after 30 minutes without a run or viewer. |
+| Log out of everything | – | After a second press: stops the browser and deletes its profile on the server (every login, cookie and the history there), and makes new viewer keys. A run using it loses its browser. |
+| New viewer key | – | After a second press: every earlier viewer link and open viewer session stops working. |
+| Viewer port | `5301` | The viewer's port on the launcher's bind address (this server's Tailscale IPv4, or 127.0.0.1); WebRTC uses the next port (`5302`). |
+| HTTPS address | empty | Optional `https://name[:port]` in front of the viewer (for example `tailscale serve`), used in viewer links; empty: plain http on the Tailscale address. |
 
 **ChatGPT launcher**
 
@@ -834,6 +848,85 @@ With **Show live screenshot** the agent takes `browser_take_screenshot` (PNG, vi
 each step and the card shows it like any other run's. There is no tab cleanup: the container is
 discarded. Mode guard, report back, talk to the chat, the run lock, repeats and done marks work as
 for any run.
+
+## Signed-in Server browser
+
+The card's Paseo › **Server (signed in)** button runs the steps in **your own persistent Chromium on
+the Paseo server**, signed in to the sites you logged in to there. You never need the Mac: you log in
+once (2FA included) from your phone or any device on your tailnet, and you can watch a run live and
+**take it over** (a login, a 2FA code, a captcha) from the card's **Take over** button. You accepted
+that these login sessions live on the Paseo server (see [SECURITY.md](SECURITY.md#signed-in-server-browser)).
+
+**Needs:** everything the [Server browser](#server-browser) needs, plus a Tailscale address on the
+Paseo server for the viewer (the ChatGPT launcher's bind address: detected, or set to 127.0.0.1),
+and both images: Settings › Signed-in Server browser › **Download and build**, then **Confirm
+download**. The signed-in image `browser-prompt-signed-in:neko3.2.0-<hash>` is built from
+[`signed-in/`](signed-in/): [neko](https://github.com/m1k1o/neko) 3.2.0 with Chromium 155
+(Apache-2.0), `ghcr.io/m1k1o/neko/chromium:3.2.0` pinned by digest, plus three overrides
+(Chromium's flags, a start script and its policy). The Server browser image supplies the proxy, the
+relay and the run's Playwright MCP.
+
+**First use.** Settings › Signed-in Server browser › **Log in to sites** opens the browser on your
+device (portrait on a phone). Log in to the sites your runs need, then close the tab: Chromium writes
+its cookies within about 30 seconds, and the browser stays up for at least 30 minutes after you leave.
+
+**What runs.** One stack per plugin instance, started when a run or the viewer needs it and stopped
+after 30 minutes without either:
+
+1. an **internal Docker network** (no route out) and an outward one;
+2. the **proxy sidecar** of the Server browser (same filter: no tailnet, private, loopback,
+   link-local or host addresses), the browser's only way out;
+3. **neko**, on the internal network only: Chromium with your profile on the Docker volume
+   `bp-si-<id>-profile` (cookies, logins, history), a virtual desktop streamed over WebRTC, and the
+   DevTools port on its own loopback only; Chromium sends every request, loopback included, to the
+   proxy and refuses to start without it;
+4. the **relay** (`server-browser/relay.mjs`), the only published container: its HTTP/WebSocket
+   port and the WebRTC (ICE-TCP) port, published only on the Tailscale address (never `0.0.0.0`, a
+   LAN or a public address).
+
+A signed-in run gets the same pinned, filtered Playwright MCP as a Server browser run, started by
+the same host launcher, in a container that joins neko's network namespace and attaches over the
+DevTools protocol to the persistent Chromium (its default context, so your logins). It gets 17
+tools: no `browser_evaluate`, `browser_console_messages` or `browser_network_requests` (they read
+page script state of a browser with your sessions). A DevTools filter in front of Chromium shows it **only the tabs it
+opened itself** (and their popups): your tabs, restored tabs and tabs you open stay hidden. It is gated the same way: the run labels with
+`browser-prompt-browser: signed-in`, a one-time ticket for the chat and card on create, the card's
+run record marked `browser:signed-in` on resume. **One run at a time** uses the browser: a second
+press says it is in use. The agent's own tabs are its work area; it is told to leave yours alone and,
+after a fully successful run with **Close tabs after a successful run** on, to close only the tabs it
+opened.
+
+**Take over.** While a signed-in run is going, the card's status line shows **Take over**. It asks the
+daemon for a one-time link (valid once, for 5 minutes) and opens it; the link is never put in the
+chat. The page trades the ticket in the link's fragment for an HttpOnly, SameSite=Strict session
+cookie (random name, scoped to a random path, 2 hours at most and 20 minutes without use), the relay
+logs in to neko for you with a generated password you never see, and you get the live desktop. Tap
+the mouse icon (Request control) to take control; on a phone the keyboard button opens the on-screen
+keyboard. **While you hold control the run is paused**: every browser tool call of the agent is
+refused with "the owner has taken over" until you release control (the mouse icon again, or close
+the viewer). A phone switches the desktop to portrait (720×1280) while it watches;
+it switches back 20 seconds after the last viewer leaves. When a run hits a login, 2FA or captcha,
+the agent does not type anything: it asks you (a question on the card) to press Take over, complete
+it, release control and answer "done"; then it continues. Log in **in a new tab** (the + button)
+where the site allows it: the agent cannot see tabs you open, only its own (it reloads its tab
+afterwards and gets the new session). Chromium's internal pages (`chrome://`,
+`view-source:`, `about:` other than `about:blank`) are blocked in this browser, for you and the agent.
+
+**HTTPS (optional).** Clipboard access and Secure cookies need HTTPS on phones. If you put the viewer
+behind `tailscale serve` (for example `tailscale serve --bg --https=8443 http://<tailscale-ip>:5301`),
+enter that `https://…` address under **HTTPS address**: links then use it and the relay accepts it
+as an origin. WebRTC still connects directly to the Tailscale address. Cookies ignore ports, so a
+host name no other web service uses is best (see SECURITY.md).
+
+**Log out.** **Log out of everything** stops the browser and removes its profile volume (every login
+on the server) and makes new viewer keys. **Stop now** keeps the profile. **New viewer key** ends
+every earlier link and viewer session. Removing the plugin or rolling back does **not** stop a
+running stack: stop or wipe it first (SECURITY.md has the commands).
+
+**Smoke test** (developers, on a host with Docker): `SMOKE_PLAYWRIGHT_CORE=<dir with node_modules/playwright-core> SMOKE_CHROMIUM=<chrome binary> node --experimental-strip-types --no-warnings scripts/smoke-signed-in.mjs`
+builds missing images (without the settings' consent step, only in this script), starts the stack on
+127.0.0.1 only, runs an agent over CDP, a phone-emulated viewer that takes over, the relay and proxy
+refusals and a cookie across a restart, and removes everything but the images.
 
 ## Self-update (opt-in)
 

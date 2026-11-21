@@ -20,6 +20,10 @@ Do not include real secrets, tokens or private prompts in a report; describe the
 | Card steps plus a fixed safety preamble | A new agent on your own Paseo daemon, and that agent's model provider (Anthropic by default); with Claude in Chrome also Anthropic's bridge to your Chrome | Paseo browser, Server browser, Claude in Chrome |
 | The pages a Server browser run opens, and their host names | Fetched from the Paseo server's network by a headless Chromium in a Docker container on that server; names resolved by the public resolvers 1.1.1.1 and 9.9.9.9; page text and screenshots go to the agent's model provider as tool output | Server browser |
 | Image build: the pinned Playwright base image and the pinned `@playwright/mcp` package | Downloaded on the Paseo server from `mcr.microsoft.com` (when not there yet) and the npm registry; the build context is written to the state directory below | Server browser: only when the owner presses Download and build, then Confirm download, in the plugin settings |
+| Your login sessions (cookies, local storage, history) for every site you log in to in the signed-in browser | The Docker volume `bp-si-<id>-profile` on the Paseo server, used only by the signed-in browser's container; removed by **Log out of everything** | Signed-in Server browser |
+| The signed-in browser's live desktop (video), your taps and typing | Between your device and the relay on the Paseo server's Tailscale address (WebRTC over TCP, encrypted with DTLS-SRTP, inside Tailscale); not recorded | Signed-in Server browser: Log in to sites, Take over |
+| The viewer key and the relay's status token (random, 256 bits), and neko's generated passwords | `signed-in/keys.json` (mode 0600) in the state directory below; the relay and neko containers' environment | Signed-in Server browser |
+| Image build: the pinned neko image | Downloaded on the Paseo server from `ghcr.io` | Signed-in Server browser: only after Download and build, then Confirm download |
 | The browser agent's final report (up to 4,000 characters), escaped and framed as untrusted output | The agent whose chat showed the card, and that agent's model provider | Report back to chat: Auto (default) only when that chat runs in an ask-first mode, or Always |
 | Title, outcome and run agent id only | The agent whose chat showed the card | Report back to chat: Auto, when that chat runs in any other mode |
 | Browser screenshots (viewport PNG after each step) | The browser agent's model provider, as tool output; a private copy kept by Paseo on the daemon host; shown as a thumbnail on the card in your Paseo app | Show live screenshot (on by default) |
@@ -146,6 +150,166 @@ may not send WebRTC UDP around the proxy (it has no route for it anyway).
 `BASE_IMAGE`), move `@playwright/mcp` and its `overrides` to the matching Playwright version, update
 `seccomp.json` from that Playwright tag, regenerate the lock file and the embedded copy
 (`node scripts/embed-server-browser.mjs`), and rerun the smoke test.
+
+## Signed-in Server browser
+
+You chose this trade-off: **your login sessions live on the Paseo server**, so an agent can use them
+without your Mac, and you can log in and take over from your phone. Everything below follows from
+that choice.
+
+**What lives where.**
+
+- The **profile volume** `bp-si-<id>-profile` (Docker volume, named after a hash of this plugin
+  instance's id) holds Chromium's profile: cookies and logins of every site you logged in to, local
+  storage, history. It survives restarts and plugin updates. Only the signed-in browser's container
+  mounts it, at `/home/neko/.config/chromium`. Anyone who can run Docker as the daemon user (and
+  root) can read it, like any file of that user. The browser's password manager, autofill, sync,
+  sign-in, extensions, downloads, file pickers, metrics reporting and background mode are off by
+  policy, so no saved passwords are in it.
+- **Chromium's internal pages are blocked** by policy (`URLBlocklist`): `chrome://*`,
+  `chrome-untrusted://*`, `chrome-search://*`, `chrome-extension://*`, `devtools://*`,
+  `view-source:*`, `about:*`, `javascript:` and `data:` URLs and `file://*`, with only
+  `about:blank` and `chrome://newtab` (which opens `about:blank`) allowed back. Neither the agent nor a page can open the history, the settings
+  (where the list of sites with cookies is), the version page or view-source; such a navigation
+  ends in `ERR_BLOCKED_BY_ADMINISTRATOR` (`about:` pages other than `about:blank` load empty). The
+  owner cannot open them in the viewer either. The address bar uses Chromium's native suggestion
+  popup (`--disable-features=WebUIOmniboxPopup,…`), because the default one is itself a `chrome://`
+  page.
+- The **viewer key** (`viewerSecret`), the relay's **status token** and **neko's passwords** are in
+  `signed-in/keys.json` (mode 0600) in the plugin's state directory, and in the relay's and neko's
+  container environment. neko's passwords are new on every start of the browser; you never see or
+  type them.
+- Nothing of this is sent anywhere by the plugin. Pages you and the agent open go out through the
+  proxy like a Server browser's; page text and screenshots of agent runs go to the agent's model
+  provider as tool output, as in any run.
+
+**Who can reach it.**
+
+- **The owner's viewer** is served by the relay only on the Paseo server's Tailscale address (or
+  127.0.0.1 when the launcher is set to it), never `0.0.0.0`, a LAN or a public address; the plugin
+  checks the published addresses before it runs Docker. To open it, Paseo asks the daemon for a
+  one-time link: a ticket signed (HMAC-SHA256) with a key derived from the viewer key and a salt
+  that is new on every relay start (so a link from before a relay restart is dead, and the relay
+  never holds the viewer key itself), valid once and for 5 minutes, carried only in the URL's
+  fragment, so it is never sent in a request line and never logged. The page posts it to the relay
+  (with its own Origin); the relay checks signature, expiry and reuse, and counts the ticket as used
+  once neko let the owner in (a link that met a browser still starting can be tried again until it
+  expires). A refused ticket is answered after a constant 500 ms; there is no lockout, because with
+  rootless Docker every client has the same address (a lockout would lock the owner out too), and
+  an HMAC-SHA256 ticket cannot be guessed.
+- **The session cookie**: `HttpOnly`, `SameSite=Strict`, `Secure` on the https address, with a
+  random name (`bp_viewer_<16 hex>`) and `Path=/s-<32 hex>/`, both new on every relay start: the
+  whole viewer lives under that random path, so the browser sends the cookie only there. It ends 2
+  hours after login and after 20 minutes without a request or viewer input, and is bound to the
+  address the login came from. Cookies ignore ports, which is why the path matters: another web
+  service on the same host name or IP (another port) does not get the cookie unless the browser
+  requests that service at the viewer's random path. **Limits:** with rootless Docker the relay sees
+  every client as Docker's port forwarder (on paseo-box `172.20.0.1`), so the address binding adds
+  nothing there (it works where the source address is kept); a service on the same host name can
+  still try to set cookies for it. Give the viewer a host name no
+  other web service uses: put it behind `tailscale serve` on its own name or port and enter that
+  `https://…` address as the **HTTPS address**.
+- The relay logs in to neko as an admin for you; neko's token never reaches your browser (the relay
+  adds it to each request it forwards and drops neko's cookies). It forwards only neko's web client
+  files, its WebSocket and the routes to watch and take control (whoami, control take/release/give,
+  screen size, keyboard map); member and session management, login, uploads, file transfer,
+  broadcast, settings, `/metrics` (also turned off in neko), `/health` and debug routes are refused,
+  query strings are never forwarded, encoded or `..` paths are refused, and neko's cookies and CORS
+  (`Access-Control-*`) headers are dropped from its answers. Every request must carry the viewer's
+  Host (against DNS rebinding); the WebSocket and every write need the viewer's Origin.
+- WebRTC: the relay forwards one TCP port to neko's ICE-TCP mux, on the same address. ICE checks and
+  DTLS protect the media; the port is reachable only on your tailnet. neko has no STUN or TURN
+  servers (`NEKO_WEBRTC_ICESERVERS_FRONTEND/BACKEND=[]`, also neko 3.2.0's default; its client
+  adds none), so the viewer gets only the candidate on the bind address and nothing goes to a public
+  STUN server.
+- **The agent** gets no neko account and no viewer link. Its Playwright MCP container joins neko's
+  network namespace to reach the DevTools port on neko's loopback; it has no published ports, every
+  capability dropped, no new privileges, a read-only root, an unprivileged user and limits. Its MCP
+  filter has a **signed-in allowlist without `browser_evaluate`, `browser_console_messages` and
+  `browser_network_requests`** (page JavaScript could read cookies, storage or what the owner
+  types, or leave a keylogger; console and network output can carry tokens); it reads pages only
+  with snapshots and screenshots. `browser_run_code_unsafe`, `browser_file_upload`, `browser_drop`
+  and `browser_install` are refused as for every run. The relay is in another network namespace and
+  cannot reach the DevTools port.
+- **The owner's tabs are hidden from the agent (enforced, an allowlist).** Playwright MCP does not
+  talk to Chromium directly: a DevTools-protocol filter in the run's container
+  (`server-browser/cdp-filter.mjs`) is its only endpoint, and it shows the run only the pages the
+  run created itself (`Target.createTarget` through the filter), popups of those that open while
+  you do not hold control, and the frames and workers inside them. Everything else stays hidden:
+  tabs open when the run starts, tabs restored after a Chromium restart, tabs you open (also while
+  no Playwright client is connected, or in the first seconds of a takeover), popups that open while
+  you hold control, service workers and tab targets. Playwright is never attached to them, they are
+  missing from target lists and events, and commands on them (attach, activate, close, info,
+  messages, related auto-attach, detach, window) and on their sessions (input, cookies, script) are
+  refused, as are closing or crashing the browser and reading, setting or clearing every site's
+  cookies at once. The agent cannot list, select, close, read or act on those tabs; its
+  `browser_close` leaves your browser and tabs as they are (checked in the smoke test).
+- **The agent can read its own tab.** If you log in inside the agent's tab during a takeover, the
+  agent sees that page afterwards (not the password: password fields are masked in snapshots, and
+  its calls are paused while you hold control). Where the site allows it, log in **in a new tab**
+  (the + button): that tab stays hidden from the agent, the session cookie it sets is shared, and
+  the agent reloads its own tab afterwards. The agent is told to ask you to do that.
+- **Pages** in the browser cannot reach neko, the DevTools port, the relay, your tailnet, private or
+  host addresses: Chromium sends every request, loopback included (`--proxy-bypass-list=<-loopback>`),
+  to the proxy sidecar, which refuses them (the same list as the Server browser below), and neko's
+  container is on an internal network with no other route.
+
+**How it is isolated.** neko runs on the internal network only, with every capability dropped except
+`SETUID`, `SETGID` and `CHOWN` (its supervisor starts the desktop as the unprivileged `neko` user)
+and `SYS_CHROOT` (Chromium's own sandbox, which runs), `no-new-privileges`, Playwright's pinned
+seccomp profile, a read-only root with tmpfs for what it writes, only the profile volume mounted,
+2.5 GB / 2 CPUs / 1024 processes, no container log, never pulled. The relay and the proxy: every
+capability dropped, `no-new-privileges`, read-only root, unprivileged user, limits, no log, no mounts.
+neko's metrics, pprof, plugins, file transfer and upload-by-drop are off.
+
+**One run at a time.** Only one run may hold the signed-in browser (a ticket out, an admitted run, or
+its MCP container); the check and the claim happen together, one press or session open at a time,
+so two presses at once cannot both get it. Others are told it is in use. The owner's viewer works
+alongside a run.
+
+**Takeover pauses the agent (enforced).** The relay polls neko's control state every second (one
+poll at a time, older results ignored) with its own admin session and answers `GET /control` with
+`{ ownerControl, known }` on port 8081, bound only to its address on the stack's internal network
+(not published, not on the outward network). `ownerControl` is true only while a viewer is
+connected and holds control, or while a viewer is connected and the relay cannot read neko's state
+(fail closed); without a viewer nobody can hold control, so the run never waits on a stale or
+unknown state, and a control left held without a viewer is reset (retried every second). `known`
+is informational. The run's MCP container reads it every second (one request at a time); after a
+failed read the state stays held while the last held state is younger than 10 seconds, and opens
+only after 3 failed reads in a row (when the relay cannot be asked at all, no viewer can hold control
+either: the relay is its only way in). While control is held, the MCP filter answers **every** tool call (snapshot, screenshot,
+typing, navigation) with "the owner has taken over…", and a result that arrives while control is
+held, or whose call overlapped a held period, is withheld and replaced by that message, so a call
+that started before a takeover cannot hand back what the owner typed. When the last viewer
+disconnects, the relay resets control, so a closed viewer cannot leave the run paused. Limits: the
+state the run sees can be up to about 2 seconds old (two 1-second polls), so the first moments of a
+takeover can overlap a running action (its result is still withheld); the agent is also told never
+to type credentials and to wait for your answer. Release control (the mouse icon again, or close
+the viewer) before you answer "done".
+
+**Lifetime.** The plugin stops the stack after 30 minutes without a run or viewer, always gracefully
+(neko gets up to 45 seconds so Chromium writes its cookies), also when a start fails or a stack that
+stopped answering is replaced. The relay and the proxy also stop themselves after 7 days
+(`BP_MAX_LIFETIME_S`; the relay only once no viewer is connected). When neko runs but its relay or
+proxy is gone, the plugin starts only those (at the next use, or within a minute by its idle check);
+neko and your sessions stay as they are (Chromium finds the proxy by its container name). **The plugin does the idle stop:
+after you remove the plugin or roll back to 0.21.x, a running stack (neko with your logins, and the
+relay on your Tailscale address) keeps running until you stop it.**
+
+**How to log out or wipe.** Settings › Signed-in Server browser › **Log out of everything**, then
+**Confirm**: stops the browser, removes the profile volume and makes new keys. By hand, as the user
+that runs Paseo's Docker (on paseo-box `paseo`, rootless):
+
+```sh
+docker ps -a --filter label=browser-prompt.signed-in --format '{{.Names}}'   # find bp-si-<id>-…
+docker stop -t 45 bp-si-<id>-neko                                           # stop, keeping the logins
+docker rm -f bp-si-<id>-neko bp-si-<id>-relay bp-si-<id>-proxy
+docker network rm bp-si-<id>-net bp-si-<id>-pub
+docker volume rm bp-si-<id>-profile                                         # wipe every login
+```
+
+and delete `signed-in/keys.json` in the state directory. Removing the plugin does not remove the
+stack or the volume.
 
 ## Design limits
 

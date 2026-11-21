@@ -64,6 +64,7 @@ export function migratePreferences(values: unknown, fromVersion: number): unknow
   if (fromVersion < 18 && next.startMode === "extension") next = { ...next, startMode: "app" };
   // 0.21 adds "server" (the Server browser) to both usual ways without a new version: every stored
   // value stays valid, and an older plugin version can still read the document unless "server" is
-  // chosen (a version bump would make every older version refuse it).
+  // chosen (a version bump would make every older version refuse it). 0.22 adds "signed-in" (the
+  // signed-in Server browser) the same way; its own settings live in a separate document.
   return next;
 }

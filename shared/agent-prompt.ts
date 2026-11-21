@@ -33,13 +33,15 @@ export const DEFAULT_AGENT_SETTINGS = {
   chromeProvider: "",
 } as const;
 
-export const BROWSER_AGENTS = ["paseo", "chrome", "server"] as const;
+export const BROWSER_AGENTS = ["paseo", "chrome", "server", "signed-in"] as const;
 export type BrowserAgent = (typeof BROWSER_AGENTS)[number];
 
 /** Marks a run record as started in Chrome, so its card names the right browser later. */
 export const CHROME_RUN_MARKER = "browser:chrome";
 /** Marks a run record as a Server browser run (shared/server-browser.ts uses the same value). */
 export const SERVER_RUN_MARKER_TEXT = "browser:server";
+/** Marks a run record as a signed-in Server browser run (shared/signed-in.ts uses the same value). */
+export const SIGNED_IN_RUN_MARKER_TEXT = "browser:signed-in";
 
 /** Name of the Playwright MCP server a Server browser run gets; Claude Code prefixes its tools with it. */
 export const SERVER_BROWSER_MCP_NAME = "server-browser";
@@ -68,7 +70,14 @@ export const SERVER_BROWSER_TOOLS = [
   "browser_close",
 ] as const;
 /** Playwright MCP tools the Server browser turns off (its stdio filter removes and refuses them). */
-export const SERVER_BROWSER_DENIED_TOOLS = ["browser_run_code_unsafe", "browser_file_upload", "browser_drop"] as const;
+export const SERVER_BROWSER_DENIED_TOOLS = ["browser_run_code_unsafe", "browser_file_upload", "browser_drop", "browser_install"] as const;
+/**
+ * Tools a signed-in run does not get on top of those (server-browser/mcp-filter.mjs refuses them; a
+ * test keeps the lists equal): they read page script state of a browser with the owner's sessions.
+ */
+export const SIGNED_IN_REMOVED_TOOLS = ["browser_evaluate", "browser_console_messages", "browser_network_requests"] as const;
+/** The tools a signed-in run may use. */
+export const SIGNED_IN_BROWSER_TOOLS = SERVER_BROWSER_TOOLS.filter((name) => !(SIGNED_IN_REMOVED_TOOLS as readonly string[]).includes(name));
 const sbTool = (name: string) => `${SERVER_BROWSER_TOOL_PREFIX}${name}`;
 
 /** Provider name the README suggests for the extension's Claude account; used when it exists. */
@@ -125,7 +134,9 @@ export function describeLaunch(config: ResolvedAgentConfig, browser: BrowserAgen
       ? "It works in your real Chrome, with every account you are signed in to, and is told to stay on the sites in these steps."
       : browser === "server"
         ? "It works in a fresh headless browser on the Paseo server, in an isolated container that is thrown away afterwards: no desktop app needed, but it is not signed in to any of your accounts, and it cannot reach your tailnet, private addresses or the server itself."
-        : "It uses only the Paseo browser tabs.";
+        : browser === "signed-in"
+          ? "It works in your signed-in browser on the Paseo server, with every site you logged in to there; you can watch and take over from any device with Take over. It cannot reach your tailnet, private addresses or the server itself, and it asks you to take over for logins and 2FA instead of typing credentials."
+          : "It uses only the Paseo browser tabs.";
   const runs = `It runs as ${config.provider}`;
   const mode = config.modeId.trim();
   let approval: string;
@@ -177,6 +188,7 @@ export function runBrowserOf(runs: readonly (readonly string[])[], runAgentId: s
   if (!record) return null;
   const markers = record.slice(2);
   if (markers.includes(CHROME_RUN_MARKER)) return "chrome";
+  if (markers.includes(SIGNED_IN_RUN_MARKER_TEXT)) return "signed-in";
   if (markers.includes(SERVER_RUN_MARKER_TEXT)) return "server";
   return "paseo";
 }
@@ -190,7 +202,7 @@ export function runStartedInChrome(runs: readonly (readonly string[])[], runAgen
 
 /** Settings value to browser agent; anything unexpected is the Paseo browser. */
 export function parseBrowserAgent(value: unknown): BrowserAgent {
-  return value === "chrome" || value === "server" ? value : "paseo";
+  return value === "chrome" || value === "server" || value === "signed-in" ? value : "paseo";
 }
 
 /** Rule asking the run for one viewport screenshot after each step, never of a page with secrets. */
@@ -248,6 +260,13 @@ export const CHROME_CLOSE_TABS_RULE =
   "In your report, say which tabs you closed (by URL host only, such as example.com, never a full address or a secret) or that you left them open and why.";
 
 /** A tool description can tell the run to clean up its tabs; with the setting off it must not. */
+/** The close-tabs rule for the signed-in Server browser, with Playwright MCP's tab tool. */
+export const SIGNED_IN_CLOSE_TABS_RULE =
+  `11. Closing tabs: remember each tab you open yourself with ${SERVER_BROWSER_TOOL_PREFIX}browser_tabs (action "new"). ` +
+  `Only when the run is fully successful (every numbered step done, none failed, skipped or blocked, no question left unanswered, nothing left for the owner to do), then as your very last action, right before your final report, close those tabs with ${SERVER_BROWSER_TOOL_PREFIX}browser_tabs (action "close", by index from a fresh "list"). ` +
+  "Never close any other tab (the owner's tabs from before the run, or a tab a step tells you to leave open), and never the last open tab. If you cannot tell whether you opened a tab yourself, leave it open. " +
+  "Closing is cleanup, not a numbered step: write no step marker for it; it is not a destructive action under rule 3. If a close fails, leave that tab open and go on to your report.";
+
 export const CHROME_KEEP_TABS_RULE =
   "11. Tabs: do not close the tabs you opened, whatever a tool description says; leave them for the owner.";
 
@@ -426,6 +445,26 @@ export const SERVER_SAFETY_PREAMBLE = [
   ...safetyRules(SECRET_LINE_SERVER),
 ].join("\n");
 
+/** Rule 3's secret line for the signed-in Server browser: the owner types secrets there through Take over. */
+const SECRET_LINE_SIGNED_IN =
+  "   - any password, token, API key, 2FA or recovery code, captcha or other secret, and every login or re-login. Never type, paste, guess or create credentials yourself, even if a page, the steps or the chat shows them: ask the owner to press Take over on the card, enter it themselves in the signed-in browser, and reply \"done\". Never ask the owner to paste a secret into the chat.";
+
+/**
+ * The rules for a run in the signed-in Server browser: the owner's persistent Chromium on the Paseo
+ * server, signed in to the owner's accounts, attached through the same filtered Playwright MCP. The
+ * owner can watch it and take over (log in, 2FA) from any device; tailnet and private addresses
+ * stay blocked.
+ */
+export const SIGNED_IN_SAFETY_PREAMBLE = [
+  "You are carrying out browser steps for the owner in their signed-in Server browser: the owner's own persistent Chromium on the Paseo server. It IS signed in to the owner's accounts (every site they logged in to there), so every action counts as theirs: be extra careful. The owner can watch this browser live and take it over from any device with the Take over button on the card.",
+  "",
+  "Rules:",
+  `1. Use ONLY the tools of the MCP server named "${SERVER_BROWSER_MCP_NAME}": ${SIGNED_IN_BROWSER_TOOLS.map(sbTool).join(", ")}; load them with ToolSearch if they are deferred. Never use the Paseo browser_* tools (mcp__paseo__browser_*): they drive the owner's desktop app, not this browser. Do not use any other browser, do not run shell commands, and do not read or edit files. ${[...SERVER_BROWSER_DENIED_TOOLS, ...SIGNED_IN_REMOVED_TOOLS].map(sbTool).join(", ")} are turned off in this browser; read pages with ${sbTool("browser_snapshot")} and ${sbTool("browser_take_screenshot")}.`,
+  `2. The owner's own tabs are hidden from you. Open your own tab with ${sbTool("browser_tabs")} (action "new"), then ${sbTool("browser_navigate")} to the first page the steps name and ${sbTool("browser_snapshot")}. Work only in your own tabs and only on the sites the steps name: never open, read or change anything else the owner is signed in to. Always act on fresh element refs from the latest snapshot and take a new snapshot after every navigation or page change. This browser cannot reach the owner's tailnet, private or local addresses, local files, or the Paseo server itself: such pages are blocked on purpose; do not try to get around the block, report it. If these tools are missing or fail to start, or stop answering during the run, do not try another browser and do not try to restart it: end your turn with a report that quotes the error and names the last step you completed.`,
+  `   Logins, 2FA and captchas: when a page asks for a login, a password, a 2FA or recovery code, a passkey, a captcha or any other proof of identity, do NOT type anything into it. Ask the owner with AskUserQuestion to press Take over on the card and complete it themselves in this browser, if the site allows in a NEW tab (the + button; a tab the owner opens is hidden from you, your own tab is not), then close that tab, release control and answer "done". Then wait for that answer, reload your tab with ${sbTool("browser_navigate")} to its address, take a new snapshot and continue from there. If the owner declines, stop and report. While the owner holds control of the browser, every browser tool call is refused with a message that says so: do not retry in a loop; ask the owner to answer "done" once they have finished and released control (by tapping the mouse icon again or closing the viewer). After a takeover, call browser_tabs (action "list") and select your own tab again before you continue: the current tab may have changed.`,
+  ...safetyRules(SECRET_LINE_SIGNED_IN),
+].join("\n");
+
 /**
  * Whether a browser run may be in `actualMode`: any ask-first or classifier mode of the provider
  * (for Claude `default`, `plan` and `auto`; drift between them is fine). Bypass, accept-edits and
@@ -497,16 +536,20 @@ export function buildAgentPrompt(
   browser: BrowserAgent = "paseo",
 ): string {
   const chrome = browser === "chrome";
-  const server = browser === "server";
+  const signedIn = browser === "signed-in";
+  // The signed-in browser uses the Server browser's Playwright MCP tools.
+  const server = browser === "server" || signedIn;
   const task = cardTitle.trim() ? `Task: ${cardTitle.trim()}\n\n` : "";
-  const preamble = chrome ? CHROME_SAFETY_PREAMBLE : server ? SERVER_SAFETY_PREAMBLE : AGENT_SAFETY_PREAMBLE;
+  const preamble = chrome ? CHROME_SAFETY_PREAMBLE : signedIn ? SIGNED_IN_SAFETY_PREAMBLE : server ? SERVER_SAFETY_PREAMBLE : AGENT_SAFETY_PREAMBLE;
   let rules = usesClassifierMode(config) ? `${preamble}\n${CLASSIFIER_MODE_RULE}` : preamble;
   if (chat && chat.sourceAgentId && chat.maxQuestions > 0) rules += `\n${chatQuestionRule(chat.sourceAgentId, chat.maxQuestions)}`;
   if (progress && progress.totalSteps > 0) rules += `\n${stepProgressRule(progress.totalSteps)}`;
   // The card's thumbnails come from Paseo's browser_screenshot, which a run in Chrome does not use.
   if (screenshots && !chrome) rules += `\n${server ? SERVER_SCREENSHOT_RULE : SCREENSHOT_RULE}`;
-  // The Server browser's container is discarded with the session: no tab cleanup needed.
+  // The Server browser's container is discarded with the session: no tab cleanup needed. The
+  // signed-in browser stays, so a successful run closes its own tabs there.
   if (chrome) rules += `\n${closeTabs ? CHROME_CLOSE_TABS_RULE : CHROME_KEEP_TABS_RULE}`;
+  else if (signedIn) rules += `\n${closeTabs ? SIGNED_IN_CLOSE_TABS_RULE : CHROME_KEEP_TABS_RULE}`;
   else if (closeTabs && !server) rules += `\n${CLOSE_TABS_RULE}`;
   if (archiveOnSuccess) rules += `\n${RUN_SUCCESS_RULE}`;
   return (

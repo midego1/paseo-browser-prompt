@@ -1,5 +1,78 @@
 # Changelog
 
+## 0.22.0 (unreleased)
+
+- New: Paseo › **Server (signed in)** on the card (desktop and phones), and as a usual way to start.
+  It runs the agent in your own persistent, signed-in Chromium on the Paseo server, so you never
+  need the Mac: log in to sites once (2FA included) under Settings › Signed-in Server browser ›
+  **Log in to sites**, and while a run goes, the card's **Take over** opens that browser live on
+  your phone or computer to log in, enter a code or solve a captcha. You accepted that these login
+  sessions live on the Paseo server, in a Docker volume only this browser uses.
+- The browser is [neko](https://github.com/m1k1o/neko) 3.2.0 with Chromium 155 (Apache-2.0),
+  pinned by digest, with three overrides in `signed-in/`: DevTools on its own loopback only,
+  Chromium's sandbox on, session restore; a start script that sends every request (loopback too)
+  through the filtering proxy and refuses to start without it; a policy that keeps cookies, allows
+  DevTools for the agent and turns off the forced extensions, password manager, autofill, sync,
+  downloads and file pickers.
+- One stack per plugin instance, started on demand and stopped after 30 minutes without a run or
+  viewer: an internal network, the Server browser's proxy sidecar (same filter), neko (internal
+  network only, `SETUID`/`SETGID`/`CHOWN`/`SYS_CHROOT` only, `no-new-privileges`, Playwright's
+  seccomp profile, read-only root, only the profile volume, limits, no log, metrics off), and a
+  relay published only on the Tailscale address (the launcher's bind address).
+- A signed-in run gets the same pinned, filtered Playwright MCP as a Server browser run, attached
+  over the DevTools protocol from a container in neko's network namespace, with the same gate
+  (labels, one-time ticket, the card's run record marked `browser:signed-in`) and sweep. One run at
+  a time; a second press says the browser is in use.
+- The owner's viewer: Paseo asks the daemon for a one-time link (HMAC-signed ticket in the URL
+  fragment, valid once for 5 minutes); the relay trades it for an HttpOnly, SameSite=Strict cookie,
+  logs in to neko for you with a generated password, never hands neko's token to the browser,
+  forwards only the client files, the WebSocket and the control routes, refuses `/metrics`, `/health`
+  and neko's management APIs, and checks Host and Origin (also on the WebSocket). A phone gets a
+  portrait desktop (720×1280) while it watches. WebRTC runs over ICE-TCP on the next port.
+- Settings › **Signed-in Server browser**: status, **Download and build** (two presses, like
+  0.21.1), Log in to sites, Stop now, **Log out of everything** (two presses: removes the profile
+  volume and makes new keys), **New viewer key** (two presses), the viewer port (default 5301) and
+  an optional https address for `tailscale serve`.
+- A prompt variant for signed-in runs: the browser is signed in to your accounts, so work only in
+  its own tabs on the sites of the steps, and never type credentials: on a login, 2FA or captcha it
+  asks you to press Take over and answer "done", then continues. All other rules of a run stay.
+- The Server browser image now also holds the relay, so its tag changes: press Download and build
+  under Settings › Server browser once more (the base image is usually still there, so this is
+  quick).
+- Settings stay rollback-safe: "signed-in" is added to the usual ways without a version bump, and the
+  signed-in browser's own settings live in a new `signed-in` settings document older versions
+  ignore.
+- Security review fixes: the viewer cookie has a random name and a random path per relay start, lasts
+  2 hours at most and 20 minutes without use, and is bound to the login's address; CORS headers from
+  neko are dropped; failed tickets are counted per address; a ticket is used up only once neko let
+  the owner in; tickets are signed with a key salted per relay start. Chromium's internal pages
+  (`chrome://`, `chrome-untrusted://`, `devtools://`, `view-source:`, `about:` but `about:blank`) are
+  blocked by policy, the address bar uses the native suggestion popup, and metrics reporting,
+  background mode, component updates, domain reliability, crash reports and sync are off. No STUN
+  or TURN servers. While the owner holds control in the viewer, the run's MCP filter pauses every
+  tool call (the relay tells it, through an unpublished port). The relay and proxy stop themselves
+  after 7 days. The browser is always stopped gracefully (45 s to write cookies). SECURITY.md says
+  how to stop and wipe a stack left running after removing the plugin.
+- Second review round: signed-in runs no longer get `browser_evaluate`, `browser_console_messages` or
+  `browser_network_requests` (their own allowlist, 17 tools; the prompt's list matches). A
+  DevTools-protocol filter in the run's container hides the owner's tabs (open at attach, opened
+  while the owner holds control, and their popups) and refuses closing the browser. The takeover
+  guard fails closed when unsure (the relay reports held while it cannot read neko's state with a
+  viewer connected; the run keeps a held state through failed reads for 10 s and opens only after
+  3 in a row), polls one at a time, and withholds results that arrive during or overlap a takeover;
+  the relay resets control when the last viewer leaves. Bad tickets are delayed by 500 ms instead of
+  a lockout. The takeover port listens only on the relay's internal-network address. One run at a
+  time is checked and claimed atomically. A missing relay or proxy is restarted alone (neko keeps
+  running; Chromium finds the proxy by name), and the relay's 7-day exit waits for viewers to leave.
+  `browser_install` is named among the turned-off tools.
+- Final review round: the takeover guard holds only while a viewer is connected (no endless pause when
+  neko's control state cannot be read; a control left held without a viewer is reset, retried).
+  The DevTools filter is an allowlist: the run sees only pages it created and their popups opened
+  while the owner does not hold control; restored tabs, tabs the owner opens (also while no client
+  is connected) and every other target stay hidden; more targeted commands and the all-cookie
+  commands are refused. `javascript:` and `data:` URLs are blocked by policy. The agent asks the
+  owner to log in in a new tab, which it cannot see.
+
 ## 0.21.1 (unreleased)
 
 - The Server browser image is downloaded (about 2.6 GB) and built only when you choose to:
