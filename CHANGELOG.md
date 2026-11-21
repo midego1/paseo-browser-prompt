@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.22.0 (unreleased)
+
+- New: Paseo › **Server (signed in)** on the card (desktop and phones), and as a usual way to start.
+  It runs the agent in your own persistent, signed-in Chromium on the Paseo server, so you never
+  need the Mac: log in to sites once (2FA included) under Settings › Signed-in Server browser ›
+  **Log in to sites**, and while a run goes, the card's **Take over** opens that browser live on
+  your phone or computer to log in, enter a code or solve a captcha. You accepted that these login
+  sessions live on the Paseo server, in a Docker volume only this browser uses.
+- The browser is [neko](https://github.com/m1k1o/neko) 3.2.0 with Chromium 155 (Apache-2.0),
+  pinned by digest, with three overrides in `signed-in/`: DevTools on its own loopback only,
+  Chromium's sandbox on, session restore; a start script that sends every request (loopback too)
+  through the filtering proxy and refuses to start without it; a policy that keeps cookies, allows
+  DevTools for the agent and turns off the forced extensions, password manager, autofill, sync,
+  downloads and file pickers.
+- One stack per plugin instance, started on demand and stopped after 30 minutes without a run or
+  viewer: an internal network, the Server browser's proxy sidecar (same filter), neko (internal
+  network only, `SETUID`/`SETGID`/`CHOWN`/`SYS_CHROOT` only, `no-new-privileges`, Playwright's
+  seccomp profile, read-only root, only the profile volume, limits, no log, metrics off), and a
+  relay published only on the Tailscale address (the launcher's bind address).
+- A signed-in run gets the same pinned, filtered Playwright MCP as a Server browser run, attached
+  over the DevTools protocol from a container in neko's network namespace, with the same gate
+  (labels, one-time ticket, the card's run record marked `browser:signed-in`) and sweep. One run at
+  a time; a second press says the browser is in use.
+- The owner's viewer: Paseo asks the daemon for a one-time link (HMAC-signed ticket in the URL
+  fragment, valid once for 5 minutes); the relay trades it for an HttpOnly, SameSite=Strict cookie,
+  logs in to neko for you with a generated password, never hands neko's token to the browser,
+  forwards only the client files, the WebSocket and the control routes, refuses `/metrics`, `/health`
+  and neko's management APIs, and checks Host and Origin (also on the WebSocket). A phone gets a
+  portrait desktop (720×1280) while it watches. WebRTC runs over ICE-TCP on the next port.
+- Settings › **Signed-in Server browser**: status, **Download and build** (two presses, like
+  0.21.1), Log in to sites, Stop now, **Log out of everything** (two presses: removes the profile
+  volume and makes new keys), **New viewer key** (two presses), the viewer port (default 5301) and
+  an optional https address for `tailscale serve`.
+- A prompt variant for signed-in runs: the browser is signed in to your accounts, so work only in
+  its own tabs on the sites of the steps, and never type credentials: on a login, 2FA or captcha it
+  asks you to press Take over and answer "done", then continues. All other rules of a run stay.
+- The Server browser image now also holds the relay, so its tag changes: press Download and build
+  under Settings › Server browser once more (the base image is usually still there, so this is
+  quick).
+- Settings stay rollback-safe: "signed-in" is added to the usual ways without a version bump, and the
+  signed-in browser's own settings live in a new `signed-in` settings document older versions
+  ignore.
+
 ## 0.21.1 (unreleased)
 
 - The Server browser image is downloaded (about 2.6 GB) and built only when you choose to:

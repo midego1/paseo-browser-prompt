@@ -80,13 +80,18 @@ export default function contribute(server: PluginServerContext) {
   // at a time and the owner watches or takes over through the relay on this host's Tailscale address
   // (see server/signed-in.ts). Started on demand, stopped after 30 minutes without use.
   const signedInConfig = server.registerSettings(signedInSettings);
+  // The launcher's bind address: the setting (127.0.0.1 or this host's Tailscale IPv4), else
+  // Tailscale; asked at most every 30 seconds (it runs `tailscale ip -4`).
+  let bindHostCache: { at: number; configured: string; host: string | null } | null = null;
   const signedIn = createSignedIn({
     serverBrowser,
-    // The launcher's bind address: the setting (127.0.0.1 or this host's Tailscale IPv4), else Tailscale.
     bindHost: async () => {
       const prefs = await settings.read().catch(() => null);
       const configured = prefs?.status === "ready" ? prefs.values.trampolineHost : "";
-      return (await chooseTrampolineHost(configured, systemProbes)).host;
+      if (bindHostCache && bindHostCache.configured === configured && Date.now() - bindHostCache.at < 30_000) return bindHostCache.host;
+      const host = (await chooseTrampolineHost(configured, systemProbes)).host;
+      bindHostCache = { at: Date.now(), configured, host };
+      return host;
     },
     config: async () => {
       const current = await signedInConfig.read().catch(() => null);

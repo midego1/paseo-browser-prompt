@@ -460,6 +460,7 @@ export function createSignedIn(options: SignedInOptions) {
     const relay = bindHost ? await relayStatus(bindHost, stackPorts(config.port).http, keys.statusToken) : null;
     const viewers = relay?.viewers ?? 0;
     if (agentRunning || viewers > 0) lastActive = now();
+    else if (relay) lastActive = Math.max(lastActive, now() - relay.idleMs);
     if (!shouldStopForIdle({ now: now(), lastActive, agentRunning, viewers, viewerIdleMs: relay ? relay.idleMs : null })) return false;
     log(`no run or viewer for ${Math.round(IDLE_STOP_MS / 60_000)} minutes`);
     await stopStack(false);
