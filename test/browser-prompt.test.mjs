@@ -199,22 +199,42 @@ test("secret heuristic: ordinary step text is not taken for a secret", () => {
 });
 
 test("secret heuristic runs in linear time on long hostile input", () => {
-  const size = 100_000;
-  const inputs = [
+  const units = [
     "a.", "a", "a:", "a://", "a://b:", "a://b:c", "eyJ-", "eyJ", "token ", "token:", "token: ", "Bearer ", "a/", "aA1/",
     "-----BEGIN ", "0", "0g", "SK", "x=", '"', "api key", "_", "authToken",
-  ].map((unit) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size));
-  inputs.push("a".repeat(size) + "@", "x://" + "a".repeat(size), "x://a:" + "b".repeat(size));
-  for (const text of inputs) {
+  ];
+  const inputs = (size) => [
+    ...units.map((unit) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size)),
+    "a".repeat(size) + "@",
+    "x://" + "a".repeat(size),
+    "x://a:" + "b".repeat(size),
+  ];
+  // CPU time, not wall time: another process loading the machine must not count as a slow scan.
+  const scanCpuMs = (size) => {
+    const texts = inputs(size);
+    const before = process.cpuUsage();
+    for (const text of texts) looksLikeSecret(text);
+    const used = process.cpuUsage(before);
+    return (used.user + used.system) / 1000;
+  };
+  // Growth, not a tight absolute bound: four times the input should take about four times as long
+  // (a quadratic scan would take about sixteen). The best of three runs shrugs off a GC pause.
+  scanCpuMs(100_000);
+  const small = Math.min(scanCpuMs(50_000), scanCpuMs(50_000), scanCpuMs(50_000));
+  const large = Math.min(scanCpuMs(200_000), scanCpuMs(200_000), scanCpuMs(200_000));
+  assert.ok(large < small * 8 + 25, `4x input took ${large.toFixed(1)} ms against ${small.toFixed(1)} ms for 1x`);
+
+  // A generous per-input ceiling as well: a single pathological input cannot hide in the total.
+  for (const text of inputs(100_000)) {
     const started = performance.now();
     looksLikeSecret(text);
     const took = performance.now() - started;
-    assert.ok(took < 100, `${JSON.stringify(text.slice(0, 12))}… took ${took.toFixed(1)} ms`);
+    assert.ok(took < 1000, `${JSON.stringify(text.slice(0, 12))}… took ${took.toFixed(1)} ms`);
   }
   // A prompt too long for the URL is not scanned at all.
   const started = performance.now();
-  assert.equal(planChatGptLaunch("a.".repeat(size / 2)).reason, "too-long");
-  assert.ok(performance.now() - started < 100);
+  assert.equal(planChatGptLaunch("a.".repeat(50_000)).reason, "too-long");
+  assert.ok(performance.now() - started < 1000);
 });
 
 test("app deep link: documented codex://new?prompt= with encoded prompt", () => {
