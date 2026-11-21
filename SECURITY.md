@@ -194,8 +194,9 @@ that choice.
   fragment, so it is never sent in a request line and never logged. The page posts it to the relay
   (with its own Origin); the relay checks signature, expiry and reuse, and counts the ticket as used
   once neko let the owner in (a link that met a browser still starting can be tried again until it
-  expires). After 20 failed tickets in a minute from one address, that address is refused for the
-  rest of the minute.
+  expires). A refused ticket is answered after a constant 500 ms; there is no lockout, because with
+  rootless Docker every client has the same address (a lockout would lock the owner out too), and
+  an HMAC-SHA256 ticket cannot be guessed.
 - **The session cookie**: `HttpOnly`, `SameSite=Strict`, `Secure` on the https address, with a
   random name (`bp_viewer_<16 hex>`) and `Path=/s-<32 hex>/`, both new on every relay start: the
   whole viewer lives under that random path, so the browser sends the cookie only there. It ends 2
@@ -203,9 +204,9 @@ that choice.
   address the login came from. Cookies ignore ports, which is why the path matters: another web
   service on the same host name or IP (another port) does not get the cookie unless the browser
   requests that service at the viewer's random path. **Limits:** with rootless Docker the relay sees
-  every client as Docker's port forwarder (on paseo-box `172.20.0.1`), so the address binding and
-  the per-address failure count add nothing there (they work where the source address is kept); a
-  service on the same host name can still try to set cookies for it. Give the viewer a host name no
+  every client as Docker's port forwarder (on paseo-box `172.20.0.1`), so the address binding adds
+  nothing there (it works where the source address is kept); a service on the same host name can
+  still try to set cookies for it. Give the viewer a host name no
   other web service uses: put it behind `tailscale serve` on its own name or port and enter that
   `https://…` address as the **HTTPS address**.
 - The relay logs in to neko as an admin for you; neko's token never reaches your browser (the relay
@@ -223,10 +224,22 @@ that choice.
   STUN server.
 - **The agent** gets no neko account and no viewer link. Its Playwright MCP container joins neko's
   network namespace to reach the DevTools port on neko's loopback; it has no published ports, every
-  capability dropped, no new privileges, a read-only root, an unprivileged user and limits, and the
-  same MCP filter as a Server browser run (allowlisted tools, `browser_run_code_unsafe`,
-  `browser_file_upload` and `browser_drop` refused). The relay is in another network namespace and
+  capability dropped, no new privileges, a read-only root, an unprivileged user and limits. Its MCP
+  filter has a **signed-in allowlist without `browser_evaluate`, `browser_console_messages` and
+  `browser_network_requests`** (page JavaScript could read cookies, storage or what the owner
+  types, or leave a keylogger; console and network output can carry tokens); it reads pages only
+  with snapshots and screenshots. `browser_run_code_unsafe`, `browser_file_upload`, `browser_drop`
+  and `browser_install` are refused as for every run. The relay is in another network namespace and
   cannot reach the DevTools port.
+- **The owner's tabs are hidden from the agent (enforced).** Playwright MCP does not talk to
+  Chromium directly: a DevTools-protocol filter in the run's container
+  (`server-browser/cdp-filter.mjs`) is its only endpoint. Every page open when the run attaches
+  (the owner's, including tabs restored at start), every page the owner opens while holding
+  control, and every popup of such a page is hidden: Playwright is never attached to it, it is
+  missing from target lists and events, and commands on it (attach, activate, close, info) are
+  refused, as is closing or crashing the browser (`Browser.close`). The agent cannot list, select,
+  close, read or act on those tabs; its `browser_close` leaves the owner's browser and tabs as they
+  are (checked in the smoke test). Pages the agent opens, and their popups, are its own.
 - **Pages** in the browser cannot reach neko, the DevTools port, the relay, your tailnet, private or
   host addresses: Chromium sends every request, loopback included (`--proxy-bypass-list=<-loopback>`),
   to the proxy sidecar, which refuses them (the same list as the Server browser below), and neko's
@@ -241,46 +254,34 @@ capability dropped, `no-new-privileges`, read-only root, unprivileged user, limi
 neko's metrics, pprof, plugins, file transfer and upload-by-drop are off.
 
 **One run at a time.** Only one run may hold the signed-in browser (a ticket out, an admitted run, or
-its MCP container); others are told it is in use. The owner's viewer works alongside a run.
+its MCP container); the check and the claim happen together, one press or session open at a time,
+so two presses at once cannot both get it. Others are told it is in use. The owner's viewer works
+alongside a run.
 
-**Takeover pauses the agent (enforced).** The relay polls neko's control state every second with its
-own admin session and answers `GET /control` on port 8081, which is not published (only containers
-on the stack's networks reach it, and it tells nothing but whether someone holds control). The
-run's MCP container reads it every second, and while the owner holds control in the viewer (Take
-over, then the mouse icon), the MCP filter answers **every** tool call (snapshot, screenshot, typing,
-navigation, evaluate) with an error saying the owner has control, so the agent can neither act nor
-read the page while you type a password or a code. Limits: a tool call already running when you
-take control is not interrupted, the state can be up to about a second old, and when the relay
-cannot be asked the guard lets calls through (then no viewer can hold control either, since the
-relay is its only way in). Release control (the mouse icon again, or close the viewer) before you
-answer "done". The agent is also told never to type credentials and to wait for your answer.
-
-**Threat model, and what is not blocked.**
-
-- **A misled or malicious agent** acts with your logins (but is paused while you hold control). It is told to work only in its own tabs on
-  the sites of the steps, to ask you before secrets, destructive or irreversible actions, payments,
-  publishing and security changes, to treat page text as untrusted, and never to type credentials
-  (it asks you to take over instead). These are instructions to a model, not enforced controls; Auto
-  mode lets a classifier, not you, approve its tool calls (Always Ask lets you approve each one). Any
-  site you are logged in to is in its reach while it runs. Log in only to what you want runs to use,
-  and log out (or use **Log out of everything**) when you no longer need it.
-- **A malicious page** runs in a browser with all your sessions, like in your own browser: it can
-  attack the browser, but cannot reach your tailnet, private or host addresses, and Chromium's
-  sandbox runs. It can send what it sees to any public site.
-- **Someone on your tailnet** without a viewer link sees only the locked page; the WebRTC port gives
-  nothing without a negotiated session. A link that leaks (a screenshot, browser history) is dead
-  after 5 minutes or its first use; a viewer session lives 12 hours in that browser; **New viewer
-  key** ends all of them.
-- **Someone with Docker or the daemon user's access on the server** can read the profile volume and
-  the keys, as with any file of that user. Docker is the isolation boundary, as for the Server
-  browser.
-- neko 3.2.0's own WebSocket has no Origin check; the relay enforces Origin and Host instead, and
-  neko is never published.
+**Takeover pauses the agent (enforced).** The relay polls neko's control state every second (one
+poll at a time, older results ignored) with its own admin session and answers `GET /control` with
+`{ ownerControl, known }` on port 8081, bound only to its address on the stack's internal network
+(not published, not on the outward network). When it cannot read neko's state (`known: false`) while
+a viewer is connected, it reports control as held. The run's MCP container reads it every second
+(one request at a time): `known: false` counts as held; after a failed read the state stays held
+while the last held state is younger than 10 seconds, and opens only after 3 failed reads in a row
+(when the relay cannot be asked at all, no viewer can hold control either: the relay is its only way
+in). While control is held, the MCP filter answers **every** tool call (snapshot, screenshot,
+typing, navigation) with "the owner has taken over…", and a result that arrives while control is
+held, or whose call overlapped a held period, is withheld and replaced by that message, so a call
+that started before a takeover cannot hand back what the owner typed. When the last viewer
+disconnects, the relay resets control, so a closed viewer cannot leave the run paused. Limits: the
+state the run sees can be up to about 2 seconds old (two 1-second polls), so the first moments of a
+takeover can overlap a running action (its result is still withheld); the agent is also told never
+to type credentials and to wait for your answer. Release control (the mouse icon again, or close
+the viewer) before you answer "done".
 
 **Lifetime.** The plugin stops the stack after 30 minutes without a run or viewer, always gracefully
 (neko gets up to 45 seconds so Chromium writes its cookies), also when a start fails or a stack that
 stopped answering is replaced. The relay and the proxy also stop themselves after 7 days
-(`BP_MAX_LIFETIME_S`); the plugin starts new ones when needed. **The plugin does the idle stop:
+(`BP_MAX_LIFETIME_S`; the relay only once no viewer is connected). When neko runs but its relay or
+proxy is gone, the plugin starts only those (at the next use, or within a minute by its idle check);
+neko and your sessions stay as they are (Chromium finds the proxy by its container name). **The plugin does the idle stop:
 after you remove the plugin or roll back to 0.21.x, a running stack (neko with your logins, and the
 relay on your Tailscale address) keeps running until you stop it.**
 

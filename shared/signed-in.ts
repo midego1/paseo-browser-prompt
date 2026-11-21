@@ -146,9 +146,8 @@ export function stackVolumeArgs(input: StackInput): string[] {
   return ["volume", "create", ...stackLabels(input, "profile"), stackNames(input.stackId).volume];
 }
 
-/** Placeholders the daemon fills in once the internal network and the proxy exist. */
+/** Placeholder the daemon fills in with the internal network's subnet (proxy clients, the relay's control listener). */
 export const STACK_SUBNET_PLACEHOLDER = "__BP_SUBNET__";
-export const STACK_PROXY_IP_PLACEHOLDER = "__BP_PROXY_IP__";
 
 /**
  * The proxy sidecar: the same filter as a Server browser run's (no tailnet, private, loopback or
@@ -320,8 +319,9 @@ export function stackNekoArgs(input: StackInput, secrets: StackSecrets): string[
     "NEKO_WEBRTC_ICESERVERS_FRONTEND=[]",
     "--env",
     "NEKO_WEBRTC_ICESERVERS_BACKEND=[]",
+    // By name (Docker's DNS on the internal network), so a replaced proxy is found again.
     "--env",
-    `BP_PROXY=http://${STACK_PROXY_IP_PLACEHOLDER}:${PROXY_PORT}`,
+    `BP_PROXY=http://${names.proxy}:${PROXY_PORT}`,
     "--log-driver",
     "none",
     "--stop-timeout",
@@ -399,6 +399,8 @@ export function stackRelayArgs(input: StackInput, secrets: StackSecrets): string
     `BP_SCREEN_PORTRAIT=${SCREEN_PORTRAIT}`,
     "--env",
     `BP_CONTROL_PORT=${CONTROL_PORT}`,
+    "--env",
+    `BP_CONTROL_SUBNET=${STACK_SUBNET_PLACEHOLDER}`,
     "--env",
     `BP_MAX_LIFETIME_S=${STACK_MAX_LIFETIME_S}`,
     "--log-driver",

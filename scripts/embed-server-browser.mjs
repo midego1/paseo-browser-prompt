@@ -8,6 +8,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 /** The image's build context; its hash is part of the image tag. */
 export const SERVER_BROWSER_FILE_NAMES = [
   "Dockerfile",
+  "cdp-filter.mjs",
   "entrypoint.mjs",
   "mcp-filter.mjs",
   "package-lock.json",

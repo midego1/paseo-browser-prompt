@@ -13,7 +13,7 @@ WORKDIR /opt/browser-prompt
 COPY package.json package-lock.json ./
 # Exact versions and integrity hashes from the lock file; no install scripts.
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && npm cache clean --force
-COPY proxy.mjs proxy-main.mjs mcp-filter.mjs entrypoint.mjs relay.mjs relay-main.mjs ./
+COPY proxy.mjs proxy-main.mjs mcp-filter.mjs cdp-filter.mjs entrypoint.mjs relay.mjs relay-main.mjs ./
 
 ENV NODE_ENV=production \
     HOME=/tmp/home \

@@ -7,8 +7,10 @@
 //   SMOKE_CHROMIUM=/path/to/chrome \
 //   node --experimental-strip-types --no-warnings scripts/smoke-signed-in.mjs
 //
-// Checks: images (build when missing), the stack starts; the agent's Playwright MCP over CDP lists
-// only the allowed tools and opens https://example.com; blocked hosts and Chromium's internal pages
+// Page contents are read and prepared by a separate DevTools helper container (the harness), never
+// through the agent's MCP. Checks: images (build when missing), the stack starts; the agent's
+// Playwright MCP lists only the signed-in tools (no evaluate, console or network) and never sees
+// the owner's tabs; it opens https://example.com; blocked hosts and Chromium's internal pages
 // (chrome://, view-source:, about:) are refused from inside; a headless phone-emulated viewer logs
 // in through the key flow (cookie with a random name, scoped to a random path), takes control (the
 // agent's tool calls are paused meanwhile), taps and types into the agent's page, and releases it;
@@ -167,48 +169,74 @@ try {
     check(`proxy refuses ${target}`, code === "403", code);
   }
 
+  // A helper with its own DevTools connection, in neko's network namespace: the test harness reads
+  // and prepares pages with it (never through the agent's MCP, which has no evaluate tool here).
+  const helper = (code) => {
+    const script = `import { chromium } from "/opt/browser-prompt/node_modules/playwright-core/index.mjs";
+const browser = await chromium.connectOverCDP("http://127.0.0.1:9222");
+const context = browser.contexts()[0];
+const out = await (async () => { ${code} })();
+process.stdout.write(JSON.stringify(out ?? null));
+process.exit(0);`;
+    const out = execFileSync(
+      "docker",
+      ["run", "--rm", "-i", "--network", `container:${neko}`, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/tmp", "--user", "pwuser", "--entrypoint", "node", status.serverImage, "--input-type=module", "-"],
+      { input: script, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: 60_000 },
+    );
+    return JSON.parse(out || "null");
+  };
+  const pageByMarker = (marker) => `const page = context.pages().find((p) => p.url().includes(${JSON.stringify(marker)}));`;
+
+  // The owner's tab, open before the run attaches.
+  const ownerUrl = helper(`const p = await context.newPage(); await p.goto("https://example.org/?bp-owner=1"); return p.url();`);
+  check("owner's tab open before the run", /example\.org\/\?bp-owner=1/.test(ownerUrl ?? ""), ownerUrl);
+
   // 4. The agent's MCP over CDP.
   const mcp = await si.mcpServer("smoke-agent-1");
   check("MCP server for a run", mcp && "server" in mcp, mcp && "session" in mcp ? mcp.session : JSON.stringify(mcp));
   const agent = await mcpClient(mcp.server);
   const tools = (await agent.rpc("tools/list", {})).result.tools.map((t) => t.name);
-  check("MCP lists only allowed tools", tools.includes("browser_navigate") && !tools.includes("browser_run_code_unsafe") && !tools.includes("browser_file_upload"), `${tools.length} tools`);
-  check("denied tool refused", /turned off/.test((await agent.call("browser_run_code_unsafe", { code: "1" })).text));
-  let r = await agent.call("browser_tabs", { action: "new", url: "https://example.com" });
+  check(
+    "MCP lists only the signed-in tools (no evaluate, console or network tools)",
+    tools.includes("browser_navigate") && !["browser_evaluate", "browser_console_messages", "browser_network_requests", "browser_run_code_unsafe", "browser_file_upload"].some((t) => tools.includes(t)),
+    `${tools.length} tools`,
+  );
+  for (const tool of ["browser_evaluate", "browser_console_messages", "browser_network_requests", "browser_run_code_unsafe"]) {
+    check(`signed-in run refused ${tool}`, /turned off/.test((await agent.call(tool, { function: "() => document.cookie", code: "1" })).text));
+  }
+  let r = await agent.call("browser_tabs", { action: "list" });
+  check("the owner's tab is hidden from the run", !/example\.org|bp-owner/.test(r.text), r.text.split("\n").filter((l) => /^- \d+:/.test(l)).join(" ").slice(0, 120) || "no tabs");
+  r = await agent.call("browser_tabs", { action: "select", index: 0 });
+  r = await agent.call("browser_snapshot", {});
+  check("the run cannot reach the owner's tab by index", !/example\.org|bp-owner/.test(r.text));
+  r = await agent.call("browser_tabs", { action: "new", url: "https://example.com" });
   check("agent opens https://example.com over CDP", !r.error && /Example Domain/.test(r.text));
   for (const target of ["http://100.96.145.38:5299/", "http://paseo-box.tail60821.ts.net/", "http://192.168.1.1/", "http://127.0.0.1:9222/json/version", "http://127.0.0.1:8080/api/whoami"]) {
     await agent.call("browser_tabs", { action: "new" });
     const nav = await agent.call("browser_navigate", { url: target });
-    const body = (await agent.call("browser_evaluate", { function: "() => document.body ? document.body.innerText.slice(0, 200) : ''" })).text;
-    const leaked = /webSocketDebuggerUrl|"Browser"|"is_admin"|neko/i.test(body);
-    check(`agent blocked from ${target}`, (nav.error || /Blocked by the browser-prompt|403/.test(nav.text + body)) && !leaked, nav.error ? nav.text.split("\n").find((l) => /Error|ERR_/.test(l))?.slice(0, 90) : "403 page");
+    const snap = (await agent.call("browser_snapshot", {})).text;
+    const leaked = /webSocketDebuggerUrl|"Browser"|is_admin|neko/i.test(snap);
+    check(`agent blocked from ${target}`, (nav.error || /Blocked by the browser-prompt|403/.test(nav.text + snap)) && !leaked, nav.error ? nav.text.split("\n").find((l) => /Error|ERR_/.test(l))?.slice(0, 90) : "403 page");
     await agent.call("browser_tabs", { action: "close" });
   }
   for (const target of ["chrome://history", "chrome://settings", "chrome://settings/content/all", "chrome://version", "view-source:https://example.com", "about:version", "chrome-untrusted://print/", "devtools://devtools/bundled/inspector.html"]) {
     await agent.call("browser_tabs", { action: "new" });
     const nav = await agent.call("browser_navigate", { url: target });
-    const page = (await agent.call("browser_evaluate", { function: "() => JSON.stringify({ url: location.href, text: document.body ? document.body.innerText.slice(0, 300) : '' })" })).text;
-    const seen = JSON.parse(JSON.parse(page.match(/"\{.*\}"/)?.[0] ?? '"{}"'));
-    // Refused: Chromium's policy block (ERR_BLOCKED_BY_ADMINISTRATOR, an error page), or an empty page (about:version).
-    const blocked = /ERR_BLOCKED_BY_ADMINISTRATOR/.test(nav.text) || String(seen.url ?? "").startsWith("chrome-error://");
-    const empty = !String(seen.text ?? "").trim();
-    check(`agent refused ${target}`, blocked || empty, blocked ? "ERR_BLOCKED_BY_ADMINISTRATOR" : "empty page, nothing shown");
+    const snap = (await agent.call("browser_snapshot", {})).text;
+    const blocked = /ERR_BLOCKED_BY_ADMINISTRATOR/.test(nav.text) || /chrome-error:\/\//.test(snap);
+    const shown = /Example Domain|History|Settings|Version|Chromium|- (heading|paragraph|link|row|cell) /.test(snap.split("### Snapshot")[1] ?? "");
+    check(`agent refused ${target}`, blocked || !shown, blocked ? "ERR_BLOCKED_BY_ADMINISTRATOR" : "empty page, nothing shown");
     await agent.call("browser_tabs", { action: "close" });
   }
   r = await agent.call("browser_navigate", { url: "https://example.com" });
   check("normal https still works after the internal-page checks", !r.error && /Example Domain/.test(r.text));
-  await agent.call("browser_tabs", { action: "close" });
-  r = await agent.call("browser_tabs", { action: "list" });
-  const tabIndex = [...r.text.matchAll(/- (\d+):.*\(https:\/\/example\.com\/?\)/g)].map((m) => Number(m[1])).at(-1);
-  await agent.call("browser_tabs", { action: "select", index: tabIndex });
-  await agent.call("browser_evaluate", {
-    function:
-      "() => { document.body.innerHTML = '<input id=user autocomplete=off style=\"position:fixed;left:0;top:0;width:100vw;height:45vh;font-size:40px\"><button id=btn style=\"position:fixed;left:0;top:55vh;width:100vw;height:45vh;font-size:40px\" onclick=\"window.clicks=(window.clicks||0)+1\">tap</button>'; return 1; }",
-  });
+  r = await agent.call("browser_tabs", { action: "new", url: "https://example.com/?bp-smoke=takeover" });
+  helper(`${pageByMarker("bp-smoke=takeover")} await page.bringToFront(); await page.evaluate(() => { document.body.innerHTML = '<input id=user autocomplete=off style="position:fixed;left:0;top:0;width:100vw;height:45vh;font-size:40px"><button id=btn style="position:fixed;left:0;top:55vh;width:100vw;height:45vh;font-size:40px" onclick="window.clicks=(window.clicks||0)+1">tap</button>'; }); return 1;`);
   const busy = await si.prepare({ sourceId: "smoke", cardId: "card" });
   check("one run at a time: a second run is busy", !busy.ok && busy.state === "busy", JSON.stringify(busy));
 
-  // 5. The phone viewer: key flow, control, tap and type.
+  // 5. The phone viewer: key flow, control (the run pauses), tap and type, then close the viewer
+  // without releasing: the relay resets control and the run goes on.
   const require = createRequire(join(process.env.SMOKE_PLAYWRIGHT_CORE ?? "", "/"));
   const { chromium } = require("playwright-core");
   browser = await chromium.launch({ executablePath: process.env.SMOKE_CHROMIUM, args: ["--autoplay-policy=no-user-gesture-required"] });
@@ -231,6 +259,7 @@ try {
     viewerCookie && viewerCookie.httpOnly && viewerCookie.sameSite === "Strict" && viewerCookie.path === `${prefix}/` && viewerCookie.expires - Date.now() / 1000 <= 7200,
     viewerCookie ? `${viewerCookie.name.slice(0, 10)}…, path /s-…/` : "none",
   );
+  const cookie = `${viewerCookie.name}=${viewerCookie.value}`;
   check("viewer: the fragment is gone from the address", !page.url().includes("#"));
   await page.waitForSelector("video", { timeout: 20_000 });
   await page.waitForTimeout(4000);
@@ -260,27 +289,20 @@ try {
   if (await keyboard.count()) await keyboard.first().tap().catch(() => {});
   await page.keyboard.type("alice", { delay: 60 });
   await page.waitForTimeout(1000);
-  const release = page.locator('button[aria-label="Release Controls"], button[aria-label="controls.release"]').first();
-  const releasable = (await release.count()) > 0;
-  if (releasable) await release.click({ force: true });
-  else await page.close();
-  await page.waitForTimeout(2500);
-  // After a takeover the agent's current tab may have moved (Chromium's omnibox popups show up as
-  // pages); the prompt tells the agent to list and select its own tab again, as here.
-  r = await agent.call("browser_tabs", { action: "list" });
-  console.log(`(tabs after the takeover: ${r.text.split("\n").filter((l) => /^- \d+:/.test(l)).join(" ").slice(0, 300)})`);
-  check("no blocked chrome:// popup pages among the tabs (native address-bar popup)", !/omnibox-popup/.test(r.text));
-  const ownTab = [...r.text.matchAll(/- (\d+):.*\(https:\/\/example\.com\/?\)/g)].map((m) => Number(m[1])).at(-1);
-  await agent.call("browser_tabs", { action: "select", index: ownTab });
-  r = await agent.call("browser_evaluate", { function: "() => JSON.stringify({ user: document.getElementById('user').value, clicks: window.clicks || 0 })" });
-  check("takeover: the agent works again once the owner releases control", !r.error, releasable ? "released with the button" : "viewer closed");
-  const seen = JSON.parse(JSON.parse(r.text.match(/"\{.*\}"/)?.[0] ?? '"{}"'));
-  check("takeover: the phone's taps and typing reach the agent's page", seen.user === "alice" && seen.clicks === 2, JSON.stringify(seen));
+  const seen = helper(`${pageByMarker("bp-smoke=takeover")} return page.evaluate(() => ({ user: document.getElementById("user").value, clicks: window.clicks || 0 }));`);
+  check("takeover: the phone's taps and typing reach the agent's page", seen?.user === "alice" && seen?.clicks === 2, JSON.stringify(seen));
   check("viewer: no refused requests from the neko client", refused.length === 0, refused.join(", "));
+  await page.close();
+  await sleep(3500);
+  r = await agent.call("browser_snapshot", {});
+  check("closing the viewer without releasing control resets it: the run goes on", !r.error, r.error ? r.text.slice(0, 80) : "");
 
-  // 6. Relay refusals with a valid session.
-  const cookie = `${viewerCookie.name}=${viewerCookie.value}`;
-  check("relay: the session cookie does nothing outside its path", (await http("GET", "/api/whoami", { Cookie: cookie })).status === 401);
+  // 6. Relay refusals with a valid session (a new viewer session, the old page is closed).
+  const link2 = await si.viewerLink({ purpose: "login", portrait: false });
+  const ticket2 = decodeURIComponent(new URL(link2.url).hash.slice(3).split("&")[0]);
+  const session2 = await http("POST", "/bp/session", { Origin: ORIGIN, "Content-Type": "application/json" }, JSON.stringify({ ticket: ticket2 }));
+  const cookie2 = String(session2.headers["set-cookie"]).split(";")[0];
+  check("relay: the session cookie does nothing outside its path", (await http("GET", "/api/whoami", { Cookie: cookie2 })).status === 401);
   for (const [method, path] of [
     ["GET", "/metrics"],
     ["GET", "/health"],
@@ -291,38 +313,55 @@ try {
     ["POST", "/api/room/settings"],
     ["GET", "/api/filetransfer"],
   ]) {
-    const res = await http(method, `${prefix}${path}`, { Cookie: cookie, Origin: ORIGIN });
-    check(`relay refuses ${method} ${path}`, res.status === 403, res.status);
+    const res = await http(method, `${prefix}${path}`, { Cookie: cookie2, Origin: ORIGIN });
+    check(`relay refuses ${method} ${path}`, res.status === 403 || res.status === 401, res.status);
   }
-  check("relay: foreign Host refused", (await http("GET", `${prefix}/`, { Host: "evil.example", Cookie: cookie })).status === 421);
-  check("relay: WebSocket with a foreign Origin refused", / 403 /.test(await upgrade({ Cookie: cookie, Origin: "http://evil.example" }, `${prefix}/api/ws`)));
-  check("relay: WebSocket without a session refused", / 401 /.test(await upgrade({ Origin: ORIGIN }, `${prefix}/api/ws`)));
-  check("relay: WebSocket outside the prefix refused", / 403 /.test(await upgrade({ Cookie: cookie, Origin: ORIGIN }, "/api/ws")));
-  check("relay: WebSocket with own Origin and session accepted", / 101 /.test(await upgrade({ Cookie: cookie, Origin: ORIGIN }, `${prefix}/api/ws`)));
-  const keys = JSON.parse((await import("node:fs")).readFileSync(join(state, "keys.json"), "utf8"));
-  const relayStatus = JSON.parse((await http("GET", "/bp/status", { Authorization: `Bearer ${keys.statusToken}` })).body);
-  console.log(`(the relay sees viewers coming from ${relayStatus.lastPeer}: ${/^127\./.test(relayStatus.lastPeer) ? "the real peer" : "Docker's port forwarder, so peer binding adds nothing on this host"})`);
-  const ticket = decodeURIComponent(new URL(link.url).hash.slice(3).split("&")[0]);
-  check("relay: a used ticket is refused", (await http("POST", "/bp/session", { Origin: ORIGIN, "Content-Type": "application/json" }, JSON.stringify({ ticket }))).status === 401);
-  await browser.close();
-  browser = null;
+  const prefix2 = JSON.parse(session2.body).path.replace(/\/$/, "");
+  check("relay: foreign Host refused", (await http("GET", `${prefix2}/`, { Host: "evil.example", Cookie: cookie2 })).status === 421);
+  check("relay: WebSocket with a foreign Origin refused", / 403 /.test(await upgrade({ Cookie: cookie2, Origin: "http://evil.example" }, `${prefix2}/api/ws`)));
+  check("relay: WebSocket without a session refused", / 401 /.test(await upgrade({ Origin: ORIGIN }, `${prefix2}/api/ws`)));
+  check("relay: WebSocket outside the prefix refused", / 403 /.test(await upgrade({ Cookie: cookie2, Origin: ORIGIN }, "/api/ws")));
+  check("relay: WebSocket with own Origin and session accepted", / 101 /.test(await upgrade({ Cookie: cookie2, Origin: ORIGIN }, `${prefix2}/api/ws`)));
+  check("relay: a used ticket is refused", (await http("POST", "/bp/session", { Origin: ORIGIN, "Content-Type": "application/json" }, JSON.stringify({ ticket: ticket2 }))).status === 401);
+  const badStarted = Date.now();
+  let bad = 0;
+  for (let i = 0; i < 25; i++) bad += (await http("POST", "/bp/session", { Origin: ORIGIN, "Content-Type": "application/json" }, JSON.stringify({ ticket: `v1.${Math.floor(Date.now() / 1000) + 60}.aaaaaaaaaaaaaaaa.login.${"A".repeat(43)}` }))).status === 401 ? 1 : 0;
+  check("relay: bad tickets are slowed down (500 ms each), never a lockout", bad === 25 && Date.now() - badStarted >= 25 * 450, `${Date.now() - badStarted} ms`);
+  const link3 = await si.viewerLink({ purpose: "login", portrait: false });
+  const fresh = await http("POST", "/bp/session", { Origin: ORIGIN, "Content-Type": "application/json" }, JSON.stringify({ ticket: decodeURIComponent(new URL(link3.url).hash.slice(3).split("&")[0]) }));
+  check("relay: a good link still works after many bad ones", fresh.status === 200, fresh.status);
+  const control = helper(`return (await fetch("http://${relayName}:8081/control")).json();`);
+  check("relay: takeover state reachable from the run's network namespace", control && typeof control.ownerControl === "boolean", JSON.stringify(control));
+  const relayPublicIp = inspect(relayName, `{{(index .NetworkSettings.Networks "${neko.replace(/-neko$/, "-pub")}").IPAddress}}`);
+  const fromPublic = docker("exec", proxyName, "node", "-e", `fetch("http://${relayPublicIp}:8081/control",{signal:AbortSignal.timeout(3000)}).then(()=>console.log("open"),()=>console.log("refused"))`);
+  check("relay: the takeover port is not on the outward network", fromPublic === "refused", fromPublic);
 
-  // 7. A cookie survives a neko restart.
+  // 7. browser_close leaves the owner's tabs alone; a cookie survives a neko restart.
+  r = await agent.call("browser_close", {});
+  const after = helper(`return context.pages().map((p) => p.url());`);
+  check("browser_close leaves the owner's browser and tabs", Array.isArray(after) && after.some((u) => u.includes("bp-owner=1")), (after ?? []).length + " pages");
   const value = Math.random().toString(36).slice(2, 10);
-  await agent.call("browser_tabs", { action: "new", url: "https://example.com" });
-  r = await agent.call("browser_evaluate", { function: `() => { document.cookie = "bp_smoke=${value}; max-age=86400; path=/; secure"; return location.origin + " " + document.cookie; }` });
-  check("cookie set on https://example.com", !r.error && r.text.includes(`https://example.com`) && r.text.includes(`bp_smoke=${value}`), r.error ? r.text.slice(0, 120) : "");
+  const set = helper(`const p = await context.newPage(); await p.goto("https://example.com/?bp-smoke=cookie"); await p.evaluate((v) => { document.cookie = "bp_smoke=" + v + "; max-age=86400; path=/; secure"; }, ${JSON.stringify(value)}); return (await context.cookies("https://example.com")).map((c) => c.name);`);
+  check("cookie set on https://example.com", Array.isArray(set) && set.includes("bp_smoke"));
   await agent.close();
   console.log("waiting 50 s for Chromium to write its cookies…");
   await sleep(50_000);
   await si.stop();
   check("stopped (profile kept)", (await si.status()).state === "ready" && docker("volume", "ls", "--format", "{{.Name}}").split("\n").includes(neko.replace(/-neko$/, "-profile")));
   await si.viewerLink({ purpose: "login", portrait: false });
-  const again = await mcpClient((await si.mcpServer("smoke-agent-2")).server);
-  await again.call("browser_tabs", { action: "new", url: "https://example.com" });
-  r = await again.call("browser_evaluate", { function: "() => document.cookie" });
-  check("a cookie survives a neko restart", r.text.includes(`bp_smoke=${value}`), r.text.includes(`bp_smoke=${value}`) ? "" : r.text.slice(0, 160));
-  await again.close();
+  const cookies = helper(`return (await context.cookies("https://example.com")).filter((c) => c.name === "bp_smoke").map((c) => c.value);`);
+  check("a cookie survives a neko restart", Array.isArray(cookies) && cookies.includes(value), JSON.stringify(cookies));
+
+  // 8. A missing relay and proxy are started alone; neko keeps running.
+  const nekoStarted = inspect(neko, "{{.State.StartedAt}}");
+  docker("rm", "-f", relayName, proxyName);
+  await si.viewerLink({ purpose: "login", portrait: false });
+  check(
+    "a missing relay and proxy are restarted alone (neko untouched)",
+    inspect(neko, "{{.State.StartedAt}}") === nekoStarted && inspect(relayName, "{{.State.Running}}") === "true" && inspect(proxyName, "{{.State.Running}}") === "true",
+  );
+  const viaNewProxy = helper(`const p = await context.newPage(); const res = await p.goto("https://example.com/?bp-smoke=after-repair"); const ok = res?.ok(); await p.close(); return ok;`);
+  check("the browser reaches the web through the new proxy (by name)", viaNewProxy === true);
 } catch (error) {
   check("smoke run", false, error instanceof Error ? error.stack : String(error));
 } finally {

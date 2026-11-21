@@ -19,7 +19,9 @@ import {
   parseBrowserAgent,
   runBrowserOf,
   SERVER_SCREENSHOT_RULE,
+  SIGNED_IN_BROWSER_TOOLS,
   SIGNED_IN_CLOSE_TABS_RULE,
+  SIGNED_IN_REMOVED_TOOLS,
   SIGNED_IN_SAFETY_PREAMBLE,
   SERVER_SAFETY_PREAMBLE,
 } from "../shared/agent-prompt.ts";
@@ -65,7 +67,17 @@ import { createServerBrowser } from "../server/server-browser.ts";
 import { createSignedIn, loadKeys, relaySecret, signViewerTicket } from "../server/signed-in.ts";
 import { SIGNED_IN_FILES } from "../server/server-browser-files.ts";
 import { checkPlan, launch } from "../server-browser/launch.mjs";
-import { filterClientLine, OWNER_CONTROL_TEXT } from "../server-browser/mcp-filter.mjs";
+import {
+  createCallTracker,
+  createControlGuard,
+  filterClientLine,
+  filterServerLine,
+  OWNER_CONTROL_TEXT,
+  SIGNED_IN_ALLOWED_TOOLS,
+  SIGNED_IN_REMOVED_TOOLS as FILTER_REMOVED,
+  toolAllowed,
+} from "../server-browser/mcp-filter.mjs";
+import { createTargetFilter, REFUSED_METHODS } from "../server-browser/cdp-filter.mjs";
 import {
   classifyRequest,
   hostsOf,
@@ -209,7 +221,15 @@ async function fakeNeko() {
     }
     if (req.url === "/health") return res.writeHead(200).end("true");
     if (req.headers.authorization !== "Bearer neko-token") return res.writeHead(401).end("{}");
-    if (req.url === "/api/room/control") return res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ has_host: state.hasHost }));
+    if (req.url === "/api/room/control") {
+      if (state.controlFails) return res.writeHead(500).end("{}");
+      return res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ has_host: state.hasHost }));
+    }
+    if (req.url === "/api/room/control/reset") {
+      state.resets = (state.resets ?? 0) + 1;
+      state.hasHost = false;
+      return res.writeHead(204).end();
+    }
     res
       .writeHead(200, {
         "Content-Type": "application/json",
@@ -273,6 +293,7 @@ async function relayFor(neko, extra = {}) {
     secret: SECRET,
     statusToken: STATUS,
     adminPassword: "admin-pw",
+    badTicketDelayMs: 0,
     ...extra,
   });
 }
@@ -347,12 +368,9 @@ test("relay end to end: ticket to a scoped cookie, forwarding under the prefix w
     assert.equal((await http(relay.port, "POST", `${P}/api/logout`, { ...ORIGIN_HEADERS, Cookie: cookie })).status, 200);
     assert.equal((await http(relay.port, "GET", `${P}/api/whoami`, { ...HOST, Cookie: cookie })).status, 401);
 
-    // Too many bad tickets from one address in a minute: 429, also for a good one; a minute later it works again.
-    for (let i = 0; i < 19; i++) assert.equal((await postTicket(relay, `v1.${Math.floor(now / 1000) + 60}.aaaaaaaaaaaaaaaa.login.${"A".repeat(43)}`)).status, 401);
-    const good = ticketAt(now, "nonce-nonce-nonce-2");
-    assert.equal((await postTicket(relay, good)).status, 429);
-    now += 61_000;
-    assert.equal((await postTicket(relay, good)).status, 200);
+    // No lockout (with rootless Docker every client has the same address): after many bad tickets a good one works.
+    for (let i = 0; i < 25; i++) assert.equal((await postTicket(relay, `v1.${Math.floor(now / 1000) + 60}.aaaaaaaaaaaaaaaa.login.${"A".repeat(43)}`)).status, 401);
+    assert.equal((await postTicket(relay, ticketAt(now, "nonce-nonce-nonce-2"))).status, 200);
     assert.ok(logs.every((line) => !line.includes(SECRET) && !line.includes("neko-token") && !line.includes(ticket)), "logs hold no secrets or tickets");
   } finally {
     await relay.close();
@@ -360,7 +378,7 @@ test("relay end to end: ticket to a scoped cookie, forwarding under the prefix w
   }
 });
 
-test("relay sessions: 2 hours at most, 20 minutes without use, bound to the address they started from; failures counted per address", async () => {
+test("relay sessions: 2 hours at most, 20 minutes without use, bound to the address they started from; bad tickets are slowed down, not locked out", async () => {
   const neko = await fakeNeko();
   let now = 1_800_000_000_000;
   const relay = await startRelay({
@@ -398,10 +416,10 @@ test("relay sessions: 2 hours at most, 20 minutes without use, bound to the addr
     assert.equal(await whoami(cookie, "::1"), 401, "the cookie from another address is refused");
     assert.equal(await whoami(cookie, "127.0.0.1"), 200);
 
-    // Failures count per address: one address's failures do not lock the other out.
-    for (let i = 0; i < 20; i++) await postTicket(relay, `v1.${Math.floor(now / 1000) + 60}.bbbbbbbbbbbbbbbb.login.${"B".repeat(43)}`, ORIGIN_HEADERS, "::1");
-    assert.equal((await postTicket(relay, ticketAt(now, "rate-rate-rate-01"), ORIGIN_HEADERS, "::1")).status, 429);
-    assert.equal((await postTicket(relay, ticketAt(now, "rate-rate-rate-02"), ORIGIN_HEADERS, "127.0.0.1")).status, 200);
+    // A bad ticket is answered after the constant delay (this relay uses the default 500 ms).
+    const started = Date.now();
+    assert.equal((await postTicket(relay, `v1.${Math.floor(now / 1000) + 60}.bbbbbbbbbbbbbbbb.login.${"B".repeat(43)}`, ORIGIN_HEADERS, "::1")).status, 401);
+    assert.ok(Date.now() - started >= 450, "slowed down");
   } finally {
     await relay.close();
     await neko.close();
@@ -424,34 +442,43 @@ test("relay: a ticket counts as used only once neko let the owner in", async () 
   }
 });
 
-test("relay: takeover state on its unpublished control port follows neko's control", async () => {
+test("relay: takeover state on the control listener follows neko's control, unsure counts as held while a viewer is connected, and the last viewer leaving resets control", async () => {
   const neko = await fakeNeko();
-  const withControl = await startRelay({
-    nekoHost: "127.0.0.1",
-    nekoPort: neko.port,
-    listenHost: "127.0.0.1",
-    listenPort: 0,
-    controlPort: 18_081 + Math.floor(Math.random() * 1000),
-    controlPollMs: 50,
-    origins: ["http://127.0.0.1:5301"],
-    secret: SECRET,
-    statusToken: STATUS,
-    adminPassword: "admin-pw",
-  });
-  const read = async () => JSON.parse((await http(withControl.controlPort, "GET", "/control")).body);
+  const relay = await relayFor(neko, { controlPollMs: 60_000, log: () => {} });
+  const port = await relay.startControl("127.0.0.1", 0);
+  const read = async () => JSON.parse((await http(port, "GET", "/control")).body);
   try {
-    await withControl.pollControl();
+    await relay.pollControl();
     assert.deepEqual(await read(), { ownerControl: false, known: true });
     neko.state.hasHost = true;
-    await withControl.pollControl();
+    await relay.pollControl();
     assert.deepEqual(await read(), { ownerControl: true, known: true });
-    assert.equal((await http(withControl.controlPort, "GET", "/other")).status, 404);
-    assert.equal((await http(withControl.controlPort, "POST", "/control")).status, 404);
+    assert.equal((await http(port, "GET", "/other")).status, 404);
+    assert.equal((await http(port, "POST", "/control")).status, 404);
     neko.state.hasHost = false;
-    await withControl.pollControl();
+    await relay.pollControl();
     assert.equal((await read()).ownerControl, false);
+    // neko cannot be asked: without viewers nobody can hold control; with one, unsure counts as held.
+    neko.state.controlFails = true;
+    await relay.pollControl();
+    assert.deepEqual(await read(), { ownerControl: false, known: false });
+    const created = await postTicket(relay, ticketAt(Date.now(), "ctrl-ctrl-ctrl-001"));
+    const cookie = String(created.headers["set-cookie"]).split(";")[0];
+    const socket = connect(relay.port, "127.0.0.1");
+    await new Promise((resolve) => socket.on("connect", resolve));
+    socket.write(
+      [`GET ${relay.prefix}/api/ws HTTP/1.1`, "Host: 127.0.0.1:5301", "Origin: http://127.0.0.1:5301", `Cookie: ${cookie}`, "Upgrade: websocket", "Connection: Upgrade", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version: 13", "", ""].join("\r\n"),
+    );
+    await new Promise((resolve) => socket.once("data", resolve));
+    assert.equal(relay.state().viewers, 1);
+    assert.deepEqual(await read(), { ownerControl: true, known: false }, "unsure while a viewer is connected: held");
+    // The fake neko ends the WebSocket after 50 ms: the last viewer is gone, control is reset.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(relay.state().viewers, 0);
+    assert.equal(neko.state.resets, 1, "control reset when the last viewer left");
+    socket.destroy();
   } finally {
-    await withControl.close();
+    await relay.close();
     await neko.close();
   }
 });
@@ -486,7 +513,10 @@ test("the run's MCP filter pauses every tool call while the owner holds control"
   const list = JSON.stringify({ jsonrpc: "2.0", id: 8, method: "tools/list" });
   assert.deepEqual(filterClientLine(list, { ownerControl: true }), { forward: list }, "listing tools still works");
   const entry = readFileSync(new URL("../server-browser/entrypoint.mjs", import.meta.url), "utf8");
-  assert.match(entry, /const verdict = filterClientLine\(line, \{ ownerControl \}\);/);
+  assert.match(entry, /const verdict = filterClientLine\(line, \{ ownerControl: guard\.held\(\), signedIn \}\);/);
+  assert.match(entry, /if \(signedIn\) calls\.started\(verdict\.forward\);/);
+  assert.match(entry, /if \(kept !== null && signedIn\) kept = calls\.finish\(kept, guard\.held\(\)\);/);
+  assert.match(entry, /if \(polling\) return;/, "never two polls at once");
   assert.match(entry, /setInterval\(\(\) => void poll\(\), 1000\)/);
 });
 
@@ -541,7 +571,7 @@ test("neko: internal network only, four capabilities, sandbox profile, read-only
     "NEKO_WEBRTC_NAT1TO1=100.96.145.38",
     "NEKO_WEBRTC_ICESERVERS_FRONTEND=[]",
     "NEKO_WEBRTC_ICESERVERS_BACKEND=[]",
-    "BP_PROXY=http://__BP_PROXY_IP__:3128",
+    "BP_PROXY=http://bp-si-0a1b2c3d-proxy:3128",
     `NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD=${KEYS.nekoAdminPassword}`,
   ])
     assert.ok(env.includes(expected), expected);
@@ -561,6 +591,7 @@ test("relay and proxy: published only on the bind address, no capabilities, no m
   assert.ok(value(relay, "--env").includes("BP_PUBLIC_ORIGINS=http://100.96.145.38:5301"));
   assert.ok(value(relay, "--env").includes("BP_NEKO_HOST=bp-si-0a1b2c3d-neko"));
   assert.ok(value(relay, "--env").includes("BP_CONTROL_PORT=8081"));
+  assert.ok(value(relay, "--env").includes("BP_CONTROL_SUBNET=__BP_SUBNET__"));
   assert.ok(value(relay, "--env").includes("BP_MAX_LIFETIME_S=604800"));
   assert.ok(!value(relay, "--publish").some((p) => p.includes("8081")), "the control port is never published");
   const relayMain = readFileSync(new URL("../server-browser/relay-main.mjs", import.meta.url), "utf8");
@@ -874,7 +905,7 @@ test("daemon: a viewer link starts the stack in order with checked arguments; on
     ],
   );
   const nekoRun = docker.calls.find((args) => args[0] === "run" && value(args, "--name")[0] === stack.neko);
-  assert.ok(value(nekoRun, "--env").includes("BP_PROXY=http://172.30.0.2:3128"), "the proxy's address is filled in");
+  assert.ok(value(nekoRun, "--env").some((e) => /^BP_PROXY=http:\/\/bp-si-[0-9a-f]{8}-proxy:3128$/.test(e)), "the proxy by name");
   const proxyRun = docker.calls.find((args) => args[0] === "run" && value(args, "--name")[0] === stack.proxy);
   assert.ok(value(proxyRun, "--env").includes("BP_ALLOW_CLIENTS=172.30.0.0/16"));
   const keysFile = join(dir, "keys.json");
@@ -1088,4 +1119,144 @@ test("daemon: a start that fails stops a running neko gracefully (cookies are wr
   assert.deepEqual(stopAfter[0].slice(0, 3), ["stop", "-t", "45"]);
   const rmAfter = docker.calls.findIndex((args, i) => i > lastRun && args[0] === "rm" && args.some((a) => /-neko$/.test(a)));
   assert.ok(rmAfter > stopAfter[1], "removed only after the graceful stop");
+});
+
+test("signed-in runs get no tool that reads page script state; the filter's list and the prompt's list are equal", () => {
+  assert.deepEqual([...FILTER_REMOVED].sort(), [...SIGNED_IN_REMOVED_TOOLS].sort());
+  assert.deepEqual([...SIGNED_IN_ALLOWED_TOOLS].sort(), [...SIGNED_IN_BROWSER_TOOLS].sort());
+  for (const tool of ["browser_evaluate", "browser_console_messages", "browser_network_requests"]) {
+    assert.equal(toolAllowed(tool, true), false, tool);
+    assert.equal(toolAllowed(tool, false), true, `${tool} stays for the (not signed-in) Server browser`);
+    const call = JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: tool, arguments: {} } });
+    assert.equal(JSON.parse(filterClientLine(call, { signedIn: true }).reply).result.isError, true);
+  }
+  const listed = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { tools: [{ name: "browser_evaluate" }, { name: "browser_snapshot" }, { name: "browser_console_messages" }] } });
+  assert.deepEqual(JSON.parse(filterServerLine(listed, { signedIn: true })).result.tools, [{ name: "browser_snapshot" }]);
+  assert.equal(JSON.parse(filterServerLine(listed) ?? JSON.stringify({ result: { tools: JSON.parse(listed).result.tools } })).result.tools.length, 3, "the Server browser keeps all three");
+  assert.doesNotMatch(SIGNED_IN_SAFETY_PREAMBLE.split("\n").find((line) => line.startsWith("1. ")).split(";")[0], /browser_evaluate/, "rule 1 does not offer evaluate");
+  assert.match(SIGNED_IN_SAFETY_PREAMBLE, /mcp__server-browser__browser_evaluate, mcp__server-browser__browser_console_messages, mcp__server-browser__browser_network_requests are turned off in this browser/);
+  assert.match(SIGNED_IN_SAFETY_PREAMBLE, /The owner's own tabs are hidden from you/);
+});
+
+test("control guard: unsure counts as held, a held state lasts through failures for 10 s, opens only after sustained failure, ignores old results", () => {
+  let t = 0;
+  const guard = createControlGuard({ now: () => t });
+  assert.equal(guard.held(), false);
+  guard.result(guard.next(), { ownerControl: true, known: true });
+  assert.equal(guard.held(), true);
+  t += 3000;
+  guard.failure(guard.next());
+  guard.failure(guard.next());
+  guard.failure(guard.next());
+  assert.equal(guard.held(), true, "within 10 s of the last held state");
+  t += 8000;
+  guard.failure(guard.next());
+  assert.equal(guard.held(), false, "11 s and four failures later");
+  guard.result(guard.next(), { ownerControl: false, known: false });
+  assert.equal(guard.held(), true, "unsure counts as held");
+  guard.result(guard.next(), { ownerControl: false, known: true });
+  assert.equal(guard.held(), false);
+  const late = guard.next();
+  guard.result(guard.next(), { ownerControl: true, known: true });
+  guard.result(late, { ownerControl: false, known: true });
+  assert.equal(guard.held(), true, "an older result is ignored");
+  const fresh = createControlGuard({ now: () => t });
+  fresh.failure(fresh.next());
+  fresh.failure(fresh.next());
+  assert.equal(fresh.held(), false, "never held: stays open");
+});
+
+test("call tracker: a result that arrives while the owner holds control, or whose call overlapped a takeover, is withheld", () => {
+  const calls = createCallTracker();
+  const call = (id) => JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "browser_snapshot" } });
+  const result = (id) => JSON.stringify({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "secret value" }] } });
+  calls.started(call(1));
+  assert.equal(calls.finish(result(1), false), result(1), "no takeover: passed on");
+  calls.started(call(2));
+  calls.markHeld();
+  const withheld = JSON.parse(calls.finish(result(2), false));
+  assert.equal(withheld.id, 2);
+  assert.equal(withheld.result.isError, true);
+  assert.equal(withheld.result.content[0].text, OWNER_CONTROL_TEXT, "overlapped a held period");
+  calls.started(call("x"));
+  assert.equal(JSON.parse(calls.finish(result("x"), true)).result.content[0].text, OWNER_CONTROL_TEXT, "arrives while held");
+  const other = JSON.stringify({ jsonrpc: "2.0", id: 9, result: { tools: [] } });
+  assert.equal(calls.finish(other, true), other, "answers to other requests are not touched");
+  assert.equal(calls.size(), 0);
+});
+
+test("DevTools filter: the owner's tabs are hidden from the run; commands on them and closing the browser are refused", () => {
+  let held = false;
+  const filter = createTargetFilter({ held: () => held });
+  filter.hideExisting(["OWNER1", "OWNER2"]);
+  const attached = (targetId, extra = {}) => ({ method: "Target.attachedToTarget", params: { sessionId: `S-${targetId}`, targetInfo: { targetId, type: "page", ...extra }, waitingForDebugger: false } });
+  // Existing owner pages: never reach Playwright, and are detached.
+  let verdict = filter.fromBrowser(attached("OWNER1"));
+  assert.equal(verdict.deliver, null);
+  assert.deepEqual(verdict.toBrowser.map((m) => m.method), ["Target.detachFromTarget"]);
+  assert.equal(filter.fromBrowser({ method: "Target.targetInfoChanged", params: { targetInfo: { targetId: "OWNER2", type: "page", url: "https://mail.example/" } } }).deliver, null);
+  assert.equal(filter.fromBrowser({ sessionId: "S-OWNER1", method: "Page.frameNavigated", params: {} }).deliver, null, "nothing from a hidden session");
+  // The run's own page: visible.
+  verdict = filter.fromBrowser(attached("AGENT1"));
+  assert.ok(verdict.deliver);
+  // A page the owner opens while holding control: hidden, resumed and detached.
+  held = true;
+  verdict = filter.fromBrowser({ method: "Target.attachedToTarget", params: { sessionId: "S-NEW", targetInfo: { targetId: "OWNERNEW", type: "page" }, waitingForDebugger: true } });
+  assert.equal(verdict.deliver, null);
+  assert.deepEqual(verdict.toBrowser.map((m) => m.method), ["Runtime.runIfWaitingForDebugger", "Target.detachFromTarget"]);
+  // A popup of the run's page stays visible even while held; a popup of an owner page is hidden.
+  assert.ok(filter.fromBrowser(attached("POPUP1", { openerId: "AGENT1" })).deliver);
+  held = false;
+  assert.equal(filter.fromBrowser(attached("POPUP2", { openerId: "OWNER2" })).deliver, null);
+  // Commands.
+  for (const method of ["Target.attachToTarget", "Target.activateTarget", "Target.closeTarget", "Target.getTargetInfo"]) {
+    assert.ok(filter.fromClient({ id: 5, method, params: { targetId: "OWNER1" } }).reply, method);
+    assert.ok(filter.fromClient({ id: 6, method, params: { targetId: "AGENT1" } }).forward, method);
+  }
+  for (const method of REFUSED_METHODS) assert.ok(filter.fromClient({ id: 7, method }).reply, method);
+  assert.ok(filter.fromClient({ id: 8, sessionId: "S-NEW", method: "Runtime.evaluate" }).reply, "a hidden session cannot be used");
+  // Target lists leave out hidden pages; the filter's own messages' answers are dropped.
+  const listed = filter.fromBrowser({ id: 9, result: { targetInfos: [{ targetId: "OWNER1", type: "page" }, { targetId: "AGENT1", type: "page" }] } });
+  assert.deepEqual(listed.deliver.result.targetInfos.map((t) => t.targetId), ["AGENT1"]);
+  assert.equal(filter.fromBrowser({ id: verdict.toBrowser?.[0]?.id ?? 2_000_000_000, result: {} }).deliver, null);
+});
+
+test("daemon: concurrent presses get one ticket, never two", async () => {
+  const docker = fakeStackDocker();
+  const { si } = makeSignedIn(docker);
+  await si.viewerLink({ purpose: "login", portrait: false });
+  const results = await Promise.all([1, 2, 3, 4].map((n) => si.prepare({ sourceId: "s", cardId: `c${n}` })));
+  assert.equal(results.filter((r) => r.ok).length, 1, JSON.stringify(results));
+  assert.equal(results.filter((r) => !r.ok && r.state === "busy").length, 3);
+});
+
+test("daemon: concurrent session opens admit one run", async () => {
+  const docker = fakeStackDocker();
+  const { si } = makeSignedIn(docker);
+  await si.viewerLink({ purpose: "login", portrait: false });
+  const results = await Promise.all(["run-1", "run-2", "run-3"].map((id) => si.mcpServer(id)));
+  assert.equal(results.filter((r) => r && "server" in r).length, 1);
+  assert.equal(results.filter((r) => r && r.refused === "busy").length, 2);
+});
+
+test("daemon: a missing proxy or relay is started alone; neko and the owner's sessions keep running", async () => {
+  const docker = fakeStackDocker();
+  const { si } = makeSignedIn(docker);
+  await si.viewerLink({ purpose: "login", portrait: false });
+  const names = [...docker.state.containers.keys()];
+  const relay = names.find((n) => n.endsWith("-relay"));
+  const proxy = names.find((n) => n.endsWith("-proxy"));
+  docker.state.containers.set(relay, "exited");
+  docker.state.containers.set(proxy, "exited");
+  docker.calls.length = 0;
+  await si.viewerLink({ purpose: "login", portrait: false });
+  const runs = docker.calls.filter((args) => args[0] === "run").map((args) => value(args, "--name")[0].replace(/^bp-si-[0-9a-f]{8}-/, ""));
+  assert.deepEqual(runs, ["proxy", "relay"]);
+  assert.ok(!docker.calls.some((args) => (args[0] === "stop" || args[0] === "rm") && args.some((a) => /-neko$/.test(a))), "neko untouched");
+  const relayArgs = docker.calls.find((args) => args[0] === "run" && /-relay$/.test(value(args, "--name")[0]));
+  assert.ok(value(relayArgs, "--env").includes("BP_CONTROL_SUBNET=172.30.0.0/16"), "the relay learns its internal subnet");
+  docker.state.containers.set(proxy, "exited");
+  docker.calls.length = 0;
+  assert.equal(await si.idleCheck(), false);
+  assert.deepEqual(docker.calls.filter((args) => args[0] === "run").map((args) => value(args, "--name")[0].replace(/^bp-si-[0-9a-f]{8}-/, "")), ["proxy"], "the idle check repairs too");
 });

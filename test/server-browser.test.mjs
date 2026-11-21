@@ -275,6 +275,7 @@ test("the launcher cleans up when a step fails or a signal arrives before the br
 
 test("the MCP filter removes and refuses the tools that run code or pick files", () => {
   for (const tool of SERVER_BROWSER_DENIED_TOOLS) assert.ok(DENIED_TOOLS.has(tool), tool);
+  assert.deepEqual([...DENIED_TOOLS].sort(), [...SERVER_BROWSER_DENIED_TOOLS].sort(), "the prompt names exactly the denied tools");
   const list = JSON.stringify({ jsonrpc: "2.0", id: 2, result: { tools: [{ name: "browser_navigate" }, { name: "browser_run_code_unsafe" }, { name: "browser_file_upload" }, { name: "browser_drop" }, { name: "browser_snapshot" }] } });
   assert.deepEqual(JSON.parse(filterServerLine(list)).result.tools.map((tool) => tool.name), ["browser_navigate", "browser_snapshot"]);
   const other = JSON.stringify({ jsonrpc: "2.0", id: 3, result: { content: [] } });
@@ -324,7 +325,7 @@ test("the build context is pinned: base image digest, exact Playwright MCP versi
   assert.match(BASE_IMAGE, /^mcr\.microsoft\.com\/playwright:v1\.65\.1-noble@sha256:[0-9a-f]{64}$/);
   assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts/);
   assert.match(dockerfile, /^USER pwuser$/m);
-  assert.match(dockerfile, /COPY proxy\.mjs proxy-main\.mjs mcp-filter\.mjs entrypoint\.mjs relay\.mjs relay-main\.mjs \.\//);
+  assert.match(dockerfile, /COPY proxy\.mjs proxy-main\.mjs mcp-filter\.mjs cdp-filter\.mjs entrypoint\.mjs relay\.mjs relay-main\.mjs \.\//);
   const pkg = JSON.parse(readFileSync(new URL("../server-browser/package.json", import.meta.url), "utf8"));
   assert.equal(pkg.dependencies["@playwright/mcp"], PLAYWRIGHT_MCP_VERSION, "exact version, no range");
   assert.deepEqual(pkg.overrides, { playwright: PLAYWRIGHT_VERSION, "playwright-core": PLAYWRIGHT_VERSION }, "the browser the image ships");
@@ -368,8 +369,8 @@ test("the entrypoint: headless, isolated, Chromium sandbox on, only the sidecar 
   assert.match(entry, /acceptDownloads: false/);
   assert.match(entry, /const work = "\/tmp\/browser-prompt";/, "output only under the container's tmpfs");
   assert.match(entry, /stdio: \["pipe", "pipe", "inherit"\]/, "both MCP directions go through the filter");
-  assert.match(entry, /filterClientLine\(line, \{ ownerControl \}\)/);
-  assert.match(entry, /filterServerLine\(line\)/);
+  assert.match(entry, /filterClientLine\(line, \{ ownerControl: guard\.held\(\), signedIn \}\)/);
+  assert.match(entry, /filterServerLine\(line, \{ signedIn \}\)/);
   assert.match(entry, /BP_IDLE_TIMEOUT_S/);
   assert.doesNotMatch(entry, /console\.log/, "stdout stays JSON-RPC");
   const main = readFileSync(new URL("../server-browser/proxy-main.mjs", import.meta.url), "utf8");
@@ -1028,7 +1029,7 @@ test("the Server browser prompt: its own tools by their prefixed names, not sign
   assert.ok(AGENT_SAFETY_PREAMBLE.includes("browser_list_tabs"), "the Paseo browser prompt is unchanged");
   for (const tool of SERVER_BROWSER_DENIED_TOOLS) assert.ok(prompt.includes(`mcp__server-browser__${tool}`) && !SERVER_BROWSER_TOOLS.includes(tool), tool);
   assert.match(prompt, /are turned off\./);
-  assert.doesNotMatch(prompt, /browser_install/);
+  assert.match(prompt, /mcp__server-browser__browser_install/, "every denied tool is named, browser_install too");
   assert.match(prompt, /stopped after 2 hours without use and after 12 hours in total/);
   assert.match(prompt, /do not try to restart it: end your turn with a report that quotes the error and names the last step you completed/);
 });

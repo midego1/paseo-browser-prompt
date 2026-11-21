@@ -18,7 +18,8 @@ import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { filterClientLine, filterServerLine, lineSplitter } from "./mcp-filter.mjs";
+import { startCdpFilter } from "./cdp-filter.mjs";
+import { createCallTracker, createControlGuard, filterClientLine, filterServerLine, lineSplitter } from "./mcp-filter.mjs";
 import { BLOCKED_HOST_SUFFIXES, normalizeAddress } from "./proxy.mjs";
 
 const require = createRequire(import.meta.url);
@@ -105,7 +106,6 @@ const config = {
   allowUnrestrictedFileAccess: false,
 };
 const configPath = `${work}/config.json`;
-writeFileSync(configPath, JSON.stringify(config));
 
 // cli.js is not in the package exports; find it next to its package.json.
 const cli = join(dirname(require.resolve("@playwright/mcp/package.json")), "cli.js");
@@ -128,6 +128,42 @@ if (signedIn && !(await waitForCdp())) {
   process.exit(1);
 }
 
+// The owner's takeover state, polled every second (never two polls at once). See createControlGuard:
+// unsure counts as held, and the state opens only after sustained failure.
+const guard = createControlGuard();
+const calls = createCallTracker();
+if (signedIn && controlUrl) {
+  let polling = false;
+  let warned = false;
+  const poll = async () => {
+    if (polling) return;
+    polling = true;
+    const seq = guard.next();
+    try {
+      const response = await fetch(controlUrl, { signal: AbortSignal.timeout(1500) });
+      guard.result(seq, await response.json());
+      warned = false;
+    } catch {
+      guard.failure(seq);
+      if (!warned) log("could not read the takeover state from the relay");
+      warned = true;
+    } finally {
+      polling = false;
+      if (guard.held()) calls.markHeld();
+    }
+  };
+  await poll();
+  setInterval(() => void poll(), 1000).unref();
+}
+
+// Signed-in: Playwright MCP talks to the owner's Chromium only through the DevTools filter, which
+// hides the owner's tabs (those open now, and those the owner opens while holding control).
+if (signedIn) {
+  const cdp = await startCdpFilter({ upstream: cdpEndpoint, held: () => guard.held(), log });
+  config.browser.cdpEndpoint = cdp.endpoint;
+}
+writeFileSync(configPath, JSON.stringify(config));
+
 const cliArgs = signedIn
   ? [cli, "--config", configPath, "--output-dir", outputDir]
   : [cli, "--config", configPath, "--headless", "--isolated", "--output-dir", outputDir, "--block-service-workers"];
@@ -137,36 +173,21 @@ const child = spawn(process.execPath, cliArgs, {
   env: { ...process.env, PLAYWRIGHT_MCP_OUTPUT_DIR: outputDir },
 });
 
-// The owner's takeover: polled every second; when the relay cannot be asked, no viewer can hold
-// control either (the relay is its only way in), so the run goes on.
-let ownerControl = false;
-if (signedIn && controlUrl) {
-  let warned = false;
-  const poll = async () => {
-    try {
-      const response = await fetch(controlUrl, { signal: AbortSignal.timeout(1500) });
-      const body = await response.json();
-      ownerControl = body?.ownerControl === true;
-      warned = false;
-    } catch {
-      ownerControl = false;
-      if (!warned) log("could not read the takeover state from the relay");
-      warned = true;
-    }
-  };
-  await poll();
-  setInterval(() => void poll(), 1000).unref();
-}
 
 let lastMessage = Date.now();
 const fromAgent = lineSplitter((line) => {
   lastMessage = Date.now();
-  const verdict = filterClientLine(line, { ownerControl });
+  const verdict = filterClientLine(line, { ownerControl: guard.held(), signedIn });
   if ("reply" in verdict) process.stdout.write(`${verdict.reply}\n`);
-  else if ("forward" in verdict) child.stdin.write(`${verdict.forward}\n`);
+  else if ("forward" in verdict) {
+    if (signedIn) calls.started(verdict.forward);
+    child.stdin.write(`${verdict.forward}\n`);
+  }
 });
 const fromServer = lineSplitter((line) => {
-  const kept = filterServerLine(line);
+  let kept = filterServerLine(line, { signedIn });
+  // A result that comes back while the owner holds control, or whose call overlapped a takeover, is withheld.
+  if (kept !== null && signedIn) kept = calls.finish(kept, guard.held());
   if (kept !== null) process.stdout.write(`${kept}\n`);
 });
 process.stdin.setEncoding("utf8");

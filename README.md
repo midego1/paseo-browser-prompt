@@ -884,10 +884,13 @@ after 30 minutes without either:
    port and the WebRTC (ICE-TCP) port, published only on the Tailscale address (never `0.0.0.0`, a
    LAN or a public address).
 
-A signed-in run gets the same pinned, filtered Playwright MCP as a Server browser run (the same 20
-tools, the same denied ones), started by the same host launcher, in a container that joins neko's
-network namespace and attaches over the DevTools protocol to the persistent Chromium (its default
-context, so your logins). It is gated the same way: the run labels with
+A signed-in run gets the same pinned, filtered Playwright MCP as a Server browser run, started by
+the same host launcher, in a container that joins neko's network namespace and attaches over the
+DevTools protocol to the persistent Chromium (its default context, so your logins). It gets 17
+tools: no `browser_evaluate`, `browser_console_messages` or `browser_network_requests` (they read
+page script state of a browser with your sessions). A DevTools filter in front of Chromium **hides
+your own tabs** from it (those open when it starts and those you open while holding control), so it
+works only in the tabs it opens. It is gated the same way: the run labels with
 `browser-prompt-browser: signed-in`, a one-time ticket for the chat and card on create, the card's
 run record marked `browser:signed-in` on resume. **One run at a time** uses the browser: a second
 press says it is in use. The agent's own tabs are its work area; it is told to leave yours alone and,

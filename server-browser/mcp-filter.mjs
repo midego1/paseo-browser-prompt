@@ -32,11 +32,22 @@ export const ALLOWED_TOOLS = new Set([
 
 export const DENIED_TOOLS = new Set(["browser_run_code_unsafe", "browser_file_upload", "browser_drop", "browser_install"]);
 
+/**
+ * Tools a signed-in run does not get on top of that (the same list as SIGNED_IN_REMOVED_TOOLS in
+ * shared/agent-prompt.ts; a test keeps them equal): they read page script state of a browser that
+ * holds the owner's sessions. browser_evaluate runs page JavaScript (cookies, storage, input values
+ * the owner types, a keylogger left behind), browser_console_messages and browser_network_requests
+ * show what pages log and send.
+ */
+export const SIGNED_IN_REMOVED_TOOLS = new Set(["browser_evaluate", "browser_console_messages", "browser_network_requests"]);
+export const SIGNED_IN_ALLOWED_TOOLS = new Set([...ALLOWED_TOOLS].filter((name) => !SIGNED_IN_REMOVED_TOOLS.has(name)));
+
 export const DENIED_TEXT = "This tool is turned off in the browser-prompt Server browser.";
 
-/** Whether a tool may be listed and called: on the allowlist and not on the denylist. */
-export function toolAllowed(name) {
-  return typeof name === "string" && ALLOWED_TOOLS.has(name) && !DENIED_TOOLS.has(name);
+/** Whether a tool may be listed and called: on the (signed-in) allowlist and not on the denylist. */
+export function toolAllowed(name, signedIn = false) {
+  const allowed = signedIn ? SIGNED_IN_ALLOWED_TOOLS : ALLOWED_TOOLS;
+  return typeof name === "string" && allowed.has(name) && !DENIED_TOOLS.has(name);
 }
 
 /** The line as a JSON-RPC object, or null for anything else (batches, other JSON, non-JSON). */
@@ -58,7 +69,7 @@ export const OWNER_CONTROL_TEXT =
  * `{ drop: true }` to discard it. With `ownerControl` (signed-in runs, while the owner holds control
  * in the viewer) every tool call is answered with OWNER_CONTROL_TEXT instead of reaching the browser.
  */
-export function filterClientLine(line, { ownerControl = false } = {}) {
+export function filterClientLine(line, { ownerControl = false, signedIn = false } = {}) {
   const message = parseObject(line);
   if (!message) return { drop: true };
   if (ownerControl && message.method === "tools/call") {
@@ -67,7 +78,7 @@ export function filterClientLine(line, { ownerControl = false } = {}) {
       reply: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: OWNER_CONTROL_TEXT }], isError: true } }),
     };
   }
-  if (message.method === "tools/call" && !toolAllowed(message.params?.name)) {
+  if (message.method === "tools/call" && !toolAllowed(message.params?.name, signedIn)) {
     if (message.id === undefined || message.id === null) return { drop: true };
     return {
       reply: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: DENIED_TEXT }], isError: true } }),
@@ -77,12 +88,12 @@ export function filterClientLine(line, { ownerControl = false } = {}) {
 }
 
 /** A message from Playwright MCP: tools/list results keep only allowed tools; non-objects are dropped (null). */
-export function filterServerLine(line) {
+export function filterServerLine(line, { signedIn = false } = {}) {
   const message = parseObject(line);
   if (!message) return null;
   const tools = message.result?.tools;
   if (!Array.isArray(tools)) return line;
-  const kept = tools.filter((tool) => toolAllowed(tool?.name));
+  const kept = tools.filter((tool) => toolAllowed(tool?.name, signedIn));
   if (kept.length === tools.length) return line;
   return JSON.stringify({ ...message, result: { ...message.result, tools: kept } });
 }
@@ -104,5 +115,69 @@ export function lineSplitter(onLine) {
       if (buffer) onLine(buffer);
       buffer = "";
     },
+  };
+}
+
+/**
+ * The owner's takeover state as the run sees it. Polled results carry a sequence number; older ones
+ * are ignored. `known: false` (the relay is unsure while a viewer is connected) counts as held. After
+ * a failed poll the state stays held while the last held state is younger than `holdMs`, and opens
+ * only after `failuresToOpen` failed polls in a row (when the relay cannot be asked at all, no viewer
+ * can hold control either: the relay is the viewer's only way in).
+ */
+export function createControlGuard({ now = Date.now, holdMs = 10_000, failuresToOpen = 3 } = {}) {
+  let held = false;
+  let lastHeldAt = -Infinity;
+  let failures = 0;
+  let issued = 0;
+  let applied = 0;
+  return {
+    /** Sequence number for the next poll. */
+    next: () => ++issued,
+    result(seq, body) {
+      if (seq <= applied) return;
+      applied = seq;
+      failures = 0;
+      held = body?.ownerControl === true || body?.known === false;
+      if (held) lastHeldAt = now();
+    },
+    failure(seq) {
+      if (seq <= applied) return;
+      applied = seq;
+      failures++;
+      if (now() - lastHeldAt < holdMs) held = true;
+      else if (failures >= failuresToOpen) held = false;
+    },
+    held: () => held,
+  };
+}
+
+/**
+ * Tool calls on their way through Playwright MCP. A result that arrives while the owner holds
+ * control, or whose call overlapped a held period, is replaced with OWNER_CONTROL_TEXT, so a call
+ * that started before a takeover cannot hand back what the owner typed.
+ */
+export function createCallTracker() {
+  /** JSON of the request id -> whether the owner held control while it ran */
+  const pending = new Map();
+  return {
+    started(line) {
+      const message = parseObject(line);
+      if (message?.method === "tools/call" && message.id !== undefined && message.id !== null) pending.set(JSON.stringify(message.id), false);
+    },
+    markHeld() {
+      for (const key of pending.keys()) pending.set(key, true);
+    },
+    finish(line, heldNow) {
+      const message = parseObject(line);
+      if (!message || message.id === undefined || message.id === null || message.method) return line;
+      const key = JSON.stringify(message.id);
+      if (!pending.has(key)) return line;
+      const during = pending.get(key);
+      pending.delete(key);
+      if (!heldNow && !during) return line;
+      return JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: OWNER_CONTROL_TEXT }], isError: true } });
+    },
+    size: () => pending.size,
   };
 }

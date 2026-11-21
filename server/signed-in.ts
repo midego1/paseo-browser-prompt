@@ -14,7 +14,6 @@ import {
   signedInPlan,
   signedInAgentName,
   STACK_LABEL,
-  STACK_PROXY_IP_PLACEHOLDER,
   STACK_SUBNET_PLACEHOLDER,
   stackNames,
   stackNekoArgs,
@@ -181,6 +180,13 @@ export function createSignedIn(options: SignedInOptions) {
   let buildError: string | null = null;
   let startError: string | null = null;
   let lifecycle: Promise<unknown> = Promise.resolve();
+  let admission: Promise<unknown> = Promise.resolve();
+  /** Check and claim of the one run slot, one at a time (concurrent presses cannot both get it). */
+  function admit<T>(task: () => Promise<T>): Promise<T> {
+    const next = admission.then(task, task);
+    admission = next.catch(() => undefined);
+    return next;
+  }
   let startingStack = false;
 
   /** Runs one stack change at a time (start, stop, wipe, key rotation). */
@@ -276,12 +282,28 @@ export function createSignedIn(options: SignedInOptions) {
     await docker(["network", "rm", names.publicNetwork], 30_000).catch(() => undefined);
   }
 
+  async function internalSubnet(input: { stackId: string }): Promise<string> {
+    const text = await mustDocker("reading the internal network", ["network", "inspect", "--format", "{{range .IPAM.Config}}{{.Subnet}} {{end}}", stackNames(input.stackId).network]);
+    const subnet = text.split(/\s+/).find((cidr) => /^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(cidr));
+    if (!subnet) throw new Error("reading the internal network: no IPv4 subnet");
+    return subnet;
+  }
+
+  async function startProxy(input: StackInput, subnet: string): Promise<void> {
+    const names = stackNames(input.stackId);
+    const proxy = stackProxyArgs(input).map((arg) => arg.split(STACK_SUBNET_PLACEHOLDER).join(subnet));
+    checkStackRun(proxy, "proxy", input);
+    await mustDocker("starting the proxy", proxy);
+    await mustDocker("connecting the proxy", ["network", "connect", names.network, names.proxy]);
+  }
+
   /** Starts the relay with a new salt: tickets signed for an earlier relay start no longer work. */
   async function startRelay(input: StackInput, current: SignedInKeys): Promise<SignedInKeys> {
     const names = stackNames(input.stackId);
     const keys = { ...current, relaySalt: secret() };
     await saveKeys(keysFile, keys);
-    const args = stackRelayArgs(input, { ...keys, viewerSecret: relaySecret(keys) });
+    const subnet = await internalSubnet(input);
+    const args = stackRelayArgs(input, { ...keys, viewerSecret: relaySecret(keys) }).map((arg) => arg.split(STACK_SUBNET_PLACEHOLDER).join(subnet));
     // The relay carries the configuration it was started with, so a changed address or port restarts it.
     const withTag = [...args.slice(0, -4), "--label", `${CONFIG_LABEL}=${configTag(input)}`, ...args.slice(-4)];
     checkStackRun(withTag, "relay", input);
@@ -301,29 +323,20 @@ export function createSignedIn(options: SignedInOptions) {
   }
 
   async function createStack(input: StackInput): Promise<void> {
-    const names = stackNames(input.stackId);
     log("starting the signed-in browser");
     // Whatever is left of an earlier start goes first; a neko that still runs is stopped gracefully.
     await removeStack(input, true);
     const networks = stackNetworkArgs(input);
     await mustDocker("creating the internal network", networks.internal);
     await mustDocker("creating the outward network", networks.public);
-    const subnetText = await mustDocker("reading the internal network", ["network", "inspect", "--format", "{{range .IPAM.Config}}{{.Subnet}} {{end}}", names.network]);
-    const subnet = subnetText.split(/\s+/).find((cidr) => /^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(cidr));
-    if (!subnet) throw new Error("reading the internal network: no IPv4 subnet");
+    const subnet = await internalSubnet(input);
     await mustDocker("creating the profile volume", stackVolumeArgs(input));
-
-    const proxy = stackProxyArgs(input).map((arg) => arg.split(STACK_SUBNET_PLACEHOLDER).join(subnet));
-    checkStackRun(proxy, "proxy", input);
-    await mustDocker("starting the proxy", proxy);
-    await mustDocker("connecting the proxy", ["network", "connect", names.network, names.proxy]);
-    const proxyIp = (await mustDocker("reading the proxy address", ["inspect", "--format", `{{(index .NetworkSettings.Networks "${names.network}").IPAddress}}`, names.proxy])).trim();
-    if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(proxyIp)) throw new Error("reading the proxy address: none");
+    await startProxy(input, subnet);
 
     // neko's passwords are new on every start; only the relay knows the admin one.
     let keys: SignedInKeys = { ...(await loadKeys(keysFile)), nekoAdminPassword: secret(), nekoUserPassword: secret() };
     await saveKeys(keysFile, keys);
-    const neko = stackNekoArgs(input, keys).map((arg) => arg.split(STACK_PROXY_IP_PLACEHOLDER).join(proxyIp));
+    const neko = stackNekoArgs(input, keys);
     checkStackRun(neko, "neko", input);
     await mustDocker("starting the browser", neko);
     keys = await startRelay(input, keys);
@@ -338,7 +351,25 @@ export function createSignedIn(options: SignedInOptions) {
       if (!bindHost || !bindHostAllowed(bindHost)) throw Object.assign(new Error("no Tailscale address for the viewer"), { state: "no-address" as const });
       const input = await stackInput(bindHost);
       const names = stackNames(input.stackId);
-      const containers = await stackContainers();
+      let containers = await stackContainers();
+      // neko runs but its proxy or relay stopped (their 7-day lifetime, a crash): start only those;
+      // neko and the owner's sessions stay as they are.
+      if (containers.get(names.neko) === "running" && (containers.get(names.proxy) !== "running" || containers.get(names.relay) !== "running")) {
+        try {
+          if (containers.get(names.proxy) !== "running") {
+            await docker(["rm", "-f", names.proxy], 30_000).catch(() => undefined);
+            await startProxy(input, await internalSubnet(input));
+          }
+          if (containers.get(names.relay) !== "running") {
+            await docker(["rm", "-f", names.relay], 30_000).catch(() => undefined);
+            await waitForNeko(input, await startRelay(input, await loadKeys(keysFile)));
+          }
+          log("restarted the signed-in browser's proxy or relay");
+        } catch (error) {
+          log(`could not restart the proxy or relay: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        containers = await stackContainers();
+      }
       const allRunning = [names.neko, names.relay, names.proxy].every((name) => containers.get(name) === "running");
       if (allRunning) {
         const tag = (await docker(["inspect", "--format", `{{index .Config.Labels "${CONFIG_LABEL}"}}`, names.relay], 15_000)).stdout.trim();
@@ -477,7 +508,13 @@ export function createSignedIn(options: SignedInOptions) {
 
   /** Stops the stack after IDLE_STOP_MS without a run or a viewer. */
   async function idleCheck(): Promise<boolean> {
-    if (!(await isRunning())) return false;
+    if (!(await isRunning())) {
+      // neko up but its proxy or relay gone: repair (ensureStarted restarts only those).
+      const names = stackNames(await stackId());
+      const containers = await stackContainers().catch(() => new Map<string, string>());
+      if (containers.get(names.neko) === "running") await ensureStarted().catch(() => undefined);
+      return false;
+    }
     const agentRunning = (await holders().catch(() => 1)) > 0;
     const config = await options.config();
     const bindHost = await options.bindHost().catch(() => null);
@@ -512,15 +549,17 @@ export function createSignedIn(options: SignedInOptions) {
     async prepare(target: { sourceId: string; cardId: string }) {
       const ready = await readyForUse();
       if (!ready.ok) return { ok: false as const, state: ready.state, detail: ready.detail };
-      let held: number;
-      try {
-        held = await holders();
-      } catch {
-        return { ok: false as const, state: "docker-unavailable" as const, detail: "could not check the signed-in browser's runs" };
-      }
-      if (held > 0) return { ok: false as const, state: "busy" as const, detail: "" };
-      lastActive = now();
-      return { ok: true as const, ticket: tickets.issue(target) };
+      return admit(async () => {
+        let held: number;
+        try {
+          held = await holders();
+        } catch {
+          return { ok: false as const, state: "docker-unavailable" as const, detail: "could not check the signed-in browser's runs" };
+        }
+        if (held > 0) return { ok: false as const, state: "busy" as const, detail: "" };
+        lastActive = now();
+        return { ok: true as const, ticket: tickets.issue(target) };
+      });
     },
     consumeTicket: (ticket: string, target: { sourceId: string; cardId: string }) => tickets.consume(ticket, target),
     /** The MCP server for one session of a signed-in run; refused while another run holds the browser. */
@@ -528,17 +567,21 @@ export function createSignedIn(options: SignedInOptions) {
       const { path, host } = await sb.docker();
       const node = await sb.node();
       if (!path || !node) return null;
-      let others: number;
-      try {
-        others = await holders(agentId);
-      } catch {
-        return { refused: "unavailable" };
-      }
-      if (others > 0) return { refused: "busy" };
+      const claimed = await admit(async () => {
+        let others: number;
+        try {
+          others = await holders(agentId);
+        } catch {
+          return "unavailable" as const;
+        }
+        if (others > 0) return "busy" as const;
+        starting.set(agentId, now() + STARTING_WINDOW_MS);
+        return null;
+      });
+      if (claimed) return { refused: claimed };
       const runtime = await sb.runtime();
       const nonce = random().slice(0, 12);
       const plan = signedInPlan(path, { stackId: await stackId(), instance: await sb.instance(), serverImage: sb.image, agentId, nonce, blockedIps: sb.blockedIps() });
-      starting.set(agentId, now() + STARTING_WINDOW_MS);
       lastActive = now();
       // A resumed run may find the browser stopped (idle): start it; the launcher waits for it.
       if (!(await isRunning())) void ensureStarted().catch(() => undefined);

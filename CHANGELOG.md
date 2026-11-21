@@ -53,6 +53,18 @@
   tool call (the relay tells it, through an unpublished port). The relay and proxy stop themselves
   after 7 days. The browser is always stopped gracefully (45 s to write cookies). SECURITY.md says
   how to stop and wipe a stack left running after removing the plugin.
+- Second review round: signed-in runs no longer get `browser_evaluate`, `browser_console_messages` or
+  `browser_network_requests` (their own allowlist, 17 tools; the prompt's list matches). A
+  DevTools-protocol filter in the run's container hides the owner's tabs (open at attach, opened
+  while the owner holds control, and their popups) and refuses closing the browser. The takeover
+  guard fails closed when unsure (the relay reports held while it cannot read neko's state with a
+  viewer connected; the run keeps a held state through failed reads for 10 s and opens only after
+  3 in a row), polls one at a time, and withholds results that arrive during or overlap a takeover;
+  the relay resets control when the last viewer leaves. Bad tickets are delayed by 500 ms instead of
+  a lockout. The takeover port listens only on the relay's internal-network address. One run at a
+  time is checked and claimed atomically. A missing relay or proxy is restarted alone (neko keeps
+  running; Chromium finds the proxy by name), and the relay's 7-day exit waits for viewers to leave.
+  `browser_install` is named among the turned-off tools.
 
 ## 0.21.1 (unreleased)
 

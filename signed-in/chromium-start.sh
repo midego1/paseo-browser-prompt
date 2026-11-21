@@ -5,8 +5,8 @@
 # can reach neither this container's own services (neko, the DevTools port) nor private, tailnet or
 # host addresses. Without a valid BP_PROXY it does not start Chromium at all.
 rm -f /home/neko/.config/chromium/SingletonLock /home/neko/.config/chromium/SingletonCookie /home/neko/.config/chromium/SingletonSocket
-if ! printf '%s' "${BP_PROXY:-}" | grep -Eq '^http://[0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]{1,5}$'; then
-  echo "browser-prompt: BP_PROXY is missing or not http://<ipv4>:<port>; refusing to start Chromium without the proxy" >&2
+if ! printf '%s' "${BP_PROXY:-}" | grep -Eq '^http://(bp-si-[0-9a-f]{8}-proxy|[0-9]{1,3}(\.[0-9]{1,3}){3}):[0-9]{1,5}$'; then
+  echo "browser-prompt: BP_PROXY is missing or not http://<stack proxy or ipv4>:<port>; refusing to start Chromium without the proxy" >&2
   sleep 10
   exit 1
 fi

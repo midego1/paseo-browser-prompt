@@ -34,8 +34,12 @@ export const SESSION_TTL_MS = 2 * 60 * 60_000;
 /** ... and after this long without a request or viewer input. */
 export const SESSION_IDLE_MS = 20 * 60_000;
 export const MAX_SESSIONS = 32;
-/** Failed ticket checks allowed per peer address and minute before /bp/session answers 429 for the rest of it. */
-export const MAX_FAILURES_PER_MINUTE = 20;
+/**
+ * A refused ticket is answered after this delay. No lockout: with rootless Docker every client has
+ * the port forwarder's address, so a lockout would lock the owner out too, and an HMAC-SHA256 ticket
+ * cannot be guessed anyway.
+ */
+export const BAD_TICKET_DELAY_MS = 500;
 export const BLOCKED_TEXT = "Blocked by the browser-prompt relay.";
 
 const TICKET = /^v1\.(\d{10})\.([A-Za-z0-9_-]{16,64})\.(login|takeover)\.([A-Za-z0-9_-]{43})$/;
@@ -176,7 +180,7 @@ const OPEN_SCRIPT = `(async () => {
   try {
     const r = await fetch("/bp/session", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ticket: t, portrait: phone }) });
     if (!r.ok) {
-      m.textContent = r.status === 429 ? "Too many attempts. Wait a minute, then open the viewer again from Paseo." : "This link has expired or was already used. Open the viewer again from Paseo: each link works once, for a few minutes.";
+      m.textContent = "This link has expired or was already used. Open the viewer again from Paseo: each link works once, for a few minutes.";
       return;
     }
     const body = await r.json();
@@ -217,7 +221,6 @@ export async function startRelay(options) {
     listenPort = 8080,
     listenHost = "0.0.0.0",
     rtcPort = 0,
-    controlPort = 0,
     controlPollMs = 1000,
     secret,
     statusToken,
@@ -246,8 +249,6 @@ export async function startRelay(options) {
   const sessions = new Map();
   /** ticket nonces used (or being used) -> expiry (s) */
   const usedNonces = new Map();
-  /** peer address -> { windowStart, count } of failed ticket checks */
-  const failures = new Map();
   let ownerControl = false;
   let controlKnown = false;
   let lastPeer = "";
@@ -336,8 +337,7 @@ export async function startRelay(options) {
   function prune() {
     const t = now();
     for (const [id, session] of sessions) if (!alive(session, t)) sessions.delete(id);
-    for (const [peer, entry] of failures) if (t - entry.windowStart > 60_000) failures.delete(peer);
-    while (failures.size > 256) failures.delete(failures.keys().next().value);
+
     const s = Math.floor(t / 1000);
     for (const [nonce, exp] of usedNonces) if (exp <= s) usedNonces.delete(nonce);
     while (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value);
@@ -395,22 +395,12 @@ export async function startRelay(options) {
     });
   }
 
-  function failureEntry(peer) {
-    const t = now();
-    let entry = failures.get(peer);
-    if (!entry || t - entry.windowStart > 60_000) {
-      entry = { windowStart: t, count: 0 };
-      failures.set(peer, entry);
-    }
-    return entry;
-  }
+  const badTicketDelay = options.badTicketDelayMs ?? BAD_TICKET_DELAY_MS;
 
   async function createSession(req, res) {
     if (!originOk(req)) return sendJson(res, 403, { error: "origin" });
     const peer = peerOf(req.socket);
     prune();
-    const failed = failureEntry(peer);
-    if (failed.count >= MAX_FAILURES_PER_MINUTE) return sendJson(res, 429, { error: "slow down" });
     let input;
     try {
       input = JSON.parse(await readBody(req, 4096));
@@ -419,7 +409,7 @@ export async function startRelay(options) {
     }
     const checked = verifyTicket(secret, input?.ticket, Math.floor(now() / 1000));
     if (!checked.ok || usedNonces.has(checked.nonce)) {
-      failed.count++;
+      await new Promise((resolve) => setTimeout(resolve, badTicketDelay));
       log(`refused a viewer ticket (${checked.ok ? "already used" : checked.reason})`);
       return sendJson(res, 401, { error: "invalid or expired link" });
     }
@@ -490,7 +480,7 @@ export async function startRelay(options) {
         } catch {
           nekoUp = false;
         }
-        return sendJson(res, 200, { viewers, idleMs: Math.max(0, now() - lastActivity), nekoUp, portrait: screenIsPortrait, ownerControl, lastPeer });
+        return sendJson(res, 200, { viewers, idleMs: Math.max(0, now() - lastActivity), nekoUp, portrait: screenIsPortrait, ownerControl: controlHeld(), lastPeer });
       }
       if (!hostOk(req)) return send(res, 421, "Unknown host.", { "Content-Type": "text/plain" });
       if (path === "/bp/open" && (req.method === "GET" || req.method === "HEAD")) {
@@ -583,7 +573,11 @@ export async function startRelay(options) {
         closed = true;
         viewers = Math.max(0, viewers - 1);
         touch();
-        if (viewers === 0) scheduleLandscape();
+        if (viewers === 0) {
+          scheduleLandscape();
+          // A closed viewer must not leave control held (the run would stay paused).
+          void resetControl();
+        }
         socket.destroy();
         upstream.destroy();
       };
@@ -622,45 +616,82 @@ export async function startRelay(options) {
     });
   }
 
-  // Takeover state: whether someone (only the owner logs in to neko) holds control right now.
-  async function pollControl() {
+  // Takeover state: whether someone (only the owner logs in to neko) holds control right now. One
+  // poll at a time; a result older than the last applied one is ignored.
+  let polling = null;
+  let pollIssued = 0;
+  let pollApplied = 0;
+  /** One poll at a time: a call while one runs gets that one. */
+  function pollControl() {
+    polling ??= pollOnce().finally(() => {
+      polling = null;
+    });
+    return polling;
+  }
+  async function pollOnce() {
+    const seq = ++pollIssued;
     try {
       serviceToken ??= await nekoLogin("relay");
       const result = await nekoJson("GET", "/api/room/control", undefined, serviceToken);
       if (result.status === 401) serviceToken = null;
       if (result.status !== 200 || !result.body) throw new Error(`control state ${result.status}`);
-      ownerControl = result.body.has_host === true;
-      controlKnown = true;
+      if (seq > pollApplied) {
+        pollApplied = seq;
+        ownerControl = result.body.has_host === true;
+        controlKnown = true;
+      }
     } catch {
-      controlKnown = false;
+      if (seq > pollApplied) {
+        pollApplied = seq;
+        controlKnown = false;
+      }
+    }
+  }
+  /** Held, or unsure while a viewer is connected (fail closed for the run). */
+  function controlHeld() {
+    return ownerControl || (!controlKnown && viewers > 0);
+  }
+  async function resetControl() {
+    try {
+      serviceToken ??= await nekoLogin("relay");
+      await nekoJson("POST", "/api/room/control/reset", undefined, serviceToken);
+      ownerControl = false;
+      log("no viewer left: control reset");
+    } catch {
+      // the next poll shows the state
     }
   }
   let poller = null;
   let control = null;
-  if (controlPort) {
+  /**
+   * Serves GET /control ({ ownerControl, known }) on `host:port`: the relay's address on the stack's
+   * internal network (relay-main.mjs finds it), never published. Polls neko every `controlPollMs`.
+   */
+  async function startControl(host, port) {
+    if (control) return control.address().port;
     void pollControl();
     poller = setInterval(() => void pollControl(), Math.max(200, controlPollMs));
     poller.unref?.();
-    // Unpublished; the run's MCP container (in neko's network namespace) asks it. Only a boolean.
     control = createServer((req, res) => {
       if (req.method !== "GET" || req.url !== "/control") return res.writeHead(404).end();
-      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" }).end(JSON.stringify({ ownerControl, known: controlKnown }));
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" }).end(JSON.stringify({ ownerControl: controlHeld(), known: controlKnown }));
     });
     await new Promise((resolve, reject) => {
       control.once("error", reject);
-      control.listen(controlPort, listenHost, () => resolve());
+      control.listen(port, host, () => resolve());
     });
+    return control.address().port;
   }
 
   const address = server.address();
   return {
     port: typeof address === "object" && address ? address.port : listenPort,
     rtcPort: rtc ? rtc.address().port : 0,
-    controlPort: control ? control.address().port : 0,
+    startControl,
     prefix,
     cookieName,
     pollControl,
-    state: () => ({ viewers, sessions: sessions.size, idleMs: now() - lastActivity, portrait: screenIsPortrait, ownerControl }),
+    state: () => ({ viewers, sessions: sessions.size, idleMs: now() - lastActivity, portrait: screenIsPortrait, ownerControl: controlHeld() }),
     close: () =>
       new Promise((resolve) => {
         if (landscapeTimer) clearTimeout(landscapeTimer);
