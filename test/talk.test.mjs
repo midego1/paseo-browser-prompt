@@ -19,6 +19,7 @@ import {
 import { runLabels } from "../shared/report-back.ts";
 import { migratePreferences } from "../shared/settings-migrate.ts";
 import { buildQuestionMessage, buildQuestionRedirect, MAX_QUESTION_CHARS, parseQuestion, QUESTION_CLOSE, QUESTION_OPEN } from "../shared/talk.ts";
+import { waitFor } from "./helpers/wait.mjs";
 
 const SOURCE = "agent-source";
 const RUN = "agent-run";
@@ -139,12 +140,16 @@ function world({ source = {}, finals = [], runLabels: labels = runLabels(SOURCE,
     [RUN]: { labels, status: "idle", workspaceId: WS, provider: "claude", currentModeId: "auto" },
   };
   const sent = [];
+  // Observable calls, so tests can wait for the handler to reach a point instead of guessing with a sleep.
+  const stats = { refresh: {}, refetch: {}, waits: {} };
+  const bump = (name, id) => void (stats[name][id] = (stats[name][id] ?? 0) + 1);
   let turn = 0;
   const paseo = {
     agents: {
       ref(id) {
         return {
           async refresh() {
+            bump("refresh", id);
             const agent = agents[id];
             if (!agent) return null;
             if (agent.refreshError) throw new Error("no answer");
@@ -152,6 +157,7 @@ function world({ source = {}, finals = [], runLabels: labels = runLabels(SOURCE,
           },
           timeline: {
             async refetch() {
+              bump("refetch", id);
               const text = finals[Math.min(turn, finals.length - 1)] ?? "";
               return {
                 entries: [
@@ -162,6 +168,7 @@ function world({ source = {}, finals = [], runLabels: labels = runLabels(SOURCE,
             },
           },
           async waitForFinish() {
+            bump("waits", id);
             return { status: "idle" };
           },
           async send(text, options) {
@@ -175,9 +182,15 @@ function world({ source = {}, finals = [], runLabels: labels = runLabels(SOURCE,
     agents,
     paseo,
     sent,
+    stats,
     next: () => turn++,
   };
 }
+
+/** Waits until the question handler started waiting on the busy chat. */
+const waitingOnChat = (w) => waitFor(() => w.stats.waits[SOURCE] >= 1, { message: "the question to wait on the busy chat" });
+/** Waits until the later turn's final message was read, so the earlier question is seen as out of date. */
+const laterTurnRead = (w) => waitFor(() => w.stats.refetch[RUN] >= 2, { message: "the later turn to be read" });
 
 const ended = (turnId, outcome = { kind: "completed" }) => ({
   agent: { id: RUN, workspaceId: WS, parentAgentId: null, provider: "claude", cwd: "/tmp", title: "Browser: Example" },
@@ -263,11 +276,11 @@ test("a question waiting on a busy chat does not swallow the run's later report"
   const w = world({ source: { status: "running" }, finals: [QUESTION, REPORT] });
   const reportBack = createReportBack(options());
   const asking = reportBack.onTurnEnded(ended("t1"), w.paseo);
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await waitingOnChat(w);
   // The owner answered the run directly; it finished with its report while the chat stayed busy.
   w.next();
   const reporting = reportBack.onTurnEnded(ended("t2"), w.paseo);
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await laterTurnRead(w);
   w.agents[SOURCE].status = "idle";
   assert.equal(await asking, "question-stale", "the run went on, so the question is out of date");
   assert.equal(await reporting, "sent", "the report is not taken for a duplicate");
@@ -277,11 +290,13 @@ test("a question waiting on a busy chat does not swallow the run's later report"
 
 test("a question that times out after the run went on sends no redirect to the finished run", async () => {
   const w = world({ source: { status: "running" }, finals: [QUESTION, REPORT] });
-  const reportBack = createReportBack(options({ busyWaitMs: 60 }));
+  const reportBack = createReportBack(options({ busyWaitMs: 400 }));
   const asking = reportBack.onTurnEnded(ended("t1"), w.paseo);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitingOnChat(w);
   w.next();
   const reporting = reportBack.onTurnEnded(ended("t2"), w.paseo);
+  // The later turn must be read before the question's busy wait runs out, or it would redirect.
+  await laterTurnRead(w);
   assert.equal(await asking, "question-stale");
   assert.equal(await reporting, "busy-timeout");
   assert.deepEqual(w.sent, [], "no turn is started on the finished run");
@@ -292,7 +307,7 @@ test("a question is not forwarded once the owner started a new turn of the run, 
     const w = world({ source: { status: "running" }, finals: [QUESTION] });
     const reportBack = createReportBack(options());
     const asking = reportBack.onTurnEnded(ended("t1"), w.paseo);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitingOnChat(w);
     // The owner answered the run directly; its new turn is still going when the chat goes idle.
     Object.assign(w.agents[RUN], busy);
     w.agents[SOURCE].status = "idle";
@@ -303,9 +318,9 @@ test("a question is not forwarded once the owner started a new turn of the run, 
 
 test("a question that times out while the run is busy with a new turn sends it no redirect", async () => {
   const w = world({ source: { status: "running" }, finals: [QUESTION] });
-  const reportBack = createReportBack(options({ busyWaitMs: 60 }));
+  const reportBack = createReportBack(options({ busyWaitMs: 150 }));
   const asking = reportBack.onTurnEnded(ended("t1"), w.paseo);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitingOnChat(w);
   Object.assign(w.agents[RUN], { status: "running", activeTurn: { turnId: "t2", startedAt: null } });
   assert.equal(await asking, "question-stale");
   assert.deepEqual(w.sent, [], "nothing steers into the owner's turn");
@@ -316,7 +331,7 @@ test("a question is not forwarded once the run was closed or archived while it w
     const w = world({ source: { status: "running" }, finals: [QUESTION] });
     const reportBack = createReportBack(options());
     const asking = reportBack.onTurnEnded(ended("t1"), w.paseo);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitingOnChat(w);
     Object.assign(w.agents[RUN], closing);
     w.agents[SOURCE].status = "idle";
     assert.equal(await asking, "question-stale", JSON.stringify(closing));
@@ -327,9 +342,9 @@ test("a question is not forwarded once the run was closed or archived while it w
 test("a question that times out after the run closed sends it nothing", async () => {
   for (const closing of [{ status: "closed" }, { archivedAt: "2026-01-01T00:00:00Z" }]) {
     const w = world({ source: { status: "running" }, finals: [QUESTION] });
-    const reportBack = createReportBack(options({ busyWaitMs: 60 }));
+    const reportBack = createReportBack(options({ busyWaitMs: 150 }));
     const asking = reportBack.onTurnEnded(ended("t1"), w.paseo);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitingOnChat(w);
     Object.assign(w.agents[RUN], closing);
     assert.equal(await asking, "not-forwarded-closed", JSON.stringify(closing));
     assert.deepEqual(w.sent, [], "a redirect notice would load the closed run");
@@ -346,7 +361,7 @@ test("the question turn itself still settling, or an unreadable run status, keep
   const logs = [];
   const reportBack = createReportBack(options({ log: (line) => logs.push(line) }));
   const asking = reportBack.onTurnEnded(ended("t1"), w.paseo);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitingOnChat(w);
   w.agents[RUN].refreshError = true;
   w.agents[SOURCE].status = "idle";
   assert.equal(await asking, "question-sent");
@@ -358,12 +373,11 @@ test("a repeated event without a turn id does not make a waiting question stale"
   const w = world({ source: { status: "running" }, finals: [QUESTION] });
   const reportBack = createReportBack(options());
   const first = reportBack.onTurnEnded(ended(undefined), w.paseo);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitingOnChat(w);
   const repeat = reportBack.onTurnEnded(ended(undefined), w.paseo);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(await repeat, "duplicate", "the run is still held by the waiting question");
   w.agents[SOURCE].status = "idle";
   assert.equal(await first, "question-sent");
-  assert.equal(await repeat, "duplicate");
   assert.deepEqual(w.sent.map((m) => m.id), [SOURCE], "forwarded once");
 });
 
@@ -371,10 +385,10 @@ test("a stale question does not use up the run's questions", async () => {
   const w = world({ source: { status: "running" }, finals: [QUESTION, REPORT, QUESTION] });
   const reportBack = createReportBack(options({ talk: async () => ({ maxQuestions: 1 }) }));
   const asking = reportBack.onTurnEnded(ended("t1"), w.paseo);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitingOnChat(w);
   w.next();
   const reporting = reportBack.onTurnEnded(ended("t2"), w.paseo);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await laterTurnRead(w);
   w.agents[SOURCE].status = "idle";
   assert.equal(await asking, "question-stale");
   assert.equal(await reporting, "sent");
@@ -469,10 +483,10 @@ test("a stale question gives back exactly its own slot, also when a later questi
   const reportBack = createReportBack(options({ talk: async () => ({ maxQuestions: 2 }) }));
   // Question 1 waits on the busy chat; the owner answers the run, which asks question 2.
   const first = reportBack.onTurnEnded(ended("t1"), w.paseo);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitingOnChat(w);
   w.next();
   const second = reportBack.onTurnEnded(ended("t2"), w.paseo);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await laterTurnRead(w);
   w.agents[SOURCE].status = "idle";
   assert.equal(await first, "question-stale", "question 1 went out of date");
   assert.equal(await second, "question-sent");

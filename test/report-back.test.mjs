@@ -24,6 +24,7 @@ import {
   truncateReport,
 } from "../shared/report-back.ts";
 import { migratePreferences } from "../shared/settings-migrate.ts";
+import { waitFor } from "./helpers/wait.mjs";
 
 const SOURCE = "agent-source";
 const RUN = "agent-run";
@@ -53,7 +54,7 @@ function runAgent(id = RUN, source = SOURCE, card = "card-1", extra = {}) {
  */
 function fakePaseo(agents) {
   const sent = [];
-  const calls = { refetch: 0, waits: 0 };
+  const calls = { refetch: 0, waits: 0, waitTimeouts: [] };
   const idleWaiters = new Map();
   const setStatus = (id, status) => {
     agents[id].status = status;
@@ -89,6 +90,7 @@ function fakePaseo(agents) {
           },
           async waitForFinish(timeoutMs) {
             calls.waits++;
+            calls.waitTimeouts.push(timeoutMs);
             const agent = agents[id];
             if (agent?.waitError) throw new Error(agent.waitError);
             if (agent?.onWait) return agent.onWait(agent);
@@ -377,7 +379,7 @@ test("concurrent turn-ended events for one run report once", async () => {
 
 test("two runs finishing for one busy source are delivered one at a time, never into a running turn", async () => {
   const RUN2 = "agent-run-2";
-  const { paseo, sent, setStatus } = fakePaseo(
+  const { paseo, sent, calls, setStatus } = fakePaseo(
     world({
       [SOURCE]: { labels: {}, status: "running", busyAfterSend: 30 },
       [RUN2]: runAgent(RUN2, SOURCE, "card-2"),
@@ -385,7 +387,7 @@ test("two runs finishing for one busy source are delivered one at a time, never 
   );
   const reportBack = createReportBack(options());
   const both = Promise.all([reportBack.onTurnEnded(turnEnded(RUN), paseo), reportBack.onTurnEnded(turnEnded(RUN2), paseo)]);
-  await tick(20);
+  await waitFor(() => calls.waits >= 1, { message: "the first report to wait on the busy source" });
   assert.equal(sent.length, 0, "nothing is sent while the source is busy");
   setStatus(SOURCE, "idle");
   assert.deepEqual(await both, ["sent", "sent"]);
@@ -400,7 +402,7 @@ test("a source that turns busy again between wait and send is waited for again",
   let waits = 0;
   agents[SOURCE].onWait = async (agent) => {
     waits++;
-    await tick(5);
+    await tick();
     // The wait reports idle, but the owner has already started the next turn.
     agent.status = waits < 3 ? "running" : "idle";
     return { status: "idle" };
@@ -442,30 +444,41 @@ test("a source still busy at the deadline gets nothing, and a later turn may ret
 
 test("a wait that returns early on a still-busy source pauses before the next wait", async () => {
   const agents = world({ [SOURCE]: { labels: {}, status: "running" } });
-  let waits = 0;
+  const waitTimes = [];
   agents[SOURCE].onWait = async () => {
-    waits++;
+    waitTimes.push(Date.now());
     return { status: "idle" }; // returns at once, but the source stays running
   };
   const { paseo, sent } = fakePaseo(agents);
-  const reportBack = createReportBack(options({ busyWaitMs: 250, minRecheckMs: 50 }));
+  const minRecheckMs = 50;
+  const reportBack = createReportBack(options({ busyWaitMs: 300, minRecheckMs }));
   assert.equal(await reportBack.onTurnEnded(turnEnded(), paseo), "busy-timeout");
-  assert.ok(waits >= 2 && waits <= 7, `${waits} waits in 250 ms with a 50 ms minimum gap`);
+  assert.ok(waitTimes.length >= 2, `expected at least two waits, got ${waitTimes.length}`);
+  // A loaded machine only makes the gaps longer, so the minimum gap is a stable assertion.
+  for (let i = 1; i < waitTimes.length; i++) {
+    const gap = waitTimes[i] - waitTimes[i - 1];
+    assert.ok(gap >= minRecheckMs - 10, `wait ${i} followed the previous after only ${gap} ms (minimum ${minRecheckMs} ms)`);
+  }
   assert.equal(sent.length, 0);
 });
 
 test("the busy deadline runs from when a report is queued, not from reaching the front", async () => {
   const RUN2 = "agent-run-2";
-  const { paseo, sent } = fakePaseo(
+  const { paseo, sent, calls } = fakePaseo(
     world({ [SOURCE]: { labels: {}, status: "running" }, [RUN2]: runAgent(RUN2, SOURCE, "card-2") }),
   );
-  const reportBack = createReportBack(options({ busyWaitMs: 100 }));
-  const started = Date.now();
+  const busyWaitMs = 400;
+  const reportBack = createReportBack(options({ busyWaitMs }));
   const results = await Promise.all([reportBack.onTurnEnded(turnEnded(RUN), paseo), reportBack.onTurnEnded(turnEnded(RUN2), paseo)]);
-  const elapsed = Date.now() - started;
   assert.deepEqual(results, ["busy-timeout", "busy-timeout"]);
-  assert.ok(elapsed < 180, `both gave up after ${elapsed} ms, not after two full deadlines`);
   assert.equal(sent.length, 0);
+  // The report behind the first one gets only the time that was left on its own deadline, not a
+  // fresh one: a fresh deadline would hand waitForFinish about the full busyWaitMs again.
+  assert.ok(calls.waitTimeouts.length >= 1, "the first report waits");
+  assert.ok(calls.waitTimeouts[0] > busyWaitMs / 2, `the first report waits its full deadline (got ${calls.waitTimeouts[0]} ms)`);
+  for (const timeout of calls.waitTimeouts.slice(1)) {
+    assert.ok(timeout < busyWaitMs * 0.75, `a queued report must not get a fresh deadline (got ${timeout} ms)`);
+  }
 });
 
 test("RPC errors while waiting are logged, not treated as a timeout, and retried once", async () => {
@@ -506,11 +519,15 @@ test("agents without the run label are skipped for a short TTL, then re-checked"
   const agents = world();
   agents[RUN].labels = {};
   const { paseo, sent } = fakePaseo(agents);
-  const reportBack = createReportBack(options({ notARunTtlMs: 40 }));
+  const notARunTtlMs = 40;
+  const reportBack = createReportBack(options({ notARunTtlMs }));
   assert.equal(await reportBack.onTurnEnded(turnEnded(), paseo), "not-a-run");
   agents[RUN].labels = runLabels(SOURCE, "card-1");
   assert.equal(await reportBack.onTurnEnded(turnEnded(), paseo), "not-a-run", "within the TTL");
-  await tick(50);
+  // Each skipped event extends the TTL by notARunTtlMs. Wait until a check would land after it
+  // rather than sleeping a guessed amount.
+  const skippedAt = Date.now();
+  await waitFor(() => Date.now() > skippedAt + notARunTtlMs, { message: "the not-a-run TTL to expire" });
   assert.equal(await reportBack.onTurnEnded(turnEnded(), paseo), "sent", "labels read again after the TTL");
   assert.equal(sent.length, 1);
 });
@@ -526,12 +543,13 @@ test("runs the card did not record are not reported (spoofed labels)", async () 
 });
 
 test("a run recorded shortly after it ends is still reported", async () => {
-  let recorded = false;
-  setTimeout(() => (recorded = true), 20);
+  let checks = 0;
   const { paseo, sent } = fakePaseo(world());
-  const reportBack = createReportBack(options({ recordWaitMs: 500, recordedRun: async () => (recorded ? { fallback: false } : null) }));
+  // The card records the run between the first and the second read, so the poll has to catch it.
+  const reportBack = createReportBack(options({ recordWaitMs: 500, recordedRun: async () => (++checks > 1 ? { fallback: false } : null) }));
   assert.equal(await reportBack.onTurnEnded(turnEnded(), paseo), "sent");
   assert.equal(sent.length, 1);
+  assert.equal(checks, 2, "the first read missed the record and the poll read it again");
 });
 
 test("run and source must share a workspace unless the card used the most-recent fallback", async () => {
@@ -580,14 +598,13 @@ test("failed runs report the error inside the block", async () => {
 });
 
 test("dispose aborts pending waits and nothing is sent afterwards", async () => {
-  const { paseo, sent, setStatus } = fakePaseo(world({ [SOURCE]: { labels: {}, status: "running" } }));
+  const { paseo, sent, calls, setStatus } = fakePaseo(world({ [SOURCE]: { labels: {}, status: "running" } }));
   const reportBack = createReportBack(options({ busyWaitMs: 60_000 }));
   const pending = reportBack.onTurnEnded(turnEnded(), paseo);
-  await tick(20);
+  await waitFor(() => calls.waits >= 1, { message: "the report to wait on the busy source" });
   await reportBack.dispose();
   assert.equal(await pending, "aborted");
   setStatus(SOURCE, "idle");
-  await tick(10);
   assert.equal(sent.length, 0);
   assert.equal(await reportBack.onTurnEnded(turnEnded(), paseo), "aborted", "no new work after dispose");
 });
@@ -658,10 +675,17 @@ test("on a Paseo 0.14 host (no addHook) the hook returns at once, reports in the
   // Invalid settings: no readable runs record, so nothing is reported, whatever the source mode.
   const a = capture();
   const bypass = fakePaseo(world({ [SOURCE]: { labels: {}, currentModeId: "bypassPermissions" } }));
-  const wiredA = registerReportBack(a.server, invalid, { log: () => {}, recordWaitMs: 10, recordPollMs: 2 });
+  let invalidReads = 0;
+  const countedInvalid = {
+    read: async () => {
+      invalidReads++;
+      return { status: "invalid", revision: "1", error: "bad" };
+    },
+  };
+  const wiredA = registerReportBack(a.server, countedInvalid, { log: () => {}, recordWaitMs: 0, recordPollMs: 2 });
   assert.ok(a.handlers.has("agent.turn_ended"));
   await a.handlers.get("agent.turn_ended")(turnEnded(), hookContext(bypass.paseo));
-  await tick(40);
+  await waitFor(() => invalidReads >= 1, { message: "the background report to read the settings" });
   assert.equal(bypass.sent.length, 0);
 
   // Recorded run, busy source: the handler must return without waiting for it.
@@ -671,10 +695,9 @@ test("on a Paseo 0.14 host (no addHook) the hook returns at once, reports in the
   const wiredB = registerReportBack(b.server, recorded, { log: () => {}, busyWaitMs: 60_000 });
   const started = Date.now();
   await b.handlers.get("agent.turn_ended")(turnEnded(), hookContext(busy.paseo));
-  assert.ok(Date.now() - started < 50, "handler returned without waiting for the busy source");
+  assert.ok(Date.now() - started < 2000, "handler returned without waiting for the busy source");
   busy.setStatus(SOURCE, "idle");
-  await tick(30);
-  assert.equal(busy.sent.length, 1);
+  await waitFor(() => busy.sent.length === 1, { message: "the background report to reach the idle source" });
   assert.match(busy.sent[0].text, /allow-ci/, "ask-first source gets the full report");
 
   // Cleanup aborts a pending delivery.
@@ -682,10 +705,9 @@ test("on a Paseo 0.14 host (no addHook) the hook returns at once, reports in the
   const stuck = fakePaseo(world({ [SOURCE]: { labels: {}, status: "running" } }));
   const wiredC = registerReportBack(c.server, recorded, { log: () => {}, busyWaitMs: 60_000 });
   await c.handlers.get("agent.turn_ended")(turnEnded(), hookContext(stuck.paseo));
-  await tick(20);
+  await waitFor(() => stuck.calls.waits >= 1, { message: "the background report to wait on the busy source" });
   await wiredC.dispose();
   stuck.setStatus(SOURCE, "idle");
-  await tick(20);
   assert.equal(stuck.sent.length, 0);
   assert.equal(c.state.removed, true);
 
@@ -736,10 +758,9 @@ test("with addHook, report back registers agent.turn.after, returns at once and 
   assert.deepEqual([...handlers.keys()], ["agent.turn.after"]);
   const started = Date.now();
   await handlers.get("agent.turn.after")(turnEnded(), { paseo: busy.paseo, signal: new AbortController().signal });
-  assert.ok(Date.now() - started < 50, "handler returned without waiting for the busy source");
+  assert.ok(Date.now() - started < 2000, "handler returned without waiting for the busy source");
   busy.setStatus(SOURCE, "idle");
-  await tick(30);
-  assert.equal(busy.sent.length, 1);
+  await waitFor(() => busy.sent.length === 1, { message: "the background report to reach the idle source" });
   await wired.dispose();
   assert.equal(state.removed, true);
 });
