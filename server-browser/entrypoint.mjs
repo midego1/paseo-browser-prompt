@@ -11,7 +11,9 @@
 // of the signed-in browser's neko container and attaches Playwright MCP over the DevTools protocol to
 // the owner's persistent, signed-in Chromium there (its default context) instead of launching one.
 // That Chromium already sends everything through the stack's filtering proxy; the same origin rules
-// apply on top. The same stdio filter, timeouts and denied tools apply.
+// apply on top. The same stdio filter, timeouts and denied tools apply. With BP_CONTROL_URL (the
+// relay's unpublished takeover state) it also refuses every tool call while the owner holds control
+// of the browser in the viewer.
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -27,6 +29,11 @@ const cdpEndpoint = (process.env.BP_CDP_ENDPOINT ?? "").trim();
 const signedIn = cdpEndpoint !== "";
 if (signedIn && cdpEndpoint !== SIGNED_IN_CDP_ENDPOINT) {
   log(`BP_CDP_ENDPOINT may only be ${SIGNED_IN_CDP_ENDPOINT}; refusing to start`);
+  process.exit(1);
+}
+const controlUrl = (process.env.BP_CONTROL_URL ?? "").trim();
+if (controlUrl && !/^http:\/\/bp-si-[0-9a-f]{8}-relay:8081\/control$/.test(controlUrl)) {
+  log("BP_CONTROL_URL is not the signed-in relay's control address; refusing to start");
   process.exit(1);
 }
 const proxyServer = (process.env.BP_PROXY ?? "").trim();
@@ -130,10 +137,31 @@ const child = spawn(process.execPath, cliArgs, {
   env: { ...process.env, PLAYWRIGHT_MCP_OUTPUT_DIR: outputDir },
 });
 
+// The owner's takeover: polled every second; when the relay cannot be asked, no viewer can hold
+// control either (the relay is its only way in), so the run goes on.
+let ownerControl = false;
+if (signedIn && controlUrl) {
+  let warned = false;
+  const poll = async () => {
+    try {
+      const response = await fetch(controlUrl, { signal: AbortSignal.timeout(1500) });
+      const body = await response.json();
+      ownerControl = body?.ownerControl === true;
+      warned = false;
+    } catch {
+      ownerControl = false;
+      if (!warned) log("could not read the takeover state from the relay");
+      warned = true;
+    }
+  };
+  await poll();
+  setInterval(() => void poll(), 1000).unref();
+}
+
 let lastMessage = Date.now();
 const fromAgent = lineSplitter((line) => {
   lastMessage = Date.now();
-  const verdict = filterClientLine(line);
+  const verdict = filterClientLine(line, { ownerControl });
   if ("reply" in verdict) process.stdout.write(`${verdict.reply}\n`);
   else if ("forward" in verdict) child.stdin.write(`${verdict.forward}\n`);
 });

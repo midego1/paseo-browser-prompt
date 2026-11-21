@@ -35,8 +35,19 @@ import { SIGNED_IN_FILES } from "./server-browser-files.ts";
 import { stateDir } from "./state-dir.ts";
 
 
-/** The plugin's viewer key and the relay's status token (kept in the state directory, mode 0600), and neko's passwords for the current start. */
-export interface SignedInKeys extends StackSecrets {}
+/**
+ * The plugin's viewer key and the relay's status token (kept in the state directory, mode 0600),
+ * neko's passwords for the current start, and the salt of the current relay start: the relay only
+ * knows a key derived from the viewer key and that salt, so links from before a relay restart are dead.
+ */
+export interface SignedInKeys extends StackSecrets {
+  relaySalt: string;
+}
+
+/** The key the relay checks tickets with: HMAC-SHA256(viewer key, "relay:" + salt of this relay start). */
+export function relaySecret(keys: Pick<SignedInKeys, "viewerSecret" | "relaySalt">): string {
+  return createHmac("sha256", keys.viewerSecret).update(`relay:${keys.relaySalt}`).digest("base64url");
+}
 
 /** `v1.<exp>.<nonce>.<purpose>.<hmac>`; the relay (server-browser/relay.mjs) checks it the same way. */
 export function signViewerTicket(secret: string, input: { exp: number; nonce: string; purpose: "login" | "takeover" }): string {
@@ -47,7 +58,7 @@ export function signViewerTicket(secret: string, input: { exp: number; nonce: st
 const secret = () => randomBytes(32).toString("base64url");
 
 export function newKeys(): SignedInKeys {
-  return { viewerSecret: secret(), statusToken: secret(), nekoAdminPassword: secret(), nekoUserPassword: secret() };
+  return { viewerSecret: secret(), statusToken: secret(), nekoAdminPassword: secret(), nekoUserPassword: secret(), relaySalt: secret() };
 }
 
 function validKeys(value: unknown): value is SignedInKeys {
@@ -59,7 +70,12 @@ function validKeys(value: unknown): value is SignedInKeys {
 export async function loadKeys(file: string, fresh = newKeys): Promise<SignedInKeys> {
   try {
     const stored = JSON.parse(await readFile(file, "utf8"));
-    if (validKeys(stored)) return stored;
+    if (validKeys(stored)) {
+      if (typeof stored.relaySalt === "string" && stored.relaySalt.length >= 32) return stored;
+      const upgraded = { ...stored, relaySalt: secret() };
+      await saveKeys(file, upgraded);
+      return upgraded;
+    }
   } catch {
     // not created yet, or unreadable: make new ones
   }
@@ -248,23 +264,30 @@ export function createSignedIn(options: SignedInOptions) {
     return relayStatus(input.bindHost, stackPorts(input.port).http, keys.statusToken);
   }
 
-  async function removeStack(input: { stackId: string }, graceful: boolean): Promise<void> {
+  /**
+   * Removes the stack's containers and networks (never the volume). neko first and, unless the
+   * profile is about to be wiped, gracefully: Chromium writes its cookies on the way out (up to 45 s).
+   */
+  async function removeStack(input: { stackId: string }, graceful = true): Promise<void> {
     const names = stackNames(input.stackId);
-    // neko first and gracefully: Chromium writes its cookies on the way out.
-    if (graceful) await docker(["stop", "-t", "30", names.neko], 60_000).catch(() => undefined);
+    if (graceful) await docker(["stop", "-t", "45", names.neko], 90_000).catch(() => undefined);
     await docker(["rm", "-f", names.relay, names.neko, names.proxy], 60_000).catch(() => undefined);
     await docker(["network", "rm", names.network], 30_000).catch(() => undefined);
     await docker(["network", "rm", names.publicNetwork], 30_000).catch(() => undefined);
   }
 
-  async function startRelay(input: StackInput, keys: SignedInKeys): Promise<void> {
+  /** Starts the relay with a new salt: tickets signed for an earlier relay start no longer work. */
+  async function startRelay(input: StackInput, current: SignedInKeys): Promise<SignedInKeys> {
     const names = stackNames(input.stackId);
-    const args = stackRelayArgs(input, keys);
+    const keys = { ...current, relaySalt: secret() };
+    await saveKeys(keysFile, keys);
+    const args = stackRelayArgs(input, { ...keys, viewerSecret: relaySecret(keys) });
     // The relay carries the configuration it was started with, so a changed address or port restarts it.
     const withTag = [...args.slice(0, -4), "--label", `${CONFIG_LABEL}=${configTag(input)}`, ...args.slice(-4)];
     checkStackRun(withTag, "relay", input);
     await mustDocker("starting the relay", withTag);
     await mustDocker("connecting the relay", ["network", "connect", names.network, names.relay]);
+    return keys;
   }
 
   async function waitForNeko(input: StackInput, keys: SignedInKeys): Promise<void> {
@@ -280,7 +303,8 @@ export function createSignedIn(options: SignedInOptions) {
   async function createStack(input: StackInput): Promise<void> {
     const names = stackNames(input.stackId);
     log("starting the signed-in browser");
-    await removeStack(input, false);
+    // Whatever is left of an earlier start goes first; a neko that still runs is stopped gracefully.
+    await removeStack(input, true);
     const networks = stackNetworkArgs(input);
     await mustDocker("creating the internal network", networks.internal);
     await mustDocker("creating the outward network", networks.public);
@@ -297,12 +321,12 @@ export function createSignedIn(options: SignedInOptions) {
     if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(proxyIp)) throw new Error("reading the proxy address: none");
 
     // neko's passwords are new on every start; only the relay knows the admin one.
-    const keys = { ...(await loadKeys(keysFile)), nekoAdminPassword: secret(), nekoUserPassword: secret() };
+    let keys: SignedInKeys = { ...(await loadKeys(keysFile)), nekoAdminPassword: secret(), nekoUserPassword: secret() };
     await saveKeys(keysFile, keys);
     const neko = stackNekoArgs(input, keys).map((arg) => arg.split(STACK_PROXY_IP_PLACEHOLDER).join(proxyIp));
     checkStackRun(neko, "neko", input);
     await mustDocker("starting the browser", neko);
-    await startRelay(input, keys);
+    keys = await startRelay(input, keys);
     await waitForNeko(input, keys);
     log("the signed-in browser is running");
   }
@@ -326,8 +350,7 @@ export function createSignedIn(options: SignedInOptions) {
         if (tag !== configTag(input)) {
           // Only the relay holds the address and port: restart it alone, neko keeps running.
           await docker(["rm", "-f", names.relay], 30_000).catch(() => undefined);
-          await startRelay(input, keys);
-          await waitForNeko(input, keys);
+          await waitForNeko(input, await startRelay(input, keys));
           lastActive = now();
           return { input };
         }
@@ -339,7 +362,7 @@ export function createSignedIn(options: SignedInOptions) {
       } catch (error) {
         startError = error instanceof Error ? error.message : String(error);
         log(`the signed-in browser could not start: ${startError}`);
-        await removeStack(input, false);
+        await removeStack(input, true);
         throw error;
       } finally {
         startingStack = false;
@@ -428,7 +451,7 @@ export function createSignedIn(options: SignedInOptions) {
 
   async function makeLink(input: StackInput, purpose: "login" | "takeover", portrait: boolean): Promise<string> {
     const keys = await loadKeys(keysFile);
-    const ticket = signViewerTicket(keys.viewerSecret, { exp: Math.floor(now() / 1000) + VIEWER_TICKET_TTL_S, nonce: randomBytes(18).toString("base64url"), purpose });
+    const ticket = signViewerTicket(relaySecret(keys), { exp: Math.floor(now() / 1000) + VIEWER_TICKET_TTL_S, nonce: randomBytes(18).toString("base64url"), purpose });
     return viewerLink(input.origins.at(-1)!, ticket, portrait);
   }
 
@@ -438,6 +461,8 @@ export function createSignedIn(options: SignedInOptions) {
       // Runs lose the browser: their MCP containers go first.
       const agents = await sb.listResources("container", [`label=${CONTAINER_LABEL}=${SIGNED_IN_AGENT_ROLE}`, `label=${INSTANCE_LABEL}=${await sb.instance()}`], []).catch(() => []);
       if (agents.length) await docker(["rm", "-f", ...agents.map(([cid]) => cid!)], 30_000).catch(() => undefined);
+      // Those runs no longer hold the browser, also the ones admitted but not up yet.
+      starting.clear();
       await removeStack({ stackId: id }, !wipe);
       if (wipe) {
         const result = await docker(["volume", "rm", stackNames(id).volume], 60_000);
@@ -539,8 +564,7 @@ export function createSignedIn(options: SignedInOptions) {
         if (!bindHost || !(await isRunning())) return;
         const input = await stackInput(bindHost);
         await docker(["rm", "-f", stackNames(input.stackId).relay], 30_000).catch(() => undefined);
-        await startRelay(input, next);
-        await waitForNeko(input, next);
+        await waitForNeko(input, await startRelay(input, next));
         log("rotated the signed-in browser's viewer key");
       });
     },

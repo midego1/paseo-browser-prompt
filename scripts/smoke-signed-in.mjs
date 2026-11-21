@@ -8,11 +8,13 @@
 //   node --experimental-strip-types --no-warnings scripts/smoke-signed-in.mjs
 //
 // Checks: images (build when missing), the stack starts; the agent's Playwright MCP over CDP lists
-// only the allowed tools and opens https://example.com; blocked hosts are refused from inside
-// (Chromium and the proxy); a headless phone-emulated viewer logs in through the key flow, takes
-// control, taps and types into the agent's page; one run at a time; a cookie survives a neko
-// restart; the relay refuses /metrics, admin APIs, foreign Host and foreign-Origin WebSockets; the
-// hardening as Docker reports it; and the cleanup.
+// only the allowed tools and opens https://example.com; blocked hosts and Chromium's internal pages
+// (chrome://, view-source:, about:) are refused from inside; a headless phone-emulated viewer logs
+// in through the key flow (cookie with a random name, scoped to a random path), takes control (the
+// agent's tool calls are paused meanwhile), taps and types into the agent's page, and releases it;
+// one run at a time; a cookie survives a neko restart; the relay refuses /metrics, admin APIs,
+// foreign Host and foreign-Origin WebSockets; no STUN servers; the hardening as Docker reports it;
+// and the cleanup.
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { request } from "node:http";
@@ -102,10 +104,10 @@ function http(method, path, headers = {}, body) {
     req.end();
   });
 }
-function upgrade(headers) {
+function upgrade(headers, path) {
   return new Promise((resolve) => {
     const socket = connect(PORT, "127.0.0.1", () => {
-      const lines = ["GET /api/ws HTTP/1.1", `Host: 127.0.0.1:${PORT}`, "Upgrade: websocket", "Connection: Upgrade", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version: 13"];
+      const lines = [`GET ${path} HTTP/1.1`, `Host: 127.0.0.1:${PORT}`, "Upgrade: websocket", "Connection: Upgrade", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version: 13"];
       for (const [k, v] of Object.entries(headers)) lines.push(`${k}: ${v}`);
       socket.write(`${lines.join("\r\n")}\r\n\r\n`);
     });
@@ -154,6 +156,10 @@ try {
   const chromeArgs = docker("exec", neko, "sh", "-c", 'tr "\\0" "\\n" < /proc/$(pgrep -o -f "^/usr/lib/chromium/chromium --show")/cmdline');
   check("Chromium: proxy for everything, DevTools on loopback, sandbox on", /--proxy-bypass-list=<-loopback>/.test(chromeArgs) && /--remote-debugging-address=127\.0\.0\.1/.test(chromeArgs) && !/--no-sandbox/.test(chromeArgs));
   check("neko: no direct route out", docker("exec", neko, "sh", "-c", "curl -s -m4 -o /dev/null -w '%{http_code}' https://example.com || true") === "000");
+  const nekoEnv = inspect(neko, "{{range .Config.Env}}{{println .}}{{end}}");
+  check("neko: no STUN/TURN servers", /^NEKO_WEBRTC_ICESERVERS_FRONTEND=\[\]$/m.test(nekoEnv) && /^NEKO_WEBRTC_ICESERVERS_BACKEND=\[\]$/m.test(nekoEnv));
+  const relayEnv = inspect(relayName, "{{range .Config.Env}}{{println .}}{{end}}");
+  check("relay and proxy: maximum lifetime set", /^BP_MAX_LIFETIME_S=604800$/m.test(relayEnv) && /^BP_MAX_LIFETIME_S=604800$/m.test(inspect(proxyName, "{{range .Config.Env}}{{println .}}{{end}}")));
   check("neko: metrics off", docker("exec", neko, "sh", "-c", "curl -s -m4 -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/metrics || true") === "404");
   const proxyIp = inspect(proxyName, `{{(index .NetworkSettings.Networks "${neko.replace(/-neko$/, "-net")}").IPAddress}}`);
   for (const target of ["http://100.96.145.38:5299/", "http://paseo-box.tail60821.ts.net/", "http://192.168.1.1/", "http://10.0.0.1/", "http://172.17.0.1/", "http://169.254.169.254/", "http://127.0.0.1:8080/", "http://[fd7a:115c:a1e0::1]/"]) {
@@ -178,6 +184,20 @@ try {
     check(`agent blocked from ${target}`, (nav.error || /Blocked by the browser-prompt|403/.test(nav.text + body)) && !leaked, nav.error ? nav.text.split("\n").find((l) => /Error|ERR_/.test(l))?.slice(0, 90) : "403 page");
     await agent.call("browser_tabs", { action: "close" });
   }
+  for (const target of ["chrome://history", "chrome://settings", "chrome://settings/content/all", "chrome://version", "view-source:https://example.com", "about:version", "chrome-untrusted://print/", "devtools://devtools/bundled/inspector.html"]) {
+    await agent.call("browser_tabs", { action: "new" });
+    const nav = await agent.call("browser_navigate", { url: target });
+    const page = (await agent.call("browser_evaluate", { function: "() => JSON.stringify({ url: location.href, text: document.body ? document.body.innerText.slice(0, 300) : '' })" })).text;
+    const seen = JSON.parse(JSON.parse(page.match(/"\{.*\}"/)?.[0] ?? '"{}"'));
+    // Refused: Chromium's policy block (ERR_BLOCKED_BY_ADMINISTRATOR, an error page), or an empty page (about:version).
+    const blocked = /ERR_BLOCKED_BY_ADMINISTRATOR/.test(nav.text) || String(seen.url ?? "").startsWith("chrome-error://");
+    const empty = !String(seen.text ?? "").trim();
+    check(`agent refused ${target}`, blocked || empty, blocked ? "ERR_BLOCKED_BY_ADMINISTRATOR" : "empty page, nothing shown");
+    await agent.call("browser_tabs", { action: "close" });
+  }
+  r = await agent.call("browser_navigate", { url: "https://example.com" });
+  check("normal https still works after the internal-page checks", !r.error && /Example Domain/.test(r.text));
+  await agent.call("browser_tabs", { action: "close" });
   r = await agent.call("browser_tabs", { action: "list" });
   const tabIndex = [...r.text.matchAll(/- (\d+):.*\(https:\/\/example\.com\/?\)/g)].map((m) => Number(m[1])).at(-1);
   await agent.call("browser_tabs", { action: "select", index: tabIndex });
@@ -203,8 +223,14 @@ try {
   const refused = [];
   page.on("response", (res) => res.status() >= 400 && refused.push(`${res.status()} ${new URL(res.url()).pathname}`));
   await page.goto(link.url);
-  await page.waitForURL(`${ORIGIN}/`, { timeout: 20_000 });
-  check("viewer: ticket traded for the session cookie", (await phone.cookies()).some((c) => c.name === "bp_viewer" && c.httpOnly && c.sameSite === "Strict"));
+  await page.waitForURL(/\/s-[0-9a-f]{32}\/$/, { timeout: 20_000 });
+  const prefix = new URL(page.url()).pathname.replace(/\/$/, "");
+  const viewerCookie = (await phone.cookies()).find((c) => /^bp_viewer_[0-9a-f]{16}$/.test(c.name));
+  check(
+    "viewer: ticket traded for a session cookie with a random name, scoped to a random path, HttpOnly, Strict, 2 h",
+    viewerCookie && viewerCookie.httpOnly && viewerCookie.sameSite === "Strict" && viewerCookie.path === `${prefix}/` && viewerCookie.expires - Date.now() / 1000 <= 7200,
+    viewerCookie ? `${viewerCookie.name.slice(0, 10)}…, path /s-…/` : "none",
+  );
   check("viewer: the fragment is gone from the address", !page.url().includes("#"));
   await page.waitForSelector("video", { timeout: 20_000 });
   await page.waitForTimeout(4000);
@@ -214,7 +240,9 @@ try {
   });
   check("viewer: live portrait stream on a phone", video.playing && video.w === 720 && video.h === 1280, `${video.w}x${video.h}`);
   await page.locator('button[aria-label="Request Controls"], button[aria-label="controls.request"]').first().click({ force: true });
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(2500);
+  r = await agent.call("browser_snapshot", {});
+  check("takeover: the agent's tool calls pause while the owner holds control", r.error && /owner has taken over/.test(r.text), r.text.slice(0, 70));
   const box = await page.locator("video").first().boundingBox();
   const s = Math.min(box.width / video.w, box.height / video.h);
   const at = (fx, fy) => ({ x: box.x + (box.width - video.w * s) / 2 + video.w * s * fx, y: box.y + (box.height - video.h * s) / 2 + video.h * s * fy });
@@ -232,13 +260,27 @@ try {
   if (await keyboard.count()) await keyboard.first().tap().catch(() => {});
   await page.keyboard.type("alice", { delay: 60 });
   await page.waitForTimeout(1000);
+  const release = page.locator('button[aria-label="Release Controls"], button[aria-label="controls.release"]').first();
+  const releasable = (await release.count()) > 0;
+  if (releasable) await release.click({ force: true });
+  else await page.close();
+  await page.waitForTimeout(2500);
+  // After a takeover the agent's current tab may have moved (Chromium's omnibox popups show up as
+  // pages); the prompt tells the agent to list and select its own tab again, as here.
+  r = await agent.call("browser_tabs", { action: "list" });
+  console.log(`(tabs after the takeover: ${r.text.split("\n").filter((l) => /^- \d+:/.test(l)).join(" ").slice(0, 300)})`);
+  check("no blocked chrome:// popup pages among the tabs (native address-bar popup)", !/omnibox-popup/.test(r.text));
+  const ownTab = [...r.text.matchAll(/- (\d+):.*\(https:\/\/example\.com\/?\)/g)].map((m) => Number(m[1])).at(-1);
+  await agent.call("browser_tabs", { action: "select", index: ownTab });
   r = await agent.call("browser_evaluate", { function: "() => JSON.stringify({ user: document.getElementById('user').value, clicks: window.clicks || 0 })" });
+  check("takeover: the agent works again once the owner releases control", !r.error, releasable ? "released with the button" : "viewer closed");
   const seen = JSON.parse(JSON.parse(r.text.match(/"\{.*\}"/)?.[0] ?? '"{}"'));
   check("takeover: the phone's taps and typing reach the agent's page", seen.user === "alice" && seen.clicks === 2, JSON.stringify(seen));
   check("viewer: no refused requests from the neko client", refused.length === 0, refused.join(", "));
 
   // 6. Relay refusals with a valid session.
-  const cookie = (await phone.cookies()).filter((c) => c.name === "bp_viewer").map((c) => `${c.name}=${c.value}`)[0];
+  const cookie = `${viewerCookie.name}=${viewerCookie.value}`;
+  check("relay: the session cookie does nothing outside its path", (await http("GET", "/api/whoami", { Cookie: cookie })).status === 401);
   for (const [method, path] of [
     ["GET", "/metrics"],
     ["GET", "/health"],
@@ -249,13 +291,17 @@ try {
     ["POST", "/api/room/settings"],
     ["GET", "/api/filetransfer"],
   ]) {
-    const res = await http(method, path, { Cookie: cookie, Origin: ORIGIN });
+    const res = await http(method, `${prefix}${path}`, { Cookie: cookie, Origin: ORIGIN });
     check(`relay refuses ${method} ${path}`, res.status === 403, res.status);
   }
-  check("relay: foreign Host refused", (await http("GET", "/", { Host: "evil.example", Cookie: cookie })).status === 421);
-  check("relay: WebSocket with a foreign Origin refused", / 403 /.test(await upgrade({ Cookie: cookie, Origin: "http://evil.example" })));
-  check("relay: WebSocket without a session refused", / 401 /.test(await upgrade({ Origin: ORIGIN })));
-  check("relay: WebSocket with own Origin and session accepted", / 101 /.test(await upgrade({ Cookie: cookie, Origin: ORIGIN })));
+  check("relay: foreign Host refused", (await http("GET", `${prefix}/`, { Host: "evil.example", Cookie: cookie })).status === 421);
+  check("relay: WebSocket with a foreign Origin refused", / 403 /.test(await upgrade({ Cookie: cookie, Origin: "http://evil.example" }, `${prefix}/api/ws`)));
+  check("relay: WebSocket without a session refused", / 401 /.test(await upgrade({ Origin: ORIGIN }, `${prefix}/api/ws`)));
+  check("relay: WebSocket outside the prefix refused", / 403 /.test(await upgrade({ Cookie: cookie, Origin: ORIGIN }, "/api/ws")));
+  check("relay: WebSocket with own Origin and session accepted", / 101 /.test(await upgrade({ Cookie: cookie, Origin: ORIGIN }, `${prefix}/api/ws`)));
+  const keys = JSON.parse((await import("node:fs")).readFileSync(join(state, "keys.json"), "utf8"));
+  const relayStatus = JSON.parse((await http("GET", "/bp/status", { Authorization: `Bearer ${keys.statusToken}` })).body);
+  console.log(`(the relay sees viewers coming from ${relayStatus.lastPeer}: ${/^127\./.test(relayStatus.lastPeer) ? "the real peer" : "Docker's port forwarder, so peer binding adds nothing on this host"})`);
   const ticket = decodeURIComponent(new URL(link.url).hash.slice(3).split("&")[0]);
   check("relay: a used ticket is refused", (await http("POST", "/bp/session", { Origin: ORIGIN, "Content-Type": "application/json" }, JSON.stringify({ ticket }))).status === 401);
   await browser.close();
@@ -263,7 +309,9 @@ try {
 
   // 7. A cookie survives a neko restart.
   const value = Math.random().toString(36).slice(2, 10);
-  await agent.call("browser_evaluate", { function: `() => { document.cookie = "bp_smoke=${value}; max-age=86400; path=/; secure"; return 1; }` });
+  await agent.call("browser_tabs", { action: "new", url: "https://example.com" });
+  r = await agent.call("browser_evaluate", { function: `() => { document.cookie = "bp_smoke=${value}; max-age=86400; path=/; secure"; return location.origin + " " + document.cookie; }` });
+  check("cookie set on https://example.com", !r.error && r.text.includes(`https://example.com`) && r.text.includes(`bp_smoke=${value}`), r.error ? r.text.slice(0, 120) : "");
   await agent.close();
   console.log("waiting 50 s for Chromium to write its cookies…");
   await sleep(50_000);
@@ -273,7 +321,7 @@ try {
   const again = await mcpClient((await si.mcpServer("smoke-agent-2")).server);
   await again.call("browser_tabs", { action: "new", url: "https://example.com" });
   r = await again.call("browser_evaluate", { function: "() => document.cookie" });
-  check("a cookie survives a neko restart", r.text.includes(`bp_smoke=${value}`));
+  check("a cookie survives a neko restart", r.text.includes(`bp_smoke=${value}`), r.text.includes(`bp_smoke=${value}`) ? "" : r.text.slice(0, 160));
   await again.close();
 } catch (error) {
   check("smoke run", false, error instanceof Error ? error.stack : String(error));

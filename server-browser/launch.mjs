@@ -106,6 +106,10 @@ export function checkSignedInPlan(plan) {
   checkRun(plan.agent.run, "agent", plan.neko);
   const env = plan.agent.run.filter((arg, i) => plan.agent.run[i - 1] === "--env" || plan.agent.run[i - 1] === "-e");
   if (!env.includes("BP_CDP_ENDPOINT=http://127.0.0.1:9222")) throw new Error("agent: only the signed-in browser's DevTools endpoint");
+  const control = env.filter((value) => value.startsWith("BP_CONTROL_URL="));
+  if (control.length > 1 || (control.length === 1 && control[0] !== `BP_CONTROL_URL=http://${plan.neko.replace(/-neko$/, "-relay")}:8081/control`)) {
+    throw new Error("agent: only the signed-in relay's takeover state");
+  }
   return plan;
 }
 

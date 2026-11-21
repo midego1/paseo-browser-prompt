@@ -20,6 +20,20 @@
   "BrowserLabsEnabled": false,
   "CommandLineFlagSecurityWarningsEnabled": false,
   "DefaultCookiesSetting": 1,
-  "URLBlocklist": ["file://*", "chrome://policy"],
+  "MetricsReportingEnabled": false,
+  "SafeBrowsingProtectionLevel": 1,
+  "BackgroundModeEnabled": false,
+  "NewTabPageLocation": "about:blank",
+  "URLBlocklist": [
+    "file://*",
+    "chrome://*",
+    "chrome-untrusted://*",
+    "chrome-search://*",
+    "chrome-extension://*",
+    "devtools://*",
+    "view-source:*",
+    "about:*"
+  ],
+  "URLAllowlist": ["about:blank", "chrome://newtab"],
   "ExtensionInstallBlocklist": ["*"]
 }

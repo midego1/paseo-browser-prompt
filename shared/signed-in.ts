@@ -61,7 +61,7 @@ export const IDLE_STOP_MS = 30 * 60_000;
 export const MIN_UP_AFTER_VIEWER_MS = 45_000;
 /** How long the owner's viewer link works (once). */
 export const VIEWER_TICKET_TTL_S = 300;
-/** The proxy and relay of a persistent stack stop themselves after this long at the latest. */
+/** The proxy and relay of a persistent stack stop themselves after this long at the latest (proxy-main.mjs, relay-main.mjs); the daemon starts new ones when needed. */
 export const STACK_MAX_LIFETIME_S = 7 * 24 * 60 * 60;
 
 export const NEKO_LIMITS = { memory: "2560m", cpus: "2", pids: 1024, shm: "2g" } as const;
@@ -314,6 +314,12 @@ export function stackNekoArgs(input: StackInput, secrets: StackSecrets): string[
     `NEKO_WEBRTC_TCPMUX=${ports.rtc}`,
     "--env",
     `NEKO_WEBRTC_NAT1TO1=${input.bindHost}`,
+    // No STUN or TURN servers (neko 3.2.0's default too, pinned here): the viewer gets only the
+    // ICE-TCP candidate on the bind address, nothing goes to a public STUN server.
+    "--env",
+    "NEKO_WEBRTC_ICESERVERS_FRONTEND=[]",
+    "--env",
+    "NEKO_WEBRTC_ICESERVERS_BACKEND=[]",
     "--env",
     `BP_PROXY=http://${STACK_PROXY_IP_PLACEHOLDER}:${PROXY_PORT}`,
     "--log-driver",
@@ -391,6 +397,10 @@ export function stackRelayArgs(input: StackInput, secrets: StackSecrets): string
     `BP_SCREEN_LANDSCAPE=${SCREEN_LANDSCAPE}`,
     "--env",
     `BP_SCREEN_PORTRAIT=${SCREEN_PORTRAIT}`,
+    "--env",
+    `BP_CONTROL_PORT=${CONTROL_PORT}`,
+    "--env",
+    `BP_MAX_LIFETIME_S=${STACK_MAX_LIFETIME_S}`,
     "--log-driver",
     "none",
     "--stop-timeout",
@@ -494,6 +504,11 @@ export function signedInAgentName(agentId: string, nonce: string): string {
 }
 
 export const SIGNED_IN_CDP_ENDPOINT = "http://127.0.0.1:9222";
+/** The relay's unpublished takeover-state port (GET /control), on the stack's networks only. */
+export const CONTROL_PORT = 8081;
+export function controlUrl(stackId: string): string {
+  return `http://${stackNames(stackId).relay}:${CONTROL_PORT}/control`;
+}
 
 /**
  * `docker run -i` for a signed-in run's Playwright MCP: in neko's network namespace (so the
@@ -552,6 +567,8 @@ export function signedInAgentArgs(input: SignedInAgentInput): string[] {
     "HOME=/tmp/home",
     "--env",
     `BP_CDP_ENDPOINT=${SIGNED_IN_CDP_ENDPOINT}`,
+    "--env",
+    `BP_CONTROL_URL=${controlUrl(input.stackId)}`,
     "--env",
     `BP_BLOCKED_IPS=${ips.join(",")}`,
     "--env",

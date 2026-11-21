@@ -62,9 +62,10 @@ import {
   viewerOrigins,
 } from "../shared/signed-in.ts";
 import { createServerBrowser } from "../server/server-browser.ts";
-import { createSignedIn, loadKeys, signViewerTicket } from "../server/signed-in.ts";
+import { createSignedIn, loadKeys, relaySecret, signViewerTicket } from "../server/signed-in.ts";
 import { SIGNED_IN_FILES } from "../server/server-browser-files.ts";
 import { checkPlan, launch } from "../server-browser/launch.mjs";
+import { filterClientLine, OWNER_CONTROL_TEXT } from "../server-browser/mcp-filter.mjs";
 import {
   classifyRequest,
   hostsOf,
@@ -189,9 +190,10 @@ test("relay helpers: cookies, origins and hosts", () => {
   assert.deepEqual(hostsOf(["http://100.96.145.38:5301", "https://box.tail.ts.net"]), ["100.96.145.38:5301", "box.tail.ts.net"]);
 });
 
-/** A fake neko: records requests, answers login, whoami, screen and health, upgrades /api/ws. */
+/** A fake neko: records requests, answers login, whoami, control state, screen and health, upgrades /api/ws. */
 async function fakeNeko() {
   const seen = [];
+  const state = { hasHost: false, failLogin: false };
   const server = createServer((req, res) => {
     seen.push({ method: req.method, url: req.url, headers: req.headers });
     if (req.url === "/api/login") {
@@ -199,6 +201,7 @@ async function fakeNeko() {
       req.on("data", (d) => (body += d));
       req.on("end", () => {
         const { password } = JSON.parse(body);
+        if (state.failLogin) return res.writeHead(503).end("{}");
         if (password !== "admin-pw") return res.writeHead(401).end("{}");
         res.writeHead(200, { "Content-Type": "application/json", "Set-Cookie": "NEKO_SESSION=leak" }).end(JSON.stringify({ id: "s1", token: "neko-token" }));
       });
@@ -206,7 +209,15 @@ async function fakeNeko() {
     }
     if (req.url === "/health") return res.writeHead(200).end("true");
     if (req.headers.authorization !== "Bearer neko-token") return res.writeHead(401).end("{}");
-    res.writeHead(200, { "Content-Type": "application/json", "Set-Cookie": "NEKO_SESSION=leak" }).end(JSON.stringify({ ok: true, path: req.url }));
+    if (req.url === "/api/room/control") return res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ has_host: state.hasHost }));
+    res
+      .writeHead(200, {
+        "Content-Type": "application/json",
+        "Set-Cookie": "NEKO_SESSION=leak",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Credentials": "true",
+      })
+      .end(JSON.stringify({ ok: true, path: req.url }));
   });
   server.on("upgrade", (req, socket) => {
     seen.push({ method: "UPGRADE", url: req.url, headers: req.headers });
@@ -214,12 +225,12 @@ async function fakeNeko() {
     setTimeout(() => socket.end(), 50);
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { port: server.address().port, seen, close: () => new Promise((resolve) => server.close(resolve)) };
+  return { port: server.address().port, seen, state, close: () => new Promise((resolve) => server.close(resolve)) };
 }
 
-function http(port, method, path, headers = {}, body) {
+function http(port, method, path, headers = {}, body, host = "127.0.0.1") {
   return new Promise((resolve) => {
-    const req = httpRequest({ host: "127.0.0.1", port, method, path, headers }, (res) => {
+    const req = httpRequest({ host, port, method, path, headers }, (res) => {
       let data = "";
       res.on("data", (d) => (data += d));
       res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
@@ -230,10 +241,10 @@ function http(port, method, path, headers = {}, body) {
   });
 }
 
-function upgrade(port, headers) {
+function upgrade(port, headers, path = "/api/ws?token=evil") {
   return new Promise((resolve) => {
     const socket = connect(port, "127.0.0.1", () => {
-      const lines = ["GET /api/ws?token=evil HTTP/1.1", "Upgrade: websocket", "Connection: Upgrade", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version: 13"];
+      const lines = [`GET ${path} HTTP/1.1`, "Upgrade: websocket", "Connection: Upgrade", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version: 13"];
       for (const [k, v] of Object.entries(headers)) lines.push(`${k}: ${v}`);
       socket.write(`${lines.join("\r\n")}\r\n\r\n`);
     });
@@ -249,11 +260,11 @@ function upgrade(port, headers) {
   });
 }
 
-test("relay end to end: ticket to cookie, forwarding with neko's token only, Host, Origin, WebSocket, status, rate limit", async () => {
-  const neko = await fakeNeko();
-  const logs = [];
-  let now = 1_800_000_000_000;
-  const relay = await startRelay({
+const HOST = { Host: "127.0.0.1:5301" };
+const ORIGIN_HEADERS = { ...HOST, Origin: "http://127.0.0.1:5301" };
+
+async function relayFor(neko, extra = {}) {
+  return startRelay({
     nekoHost: "127.0.0.1",
     nekoPort: neko.port,
     listenHost: "127.0.0.1",
@@ -262,76 +273,185 @@ test("relay end to end: ticket to cookie, forwarding with neko's token only, Hos
     secret: SECRET,
     statusToken: STATUS,
     adminPassword: "admin-pw",
-    log: (m) => logs.push(m),
-    now: () => now,
+    ...extra,
   });
-  const host = { Host: "127.0.0.1:5301" };
-  const origin = { ...host, Origin: "http://127.0.0.1:5301" };
-  try {
-    const ticket = signViewerTicket(SECRET, { exp: Math.floor(now / 1000) + 300, nonce: "nonce-nonce-nonce-1", purpose: "login" });
-    const post = (t, headers = origin) => http(relay.port, "POST", "/bp/session", { ...headers, "Content-Type": "application/json" }, JSON.stringify({ ticket: t }));
-    assert.equal((await http(relay.port, "GET", "/bp/open", host)).status, 200);
-    assert.equal((await http(relay.port, "GET", "/bp/open", { Host: "evil.example" })).status, 421, "DNS rebinding: unknown Host");
-    assert.equal((await post(ticket, host)).status, 403, "no Origin");
-    assert.equal((await post(ticket, { ...host, Origin: "http://evil.example" })).status, 403, "foreign Origin");
-    const created = await post(ticket);
-    assert.equal(created.status, 200);
-    const setCookie = String(created.headers["set-cookie"]);
-    assert.match(setCookie, new RegExp(`^${SESSION_COOKIE}=[A-Za-z0-9_-]{43}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200$`));
-    assert.doesNotMatch(setCookie, /Secure/, "no Secure flag on plain http");
-    const cookie = setCookie.split(";")[0];
-    assert.equal((await post(ticket)).status, 401, "a ticket works once");
+}
+const ticketAt = (now, nonce, purpose = "login") => signViewerTicket(SECRET, { exp: Math.floor(now / 1000) + 300, nonce, purpose });
+const postTicket = (relay, ticket, headers = ORIGIN_HEADERS, host) =>
+  http(relay.port, "POST", "/bp/session", { ...headers, "Content-Type": "application/json" }, JSON.stringify({ ticket }), host);
 
-    // Forwarding: the relay's cookie and any client credentials never reach neko; neko's token never reaches the client.
-    const whoami = await http(relay.port, "GET", "/api/whoami?token=evil", { ...host, Cookie: `${cookie}; NEKO_SESSION=x`, Authorization: "Bearer evil" });
+test("relay end to end: ticket to a scoped cookie, forwarding under the prefix with neko's token only, Host, Origin, WebSocket, status, rate limit", async () => {
+  const neko = await fakeNeko();
+  const logs = [];
+  let now = 1_800_000_000_000;
+  const relay = await relayFor(neko, { log: (m) => logs.push(m), now: () => now });
+  const P = relay.prefix;
+  assert.match(P, /^\/s-[0-9a-f]{32}$/);
+  assert.match(relay.cookieName, /^bp_viewer_[0-9a-f]{16}$/);
+  try {
+    const ticket = ticketAt(now, "nonce-nonce-nonce-1");
+    assert.equal((await http(relay.port, "GET", "/bp/open", HOST)).status, 200);
+    assert.equal((await http(relay.port, "GET", "/bp/open", { Host: "evil.example" })).status, 421, "DNS rebinding: unknown Host");
+    assert.equal((await postTicket(relay, ticket, HOST)).status, 403, "no Origin");
+    assert.equal((await postTicket(relay, ticket, { ...HOST, Origin: "http://evil.example" })).status, 403, "foreign Origin");
+    const created = await postTicket(relay, ticket);
+    assert.equal(created.status, 200);
+    assert.deepEqual(JSON.parse(created.body), { ok: true, path: `${P}/` });
+    const setCookie = String(created.headers["set-cookie"]);
+    assert.equal(setCookie.replace(/=[A-Za-z0-9_-]{43};/, "=<id>;"), `${relay.cookieName}=<id>; HttpOnly; SameSite=Strict; Path=${P}/; Max-Age=7200`);
+    const cookie = setCookie.split(";")[0];
+    assert.equal((await postTicket(relay, ticket)).status, 401, "a ticket works once");
+
+    // Only paths under the prefix carry and accept the session.
+    assert.equal((await http(relay.port, "GET", "/api/whoami", { ...HOST, Cookie: cookie })).status, 401, "outside the prefix");
+    assert.equal((await http(relay.port, "GET", "/", { ...HOST, Cookie: cookie })).status, 401, "the root is the locked page");
+    const whoami = await http(relay.port, "GET", `${P}/api/whoami?token=evil`, { ...HOST, Cookie: `${cookie}; NEKO_SESSION=x`, Authorization: "Bearer evil" });
     assert.equal(whoami.status, 200);
     assert.equal(whoami.headers["set-cookie"], undefined, "neko's cookies are dropped");
+    assert.equal(whoami.headers["access-control-allow-origin"], undefined, "CORS headers are dropped");
+    assert.equal(whoami.headers["access-control-allow-credentials"], undefined);
     assert.equal(whoami.headers["x-frame-options"], "DENY");
     const forwarded = neko.seen.findLast((r) => r.url.startsWith("/api/whoami"));
-    assert.equal(forwarded.url, "/api/whoami", "no query string");
+    assert.equal(forwarded.url, "/api/whoami", "prefix and query string stripped");
     assert.equal(forwarded.headers.authorization, "Bearer neko-token");
     assert.equal(forwarded.headers.cookie, undefined);
-
-    assert.equal((await http(relay.port, "GET", "/api/whoami", host)).status, 401, "no session");
-    assert.equal((await http(relay.port, "GET", "/", host)).status, 401, "locked page");
+    assert.equal((await http(relay.port, "GET", `${P}/`, { ...HOST, Cookie: cookie })).status, 200, "the client under the prefix");
+    assert.equal((await http(relay.port, "GET", `${P}/api/whoami`, HOST)).status, 401, "no session");
+    assert.equal((await http(relay.port, "GET", `/s-${"0".repeat(32)}/api/whoami`, { ...HOST, Cookie: cookie })).status, 401, "another prefix");
     for (const path of ["/metrics", "/health", "/api/members", "/api/sessions", "/debug/pprof/"]) {
-      assert.equal((await http(relay.port, "GET", path, { ...host, Cookie: cookie })).status, 403, path);
+      assert.equal((await http(relay.port, "GET", `${P}${path}`, { ...HOST, Cookie: cookie })).status, 403, path);
     }
-    assert.equal((await http(relay.port, "POST", "/api/room/control/take", { ...host, Cookie: cookie })).status, 403, "writes need the viewer's Origin");
-    assert.equal((await http(relay.port, "POST", "/api/room/control/take", { ...origin, Cookie: cookie })).status, 200);
+    assert.equal((await http(relay.port, "POST", `${P}/api/room/control/take`, { ...HOST, Cookie: cookie })).status, 403, "writes need the viewer's Origin");
+    assert.equal((await http(relay.port, "POST", `${P}/api/room/control/take`, { ...ORIGIN_HEADERS, Cookie: cookie })).status, 200);
     assert.ok(!neko.seen.some((r) => r.url === "/metrics" || r.url === "/api/members"), "refused routes never reach neko");
 
-    // WebSocket: own Origin and session only; the upstream request carries neko's token and no query.
-    assert.match(await upgrade(relay.port, { ...host, Cookie: cookie, Origin: "http://evil.example" }), / 403 /);
-    assert.match(await upgrade(relay.port, { ...host, Cookie: cookie }), / 403 /);
-    assert.match(await upgrade(relay.port, { ...origin }), / 401 /);
-    assert.match(await upgrade(relay.port, { Host: "evil.example", Cookie: cookie, Origin: "http://127.0.0.1:5301" }), / 421 /);
-    assert.match(await upgrade(relay.port, { ...origin, Cookie: cookie }), / 101 /);
+    // WebSocket: only under the prefix, own Origin and session; upstream carries neko's token, no query.
+    assert.match(await upgrade(relay.port, { ...HOST, Cookie: cookie, Origin: "http://evil.example" }, `${P}/api/ws`), / 403 /);
+    assert.match(await upgrade(relay.port, { ...HOST, Cookie: cookie }, `${P}/api/ws`), / 403 /);
+    assert.match(await upgrade(relay.port, { ...ORIGIN_HEADERS }, `${P}/api/ws`), / 401 /);
+    assert.match(await upgrade(relay.port, { ...ORIGIN_HEADERS, Cookie: cookie }, "/api/ws"), / 403 /, "outside the prefix");
+    assert.match(await upgrade(relay.port, { Host: "evil.example", Cookie: cookie, Origin: "http://127.0.0.1:5301" }, `${P}/api/ws`), / 421 /);
+    assert.match(await upgrade(relay.port, { ...ORIGIN_HEADERS, Cookie: cookie }, `${P}/api/ws?token=evil`), / 101 /);
     const ws = neko.seen.findLast((r) => r.method === "UPGRADE");
     assert.equal(ws.url, "/api/ws");
     assert.equal(ws.headers.authorization, "Bearer neko-token");
     assert.equal(ws.headers.cookie, undefined);
 
     // Status: only with the daemon's token.
-    assert.equal((await http(relay.port, "GET", "/bp/status", host)).status, 401);
-    const status = await http(relay.port, "GET", "/bp/status", { ...host, Authorization: `Bearer ${STATUS}` });
+    assert.equal((await http(relay.port, "GET", "/bp/status", HOST)).status, 401);
+    const status = await http(relay.port, "GET", "/bp/status", { ...HOST, Authorization: `Bearer ${STATUS}` });
     assert.equal(status.status, 200);
     assert.equal(JSON.parse(status.body).nekoUp, true);
 
     // Logout drops the session.
-    assert.equal((await http(relay.port, "POST", "/api/logout", { ...origin, Cookie: cookie })).status, 200);
-    assert.equal((await http(relay.port, "GET", "/api/whoami", { ...host, Cookie: cookie })).status, 401);
+    assert.equal((await http(relay.port, "POST", `${P}/api/logout`, { ...ORIGIN_HEADERS, Cookie: cookie })).status, 200);
+    assert.equal((await http(relay.port, "GET", `${P}/api/whoami`, { ...HOST, Cookie: cookie })).status, 401);
 
-    // Too many bad tickets in a minute: 429, also for a good one; a minute later it works again.
-    // One bad attempt so far (the reused ticket); 19 more reach the limit of 20.
-    for (let i = 0; i < 19; i++) assert.equal((await post(`v1.${Math.floor(now / 1000) + 60}.aaaaaaaaaaaaaaaa.login.${"A".repeat(43)}`)).status, 401);
-    const good = signViewerTicket(SECRET, { exp: Math.floor(now / 1000) + 300, nonce: "nonce-nonce-nonce-2", purpose: "login" });
-    assert.equal((await post(good)).status, 429);
+    // Too many bad tickets from one address in a minute: 429, also for a good one; a minute later it works again.
+    for (let i = 0; i < 19; i++) assert.equal((await postTicket(relay, `v1.${Math.floor(now / 1000) + 60}.aaaaaaaaaaaaaaaa.login.${"A".repeat(43)}`)).status, 401);
+    const good = ticketAt(now, "nonce-nonce-nonce-2");
+    assert.equal((await postTicket(relay, good)).status, 429);
     now += 61_000;
-    assert.equal((await post(good)).status, 200);
+    assert.equal((await postTicket(relay, good)).status, 200);
     assert.ok(logs.every((line) => !line.includes(SECRET) && !line.includes("neko-token") && !line.includes(ticket)), "logs hold no secrets or tickets");
   } finally {
     await relay.close();
+    await neko.close();
+  }
+});
+
+test("relay sessions: 2 hours at most, 20 minutes without use, bound to the address they started from; failures counted per address", async () => {
+  const neko = await fakeNeko();
+  let now = 1_800_000_000_000;
+  const relay = await startRelay({
+    nekoHost: "127.0.0.1",
+    nekoPort: neko.port,
+    listenHost: "::",
+    listenPort: 0,
+    origins: ["http://127.0.0.1:5301"],
+    secret: SECRET,
+    statusToken: STATUS,
+    adminPassword: "admin-pw",
+    now: () => now,
+  });
+  const P = relay.prefix;
+  const login = async (nonce, host = "127.0.0.1") => String((await postTicket(relay, ticketAt(now, nonce), ORIGIN_HEADERS, host)).headers["set-cookie"]).split(";")[0];
+  const whoami = (cookie, host = "127.0.0.1") => http(relay.port, "GET", `${P}/api/whoami`, { ...HOST, Cookie: cookie }, undefined, host).then((r) => r.status);
+  try {
+    let cookie = await login("idle-idle-idle-01");
+    now += 19 * 60_000;
+    assert.equal(await whoami(cookie), 200, "used within 20 minutes");
+    now += 19 * 60_000;
+    assert.equal(await whoami(cookie), 200, "sliding: 38 minutes in, 19 since the last use");
+    now += 21 * 60_000;
+    assert.equal(await whoami(cookie), 401, "20 minutes without use");
+
+    cookie = await login("ttl-ttl-ttl-ttl-01");
+    for (let i = 0; i < 7; i++) {
+      now += 15 * 60_000;
+      assert.equal(await whoami(cookie), 200);
+    }
+    now += 16 * 60_000;
+    assert.equal(await whoami(cookie), 401, "2 hours at most, however busy");
+
+    cookie = await login("peer-peer-peer-01", "127.0.0.1");
+    assert.equal(await whoami(cookie, "::1"), 401, "the cookie from another address is refused");
+    assert.equal(await whoami(cookie, "127.0.0.1"), 200);
+
+    // Failures count per address: one address's failures do not lock the other out.
+    for (let i = 0; i < 20; i++) await postTicket(relay, `v1.${Math.floor(now / 1000) + 60}.bbbbbbbbbbbbbbbb.login.${"B".repeat(43)}`, ORIGIN_HEADERS, "::1");
+    assert.equal((await postTicket(relay, ticketAt(now, "rate-rate-rate-01"), ORIGIN_HEADERS, "::1")).status, 429);
+    assert.equal((await postTicket(relay, ticketAt(now, "rate-rate-rate-02"), ORIGIN_HEADERS, "127.0.0.1")).status, 200);
+  } finally {
+    await relay.close();
+    await neko.close();
+  }
+});
+
+test("relay: a ticket counts as used only once neko let the owner in", async () => {
+  const neko = await fakeNeko();
+  const relay = await relayFor(neko, { log: () => {} });
+  try {
+    const ticket = ticketAt(Date.now(), "retry-retry-retry-1");
+    neko.state.failLogin = true;
+    assert.equal((await postTicket(relay, ticket)).status, 502, "neko not ready");
+    neko.state.failLogin = false;
+    assert.equal((await postTicket(relay, ticket)).status, 200, "the same link works once neko is up");
+    assert.equal((await postTicket(relay, ticket)).status, 401, "and then never again");
+  } finally {
+    await relay.close();
+    await neko.close();
+  }
+});
+
+test("relay: takeover state on its unpublished control port follows neko's control", async () => {
+  const neko = await fakeNeko();
+  const withControl = await startRelay({
+    nekoHost: "127.0.0.1",
+    nekoPort: neko.port,
+    listenHost: "127.0.0.1",
+    listenPort: 0,
+    controlPort: 18_081 + Math.floor(Math.random() * 1000),
+    controlPollMs: 50,
+    origins: ["http://127.0.0.1:5301"],
+    secret: SECRET,
+    statusToken: STATUS,
+    adminPassword: "admin-pw",
+  });
+  const read = async () => JSON.parse((await http(withControl.controlPort, "GET", "/control")).body);
+  try {
+    await withControl.pollControl();
+    assert.deepEqual(await read(), { ownerControl: false, known: true });
+    neko.state.hasHost = true;
+    await withControl.pollControl();
+    assert.deepEqual(await read(), { ownerControl: true, known: true });
+    assert.equal((await http(withControl.controlPort, "GET", "/other")).status, 404);
+    assert.equal((await http(withControl.controlPort, "POST", "/control")).status, 404);
+    neko.state.hasHost = false;
+    await withControl.pollControl();
+    assert.equal((await read()).ownerControl, false);
+  } finally {
+    await withControl.close();
     await neko.close();
   }
 });
@@ -352,6 +472,22 @@ test("relay: an https origin gets Secure cookies, and the relay refuses to start
   await assert.rejects(startRelay({ ...base, origins: ["http://127.0.0.1:5301"], secret: "" }), /secret/);
   await assert.rejects(startRelay({ ...base, origins: [] }), /origin/);
   await assert.rejects(startRelay({ ...base, origins: ["http://127.0.0.1:5301"], adminPassword: "" }), /password/);
+});
+
+test("the run's MCP filter pauses every tool call while the owner holds control", () => {
+  const call = JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "browser_snapshot", arguments: {} } });
+  assert.deepEqual(filterClientLine(call), { forward: call });
+  const refused = filterClientLine(call, { ownerControl: true });
+  const reply = JSON.parse(refused.reply);
+  assert.equal(reply.id, 7);
+  assert.equal(reply.result.isError, true);
+  assert.equal(reply.result.content[0].text, OWNER_CONTROL_TEXT);
+  assert.match(OWNER_CONTROL_TEXT, /ask the owner with AskUserQuestion/);
+  const list = JSON.stringify({ jsonrpc: "2.0", id: 8, method: "tools/list" });
+  assert.deepEqual(filterClientLine(list, { ownerControl: true }), { forward: list }, "listing tools still works");
+  const entry = readFileSync(new URL("../server-browser/entrypoint.mjs", import.meta.url), "utf8");
+  assert.match(entry, /const verdict = filterClientLine\(line, \{ ownerControl \}\);/);
+  assert.match(entry, /setInterval\(\(\) => void poll\(\), 1000\)/);
 });
 
 // ---------------------------------------------------------------- docker arguments
@@ -403,6 +539,8 @@ test("neko: internal network only, four capabilities, sandbox profile, read-only
     "NEKO_FILETRANSFER_ENABLED=false",
     "NEKO_WEBRTC_TCPMUX=5302",
     "NEKO_WEBRTC_NAT1TO1=100.96.145.38",
+    "NEKO_WEBRTC_ICESERVERS_FRONTEND=[]",
+    "NEKO_WEBRTC_ICESERVERS_BACKEND=[]",
     "BP_PROXY=http://__BP_PROXY_IP__:3128",
     `NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD=${KEYS.nekoAdminPassword}`,
   ])
@@ -422,6 +560,11 @@ test("relay and proxy: published only on the bind address, no capabilities, no m
   assert.equal(value(relay, "--mount").length, 0);
   assert.ok(value(relay, "--env").includes("BP_PUBLIC_ORIGINS=http://100.96.145.38:5301"));
   assert.ok(value(relay, "--env").includes("BP_NEKO_HOST=bp-si-0a1b2c3d-neko"));
+  assert.ok(value(relay, "--env").includes("BP_CONTROL_PORT=8081"));
+  assert.ok(value(relay, "--env").includes("BP_MAX_LIFETIME_S=604800"));
+  assert.ok(!value(relay, "--publish").some((p) => p.includes("8081")), "the control port is never published");
+  const relayMain = readFileSync(new URL("../server-browser/relay-main.mjs", import.meta.url), "utf8");
+  assert.match(relayMain, /reached the maximum lifetime; stopping/);
   assert.equal(relay.at(-1), "/opt/browser-prompt/relay-main.mjs");
   assert.doesNotThrow(() => checkStackRun(relay, "relay", input()));
   const local = stackRelayArgs(input({ bindHost: "127.0.0.1", origins: viewerOrigins("127.0.0.1", 5301, "") }), KEYS);
@@ -469,6 +612,7 @@ test("signed-in plan: the MCP container joins neko's network namespace, attaches
   assert.equal(value(args, "--cap-add").length, 0);
   assert.ok(args.includes("--read-only") && args.includes("-i") && args.includes("--rm"));
   assert.ok(value(args, "--env").includes("BP_CDP_ENDPOINT=http://127.0.0.1:9222"));
+  assert.ok(value(args, "--env").includes("BP_CONTROL_URL=http://bp-si-0a1b2c3d-relay:8081/control"));
   assert.ok(value(args, "--label").includes(`${CONTAINER_LABEL}=${SIGNED_IN_AGENT_ROLE}`));
   assert.ok(value(args, "--label").includes(`${CONTAINER_AGENT_LABEL}=agent-1`));
   assert.equal(args.at(-1), SERVER_IMAGE);
@@ -490,6 +634,7 @@ test("the launcher refuses tampered signed-in plans", () => {
   assert.throws(() => checkPlan(tamper((p) => (p.agent.run = p.agent.run.map((a) => (a.startsWith("container:") ? "host" : a))))), /network/);
   assert.throws(() => checkPlan(tamper((p) => (p.agent.run = p.agent.run.map((a) => a.replace("127.0.0.1:9222", "evil:9222"))))), /DevTools/);
   assert.throws(() => checkPlan(tamper((p) => (p.agent.run[p.agent.run.length - 1] = "alpine:latest"))), /pinned/);
+  assert.throws(() => checkPlan(tamper((p) => (p.agent.run = p.agent.run.map((a) => a.replace("bp-si-0a1b2c3d-relay:8081", "evil.example:80"))))), /takeover state/);
   assert.throws(() => checkPlan(tamper((p) => (p.docker = "docker"))), /absolute/);
 });
 
@@ -737,7 +882,10 @@ test("daemon: a viewer link starts the stack in order with checked arguments; on
   const keys = await loadKeys(keysFile);
   assert.ok(value(nekoRun, "--env").includes(`NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD=${keys.nekoAdminPassword}`));
   const ticket = decodeURIComponent(new URL(link.url).hash.slice(3).split("&")[0]);
-  assert.equal(verifyTicket(keys.viewerSecret, ticket, 1_800_000_000).ok, true, "the relay accepts the link's ticket");
+  assert.equal(verifyTicket(relaySecret(keys), ticket, 1_800_000_000).ok, true, "the relay accepts the link's ticket");
+  assert.equal(verifyTicket(keys.viewerSecret, ticket, 1_800_000_000).ok, false, "the relay never gets the viewer key itself");
+  const relayRun = docker.calls.find((args) => args[0] === "run" && /-relay$/.test(value(args, "--name")[0]));
+  assert.ok(value(relayRun, "--env").includes(`BP_VIEWER_SECRET=${relaySecret(keys)}`));
 
   // One run at a time: a ticket out, or an MCP container of another run, makes the next one busy.
   const first = await si.prepare({ sourceId: "s", cardId: "c" });
@@ -765,6 +913,7 @@ test("daemon: stop keeps the profile, log out removes it and the keys; rotate re
   await si.rotateKey();
   const keysAfter = await loadKeys(join(dir, "keys.json"));
   assert.notEqual(keysAfter.viewerSecret, keysBefore.viewerSecret);
+  assert.notEqual(relaySecret(keysAfter), relaySecret(keysBefore), "links from before are dead");
   assert.equal(keysAfter.nekoAdminPassword, keysBefore.nekoAdminPassword, "neko keeps running with its password");
   const runs = docker.calls.filter((args) => args[0] === "run").map((args) => value(args, "--name")[0]);
   assert.equal(runs.length, 1);
@@ -772,7 +921,7 @@ test("daemon: stop keeps the profile, log out removes it and the keys; rotate re
 
   docker.calls.length = 0;
   await si.stop();
-  assert.ok(docker.calls.some((args) => args[0] === "stop" && args[1] === "-t" && args[2] === "30" && /-neko$/.test(args[3])), "graceful: cookies are written");
+  assert.ok(docker.calls.some((args) => args[0] === "stop" && args[1] === "-t" && args[2] === "45" && /-neko$/.test(args[3])), "graceful: cookies are written");
   assert.ok(!docker.calls.some((args) => args[0] === "volume"), "stop keeps the logins");
   assert.equal(docker.state.containers.size, 0);
   assert.ok(docker.state.volumes.size === 1);
@@ -839,6 +988,17 @@ test("signed-in image: pinned neko, sandbox on, DevTools on loopback only, the p
   assert.equal(policies.PasswordManagerEnabled, false);
   assert.equal(policies.DownloadRestrictions, 3);
   assert.equal(policies.ExtensionInstallForcelist, undefined);
+  for (const blocked of ["file://*", "chrome://*", "chrome-untrusted://*", "chrome-search://*", "chrome-extension://*", "devtools://*", "view-source:*", "about:*"]) {
+    assert.ok(policies.URLBlocklist.includes(blocked), blocked);
+  }
+  assert.deepEqual(policies.URLAllowlist, ["about:blank", "chrome://newtab"]);
+  assert.equal(policies.NewTabPageLocation, "about:blank");
+  assert.equal(policies.MetricsReportingEnabled, false);
+  assert.equal(policies.SafeBrowsingProtectionLevel, 1);
+  assert.equal(policies.BackgroundModeEnabled, false);
+  assert.equal(policies.SyncDisabled, true);
+  assert.match(conf, /--disable-features=WebUIOmniboxPopup,WebUIOmniboxFullPopup,WebUIOmniboxAimPopup\n/, "the native address-bar popup: its WebUI one is a blocked chrome:// page");
+  for (const flag of ["--disable-component-update", "--disable-domain-reliability", "--disable-breakpad", "--disable-sync", "--disable-quic"]) assert.ok(conf.includes(`${flag}\n`), flag);
   assert.deepEqual(policies.ExtensionInstallBlocklist, ["*"]);
   for (const name of Object.keys(SIGNED_IN_FILES)) assert.equal(SIGNED_IN_FILES[name], readFileSync(new URL(`../signed-in/${name}`, import.meta.url), "utf8"), name);
 });
@@ -865,6 +1025,7 @@ test("signed-in prompt: signed-in warning, own tabs only, take over for logins a
   assert.match(SIGNED_IN_SAFETY_PREAMBLE, /IS signed in to the owner's accounts/);
   assert.match(SIGNED_IN_SAFETY_PREAMBLE, /do NOT type anything into it\. Ask the owner with AskUserQuestion to press Take over/);
   assert.match(SIGNED_IN_SAFETY_PREAMBLE, /Never type, paste, guess or create credentials yourself/);
+  assert.match(SIGNED_IN_SAFETY_PREAMBLE, /While the owner holds control of the browser, every browser tool call is refused/);
   assert.match(SIGNED_IN_SAFETY_PREAMBLE, /Work only in your own tabs and only on the sites the steps name/);
   assert.match(SIGNED_IN_SAFETY_PREAMBLE, /3\. HARD RULE/);
   assert.match(SIGNED_IN_SAFETY_PREAMBLE, /mcp__server-browser__browser_tabs/);
@@ -894,4 +1055,37 @@ test("card and settings: Take over opens a one-time link from the daemon, and do
   assert.match(settings, /if \(armed !== "rotate"\) return setArmed\("rotate"\);/);
   assert.match(settings, /useEffect\(\(\) => setArmed\(null\), \[info\?\.state\]\);/);
   assert.equal(settings.match(/status\(\{ build: true \}\)/g)?.length, 1, "one build call, after the confirmation");
+});
+
+test("daemon: every relay start gets a new salt, so a link from before a relay restart is dead", async () => {
+  const docker = fakeStackDocker();
+  const { si, dir } = makeSignedIn(docker);
+  const link = await si.viewerLink({ purpose: "login", portrait: false });
+  const ticket = decodeURIComponent(new URL(link.url).hash.slice(3).split("&")[0]);
+  const before = await loadKeys(join(dir, "keys.json"));
+  assert.equal(verifyTicket(relaySecret(before), ticket, 1_800_000_000).ok, true);
+  docker.state.relayTag = "changed"; // the address changed: only the relay restarts, with the same viewer key
+  await si.viewerLink({ purpose: "login", portrait: false });
+  const after = await loadKeys(join(dir, "keys.json"));
+  assert.equal(after.viewerSecret, before.viewerSecret);
+  assert.notEqual(after.relaySalt, before.relaySalt);
+  assert.equal(verifyTicket(relaySecret(after), ticket, 1_800_000_000).ok, false);
+});
+
+test("daemon: a start that fails stops a running neko gracefully (cookies are written), never with rm -f first", async () => {
+  const docker = fakeStackDocker();
+  const failing = async (command, args) => {
+    if (args[0] === "run" && value(args, "--name")[0]?.endsWith("-relay")) return { code: 1, stdout: "", stderr: "port is already allocated" };
+    return docker.run(command, args);
+  };
+  const { si } = makeSignedIn({ ...docker, run: failing }, { run: failing });
+  const result = await si.viewerLink({ purpose: "login", portrait: false });
+  assert.equal(result.ok, false);
+  const stops = docker.calls.map((args, i) => [args, i]).filter(([args]) => args[0] === "stop" && /-neko$/.test(args.at(-1)));
+  const lastRun = docker.calls.findLastIndex((args) => args[0] === "run" && /-neko$/.test(value(args, "--name")[0] ?? ""));
+  const stopAfter = stops.find(([, i]) => i > lastRun);
+  assert.ok(stopAfter, "neko is stopped gracefully after the failed start");
+  assert.deepEqual(stopAfter[0].slice(0, 3), ["stop", "-t", "45"]);
+  const rmAfter = docker.calls.findIndex((args, i) => i > lastRun && args[0] === "rm" && args.some((a) => /-neko$/.test(a)));
+  assert.ok(rmAfter > stopAfter[1], "removed only after the graceful stop");
 });

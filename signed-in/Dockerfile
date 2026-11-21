@@ -11,7 +11,11 @@
 #     sidecar as its only way out (also for loopback), refusing to start without it.
 #   - policies.json: neko's policy without the forced Google extensions, with DevTools allowed
 #     (needed for the protocol), cookies kept (neko ships session-only cookies), no password
-#     manager, autofill, sync, sign-in, downloads, file pickers or extensions.
+#     manager, autofill, sync, sign-in, downloads, file pickers, extensions, metrics reporting or
+#     background mode, standard Safe Browsing, and every internal page blocked (chrome://*,
+#     chrome-untrusted://*, chrome-search://*, chrome-extension://*, devtools://*, view-source:,
+#     about:*, file://) except about:blank and chrome://newtab (which opens about:blank), so neither
+#     the agent nor a page can read history, settings or the list of signed-in sites there.
 FROM ghcr.io/m1k1o/neko/chromium:3.2.0@sha256:270face8b8111e639744fb7bcdbbf0deed227900bb89d58b2f8adfc12af8c41e
 
 COPY chromium.conf /etc/neko/supervisord/chromium.conf

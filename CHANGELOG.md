@@ -42,6 +42,17 @@
 - Settings stay rollback-safe: "signed-in" is added to the usual ways without a version bump, and the
   signed-in browser's own settings live in a new `signed-in` settings document older versions
   ignore.
+- Security review fixes: the viewer cookie has a random name and a random path per relay start, lasts
+  2 hours at most and 20 minutes without use, and is bound to the login's address; CORS headers from
+  neko are dropped; failed tickets are counted per address; a ticket is used up only once neko let
+  the owner in; tickets are signed with a key salted per relay start. Chromium's internal pages
+  (`chrome://`, `chrome-untrusted://`, `devtools://`, `view-source:`, `about:` but `about:blank`) are
+  blocked by policy, the address bar uses the native suggestion popup, and metrics reporting,
+  background mode, component updates, domain reliability, crash reports and sync are off. No STUN
+  or TURN servers. While the owner holds control in the viewer, the run's MCP filter pauses every
+  tool call (the relay tells it, through an unpublished port). The relay and proxy stop themselves
+  after 7 days. The browser is always stopped gracefully (45 s to write cookies). SECURITY.md says
+  how to stop and wipe a stack left running after removing the plugin.
 
 ## 0.21.1 (unreleased)
 

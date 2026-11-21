@@ -3,16 +3,21 @@
 // the daemon host's Tailscale address (or 127.0.0.1), and talks to neko on the stack's internal
 // network. It does three things:
 //   1. Owner login with the plugin's key: Paseo hands the owner a link whose URL fragment holds a
-//      one-time ticket signed with the plugin's secret (never in a query string, so never in logs).
-//      The page at /bp/open posts it to /bp/session; the relay checks it (signature, expiry, used
-//      once), logs in to neko as an admin with a generated password the owner never sees, and sets
-//      an HttpOnly, SameSite=Strict cookie. neko's own token never reaches the browser: the relay
-//      adds it to every request it forwards.
+//      one-time ticket signed with this relay start's key (never in a query string, so never in
+//      logs). The page at /bp/open posts it to /bp/session; the relay checks it (signature, expiry,
+//      used once), logs in to neko as an admin with a generated password the owner never sees, and
+//      sets an HttpOnly, SameSite=Strict cookie with a random name, scoped to a random path prefix
+//      of this relay start (the viewer lives under it), valid 2 hours and 20 minutes without use,
+//      and bound to the peer address. neko's own token never reaches the browser: the relay adds
+//      it to every request it forwards.
 //   2. A narrow allowlist: neko's web client files, the WebSocket and the few API routes the client
 //      needs to watch and take control. Everything else (member and session management, uploads,
 //      file transfer, broadcast, metrics, health, debug) is refused. Host and Origin are checked on
 //      every request (DNS rebinding, cross-site WebSocket).
 //   3. WebRTC over ICE-TCP: a plain TCP forward of the mux port to neko.
+//   4. Takeover state for the run's agent: it polls neko's control state and answers GET /control
+//      on an unpublished port (8081) on the stack's networks, so the run's MCP filter refuses tool
+//      calls while the owner holds control.
 // Node's standard library only.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, request as httpRequest } from "node:http";
@@ -22,10 +27,14 @@ export const TICKET_VERSION = "v1";
 /** A ticket is valid for at most this long after it was issued (the link in the app's history dies with it). */
 export const TICKET_MAX_TTL_S = 600;
 export const TICKET_PURPOSES = ["login", "takeover"];
+/** Prefix of the session cookie's name; each relay start adds a random part. */
 export const SESSION_COOKIE = "bp_viewer";
-export const SESSION_TTL_MS = 12 * 60 * 60_000;
+/** A viewer session ends this long after it started ... */
+export const SESSION_TTL_MS = 2 * 60 * 60_000;
+/** ... and after this long without a request or viewer input. */
+export const SESSION_IDLE_MS = 20 * 60_000;
 export const MAX_SESSIONS = 32;
-/** Failed ticket checks allowed per minute before /bp/session answers 429 for the rest of it. */
+/** Failed ticket checks allowed per peer address and minute before /bp/session answers 429 for the rest of it. */
 export const MAX_FAILURES_PER_MINUTE = 20;
 export const BLOCKED_TEXT = "Blocked by the browser-prompt relay.";
 
@@ -138,6 +147,16 @@ const FORWARD_REQUEST_HEADERS = new Set([
   "user-agent",
 ]);
 const DROP_RESPONSE_HEADERS = new Set(["set-cookie", "connection", "keep-alive", "transfer-encoding", "upgrade", "proxy-authenticate", "trailer"]);
+/** Response headers never passed back from neko: cookies, hop-by-hop headers and every CORS header. */
+export function dropResponseHeader(name) {
+  const lower = String(name).toLowerCase();
+  return DROP_RESPONSE_HEADERS.has(lower) || lower.startsWith("access-control-");
+}
+
+/** The client's address without an IPv4-mapped prefix. */
+export function peerOf(socket) {
+  return String(socket?.remoteAddress ?? "").replace(/^::ffff:/i, "");
+}
 
 const SECURITY_HEADERS = {
   "X-Frame-Options": "DENY",
@@ -160,7 +179,8 @@ const OPEN_SCRIPT = `(async () => {
       m.textContent = r.status === 429 ? "Too many attempts. Wait a minute, then open the viewer again from Paseo." : "This link has expired or was already used. Open the viewer again from Paseo: each link works once, for a few minutes.";
       return;
     }
-    location.replace("/");
+    const body = await r.json();
+    location.replace(typeof body.path === "string" && new RegExp("^/s-[0-9a-f]{32}/$").test(body.path) ? body.path : "/");
   } catch {
     m.textContent = "Could not reach the signed-in browser.";
   }
@@ -177,7 +197,7 @@ export const OPEN_PAGE_CSP = `default-src 'none'; script-src 'sha256-${OPEN_SCRI
 const LOCKED_PAGE = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Signed-in browser</title>
 <style>body{font:16px -apple-system,system-ui,sans-serif;margin:0;display:flex;min-height:100vh;align-items:center;justify-content:center;background:#111;color:#eee}p{max-width:30em;padding:24px;text-align:center;line-height:1.5}</style></head>
-<body><p>Open the signed-in browser from Paseo: the card's Take over button, or Settings → Signed-in Server browser → Log in to sites.</p></body></html>`;
+<body><p>Open the signed-in browser from Paseo: the card's Take over button, or Settings → Signed-in Server browser → Log in to sites. Viewer sessions end after 2 hours, or 20 minutes without use.</p></body></html>`;
 
 /** `WxH@rate` to the body neko's screen API takes; null when malformed. */
 export function parseScreen(text) {
@@ -197,6 +217,8 @@ export async function startRelay(options) {
     listenPort = 8080,
     listenHost = "0.0.0.0",
     rtcPort = 0,
+    controlPort = 0,
+    controlPollMs = 1000,
     secret,
     statusToken,
     adminPassword,
@@ -214,11 +236,21 @@ export async function startRelay(options) {
   if (!nekoHost) throw new Error("the neko address is missing");
   if (origins.length === 0) throw new Error("no viewer origin");
 
-  /** bp session id -> { token, expires, portrait } */
+  // Per relay start: the viewer's path prefix and the cookie's name, so the cookie only goes to this
+  // relay's viewer paths (cookies ignore ports, so other services on the same host name would get a
+  // cookie with Path=/).
+  const prefix = options.prefix ?? `/s-${randomBytes(16).toString("hex")}`;
+  const cookieName = options.cookieName ?? `${SESSION_COOKIE}_${randomBytes(8).toString("hex")}`;
+  if (!/^\/s-[0-9a-f]{32}$/.test(prefix) || !/^bp_viewer_[0-9a-f]{16}$/.test(cookieName)) throw new Error("bad prefix or cookie name");
+  /** bp session id -> { token, created, lastSeen, peer, portrait } */
   const sessions = new Map();
-  /** ticket nonces already used -> expiry (s) */
+  /** ticket nonces used (or being used) -> expiry (s) */
   const usedNonces = new Map();
-  let failures = { windowStart: now(), count: 0 };
+  /** peer address -> { windowStart, count } of failed ticket checks */
+  const failures = new Map();
+  let ownerControl = false;
+  let controlKnown = false;
+  let lastPeer = "";
   let viewers = 0;
   let lastActivity = now();
   let screenIsPortrait = false;
@@ -299,23 +331,33 @@ export async function startRelay(options) {
     return false;
   }
 
+  const alive = (session, t = now()) => t - session.created < SESSION_TTL_MS && t - session.lastSeen < SESSION_IDLE_MS;
+
   function prune() {
     const t = now();
-    for (const [id, session] of sessions) if (session.expires <= t) sessions.delete(id);
+    for (const [id, session] of sessions) if (!alive(session, t)) sessions.delete(id);
+    for (const [peer, entry] of failures) if (t - entry.windowStart > 60_000) failures.delete(peer);
+    while (failures.size > 256) failures.delete(failures.keys().next().value);
     const s = Math.floor(t / 1000);
     for (const [nonce, exp] of usedNonces) if (exp <= s) usedNonces.delete(nonce);
     while (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value);
   }
 
+  /** The request's live session: right cookie, not expired or idle, from the address it started from. */
   function sessionOf(req) {
-    const id = parseCookies(req.headers.cookie)[SESSION_COOKIE];
+    const id = parseCookies(req.headers.cookie)[cookieName];
     if (!id || !/^[A-Za-z0-9_-]{43}$/.test(id)) return null;
     const session = sessions.get(id);
     if (!session) return null;
-    if (session.expires <= now()) {
+    if (!alive(session)) {
       sessions.delete(id);
       return null;
     }
+    if (session.peer !== peerOf(req.socket)) {
+      log("refused a viewer session from another address");
+      return null;
+    }
+    session.lastSeen = now();
     return { id, ...session };
   }
 
@@ -353,15 +395,22 @@ export async function startRelay(options) {
     });
   }
 
-  function rateLimited() {
+  function failureEntry(peer) {
     const t = now();
-    if (t - failures.windowStart > 60_000) failures = { windowStart: t, count: 0 };
-    return failures.count >= MAX_FAILURES_PER_MINUTE;
+    let entry = failures.get(peer);
+    if (!entry || t - entry.windowStart > 60_000) {
+      entry = { windowStart: t, count: 0 };
+      failures.set(peer, entry);
+    }
+    return entry;
   }
 
   async function createSession(req, res) {
     if (!originOk(req)) return sendJson(res, 403, { error: "origin" });
-    if (rateLimited()) return sendJson(res, 429, { error: "slow down" });
+    const peer = peerOf(req.socket);
+    prune();
+    const failed = failureEntry(peer);
+    if (failed.count >= MAX_FAILURES_PER_MINUTE) return sendJson(res, 429, { error: "slow down" });
     let input;
     try {
       input = JSON.parse(await readBody(req, 4096));
@@ -369,35 +418,38 @@ export async function startRelay(options) {
       return sendJson(res, 400, { error: "bad request" });
     }
     const checked = verifyTicket(secret, input?.ticket, Math.floor(now() / 1000));
-    prune();
     if (!checked.ok || usedNonces.has(checked.nonce)) {
-      failures.count++;
+      failed.count++;
       log(`refused a viewer ticket (${checked.ok ? "already used" : checked.reason})`);
       return sendJson(res, 401, { error: "invalid or expired link" });
     }
+    // Held while neko is asked, so a second request with the same ticket fails; given back when the
+    // login fails (the link may be tried again until it expires).
     usedNonces.set(checked.nonce, checked.exp);
     let token;
     try {
       token = await nekoLogin("owner");
     } catch (error) {
+      usedNonces.delete(checked.nonce);
       log(`could not log in to neko: ${error instanceof Error ? error.message : String(error)}`);
       return sendJson(res, 502, { error: "the browser is not ready yet" });
     }
     const id = randomBytes(32).toString("base64url");
     const wantsPortrait = input?.portrait === true;
-    sessions.set(id, { token, expires: now() + SESSION_TTL_MS, portrait: wantsPortrait });
+    lastPeer = peer;
+    sessions.set(id, { token, created: now(), lastSeen: now(), peer, portrait: wantsPortrait });
     touch();
     if (wantsPortrait && !screenIsPortrait) {
       if (await setScreen(portrait)) screenIsPortrait = true;
     }
-    const cookie = [`${SESSION_COOKIE}=${id}`, "HttpOnly", "SameSite=Strict", "Path=/", `Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`];
+    const cookie = [`${cookieName}=${id}`, "HttpOnly", "SameSite=Strict", `Path=${prefix}/`, `Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`];
     if (secureFor(req)) cookie.push("Secure");
     log(`viewer session started (${checked.purpose}${wantsPortrait ? ", portrait" : ""})`);
-    return send(res, 200, JSON.stringify({ ok: true }), { "Content-Type": "application/json", "Set-Cookie": cookie.join("; ") });
+    return send(res, 200, JSON.stringify({ ok: true, path: `${prefix}/` }), { "Content-Type": "application/json", "Set-Cookie": cookie.join("; ") });
   }
 
-  function forward(req, res, session) {
-    const url = new URL(req.url, "http://relay");
+  function forward(req, res, session, innerPath) {
+    const url = { pathname: innerPath };
     const headers = {};
     for (const [name, value] of Object.entries(req.headers)) if (FORWARD_REQUEST_HEADERS.has(name) && value !== undefined) headers[name] = value;
     headers.host = `${nekoHost}:${nekoPort}`;
@@ -405,7 +457,7 @@ export async function startRelay(options) {
     // Query strings never go on (neko reads `?token=`); the client's own file URLs need none.
     const upstream = httpRequest({ host: nekoHost, port: nekoPort, method: req.method, path: url.pathname, headers, timeout: 30_000 }, (response) => {
       const out = {};
-      for (const [name, value] of Object.entries(response.headers)) if (!DROP_RESPONSE_HEADERS.has(name) && value !== undefined) out[name] = value;
+      for (const [name, value] of Object.entries(response.headers)) if (!dropResponseHeader(name) && value !== undefined) out[name] = value;
       if (url.pathname.startsWith("/api/")) out["cache-control"] = "no-store";
       res.writeHead(response.statusCode ?? 502, { ...out, ...SECURITY_HEADERS });
       response.pipe(res);
@@ -438,38 +490,54 @@ export async function startRelay(options) {
         } catch {
           nekoUp = false;
         }
-        return sendJson(res, 200, { viewers, idleMs: Math.max(0, now() - lastActivity), nekoUp, portrait: screenIsPortrait });
+        return sendJson(res, 200, { viewers, idleMs: Math.max(0, now() - lastActivity), nekoUp, portrait: screenIsPortrait, ownerControl, lastPeer });
       }
       if (!hostOk(req)) return send(res, 421, "Unknown host.", { "Content-Type": "text/plain" });
       if (path === "/bp/open" && (req.method === "GET" || req.method === "HEAD")) {
         return send(res, 200, OPEN_PAGE, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": OPEN_PAGE_CSP });
       }
       if (path === "/bp/session" && req.method === "POST") return await createSession(req, res);
-      const session = sessionOf(req);
+      // Everything else of the viewer lives under this relay start's prefix.
+      const inner = path === prefix ? "/" : path.startsWith(`${prefix}/`) ? path.slice(prefix.length) : null;
+      const session = inner === null ? null : sessionOf(req);
       if (!session) {
-        if (req.method === "GET" && (path === "/" || path === "/index.html")) {
+        if (req.method === "GET" && (path === "/" || path === "/index.html" || inner === "/" || inner === "/index.html")) {
           return send(res, 401, LOCKED_PAGE, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'" });
         }
         return sendJson(res, 401, { message: "Open the signed-in browser from Paseo." });
       }
-      const kind = classifyRequest(req.method, path);
+      const kind = classifyRequest(req.method, inner);
       if (kind === "logout") {
         sessions.delete(session.id);
-        return send(res, 200, "true", { "Content-Type": "application/json", "Set-Cookie": `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0` });
+        return send(res, 200, "true", { "Content-Type": "application/json", "Set-Cookie": `${cookieName}=; HttpOnly; SameSite=Strict; Path=${prefix}/; Max-Age=0` });
       }
       if (kind !== "static" && kind !== "api") {
-        log(`refused ${req.method} ${path.slice(0, 80)}`);
+        log(`refused ${req.method} ${inner.slice(0, 80)}`);
         return sendJson(res, 403, { message: BLOCKED_TEXT });
       }
       // Writes need the viewer's own origin (no cross-site form posts).
       if (req.method !== "GET" && req.method !== "HEAD" && !originOk(req)) return sendJson(res, 403, { message: BLOCKED_TEXT });
       touch();
-      forward(req, res, session);
+      forward(req, res, session, inner);
     } catch (error) {
       log(`request failed: ${error instanceof Error ? error.message : String(error)}`);
       if (!res.headersSent) send(res, 500, "Error.", { "Content-Type": "text/plain" });
     }
   });
+  /** Open viewer WebSockets: closed when their session ends (2 hours, logout). */
+  const openSockets = new Set();
+  const sweeper = setInterval(() => {
+    prune();
+    for (const entry of openSockets) {
+      if (entry.socket.destroyed) openSockets.delete(entry);
+      else if (!sessions.has(entry.id)) {
+        entry.socket.destroy();
+        openSockets.delete(entry);
+      }
+    }
+  }, 30_000);
+  sweeper.unref?.();
+
   server.headersTimeout = 20_000;
   server.requestTimeout = 60_000;
   server.maxConnections = 256;
@@ -483,9 +551,10 @@ export async function startRelay(options) {
     const url = new URL(req.url ?? "/", "http://relay");
     if (!hostOk(req)) return refuse(421, "Misdirected Request");
     if (!originOk(req)) return refuse(403, "Forbidden");
-    if (classifyRequest(req.method, url.pathname) !== "ws") return refuse(403, "Forbidden");
+    if (url.pathname !== `${prefix}/api/ws`) return refuse(403, "Forbidden");
     const session = sessionOf(req);
     if (!session) return refuse(401, "Unauthorized");
+    const live = sessions.get(session.id);
     const key = req.headers["sec-websocket-key"];
     if (typeof key !== "string" || !/^[A-Za-z0-9+/=]{16,64}$/.test(key)) return refuse(400, "Bad Request");
     const upstream = connect({ host: nekoHost, port: nekoPort });
@@ -522,7 +591,11 @@ export async function startRelay(options) {
       socket.pipe(upstream);
       socket.on("close", done);
       upstream.on("close", done);
-      socket.on("data", touch);
+      socket.on("data", () => {
+        touch();
+        if (live) live.lastSeen = now();
+      });
+      openSockets.add({ id: session.id, socket });
     });
   });
 
@@ -549,14 +622,51 @@ export async function startRelay(options) {
     });
   }
 
+  // Takeover state: whether someone (only the owner logs in to neko) holds control right now.
+  async function pollControl() {
+    try {
+      serviceToken ??= await nekoLogin("relay");
+      const result = await nekoJson("GET", "/api/room/control", undefined, serviceToken);
+      if (result.status === 401) serviceToken = null;
+      if (result.status !== 200 || !result.body) throw new Error(`control state ${result.status}`);
+      ownerControl = result.body.has_host === true;
+      controlKnown = true;
+    } catch {
+      controlKnown = false;
+    }
+  }
+  let poller = null;
+  let control = null;
+  if (controlPort) {
+    void pollControl();
+    poller = setInterval(() => void pollControl(), Math.max(200, controlPollMs));
+    poller.unref?.();
+    // Unpublished; the run's MCP container (in neko's network namespace) asks it. Only a boolean.
+    control = createServer((req, res) => {
+      if (req.method !== "GET" || req.url !== "/control") return res.writeHead(404).end();
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" }).end(JSON.stringify({ ownerControl, known: controlKnown }));
+    });
+    await new Promise((resolve, reject) => {
+      control.once("error", reject);
+      control.listen(controlPort, listenHost, () => resolve());
+    });
+  }
+
   const address = server.address();
   return {
     port: typeof address === "object" && address ? address.port : listenPort,
     rtcPort: rtc ? rtc.address().port : 0,
-    state: () => ({ viewers, sessions: sessions.size, idleMs: now() - lastActivity, portrait: screenIsPortrait }),
+    controlPort: control ? control.address().port : 0,
+    prefix,
+    cookieName,
+    pollControl,
+    state: () => ({ viewers, sessions: sessions.size, idleMs: now() - lastActivity, portrait: screenIsPortrait, ownerControl }),
     close: () =>
       new Promise((resolve) => {
         if (landscapeTimer) clearTimeout(landscapeTimer);
+        clearInterval(sweeper);
+        if (poller) clearInterval(poller);
+        control?.close();
         server.closeAllConnections?.();
         rtc?.close();
         server.close(() => resolve());

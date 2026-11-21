@@ -49,13 +49,24 @@ function parseObject(line) {
   }
 }
 
+/** What a signed-in run's tool call gets while the owner holds control of the browser (Take over). */
+export const OWNER_CONTROL_TEXT =
+  "The owner has taken over the signed-in browser and holds control right now, so browser tools are paused (no reading and no actions). Do not retry in a loop: ask the owner with AskUserQuestion to answer \"done\" when they are finished and have released control (tap the mouse icon again or close the viewer), then take a new snapshot and continue.";
+
 /**
  * A message from the agent: `{ forward }` to pass it on, `{ reply }` to answer it here, or
- * `{ drop: true }` to discard it.
+ * `{ drop: true }` to discard it. With `ownerControl` (signed-in runs, while the owner holds control
+ * in the viewer) every tool call is answered with OWNER_CONTROL_TEXT instead of reaching the browser.
  */
-export function filterClientLine(line) {
+export function filterClientLine(line, { ownerControl = false } = {}) {
   const message = parseObject(line);
   if (!message) return { drop: true };
+  if (ownerControl && message.method === "tools/call") {
+    if (message.id === undefined || message.id === null) return { drop: true };
+    return {
+      reply: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: OWNER_CONTROL_TEXT }], isError: true } }),
+    };
+  }
   if (message.method === "tools/call" && !toolAllowed(message.params?.name)) {
     if (message.id === undefined || message.id === null) return { drop: true };
     return {

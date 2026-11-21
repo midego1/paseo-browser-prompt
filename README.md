@@ -897,21 +897,27 @@ opened.
 **Take over.** While a signed-in run is going, the card's status line shows **Take over**. It asks the
 daemon for a one-time link (valid once, for 5 minutes) and opens it; the link is never put in the
 chat. The page trades the ticket in the link's fragment for an HttpOnly, SameSite=Strict session
-cookie, the relay logs in to neko for you with a generated password you never see, and you get the
-live desktop. Tap the mouse icon (Request control) to take control; on a phone the keyboard button
-opens the on-screen keyboard. A phone switches the desktop to portrait (720×1280) while it watches;
+cookie (random name, scoped to a random path, 2 hours at most and 20 minutes without use), the relay
+logs in to neko for you with a generated password you never see, and you get the live desktop. Tap
+the mouse icon (Request control) to take control; on a phone the keyboard button opens the on-screen
+keyboard. **While you hold control the run is paused**: every browser tool call of the agent is
+refused with "the owner has taken over" until you release control (the mouse icon again, or close
+the viewer). A phone switches the desktop to portrait (720×1280) while it watches;
 it switches back 20 seconds after the last viewer leaves. When a run hits a login, 2FA or captcha,
 the agent does not type anything: it asks you (a question on the card) to press Take over, complete
-it, and answer "done"; then it continues.
+it, release control and answer "done"; then it continues. Chromium's internal pages (`chrome://`,
+`view-source:`, `about:` other than `about:blank`) are blocked in this browser, for you and the agent.
 
 **HTTPS (optional).** Clipboard access and Secure cookies need HTTPS on phones. If you put the viewer
 behind `tailscale serve` (for example `tailscale serve --bg --https=8443 http://<tailscale-ip>:5301`),
 enter that `https://…` address under **HTTPS address**: links then use it and the relay accepts it
-as an origin. WebRTC still connects directly to the Tailscale address.
+as an origin. WebRTC still connects directly to the Tailscale address. Cookies ignore ports, so a
+host name no other web service uses is best (see SECURITY.md).
 
 **Log out.** **Log out of everything** stops the browser and removes its profile volume (every login
 on the server) and makes new viewer keys. **Stop now** keeps the profile. **New viewer key** ends
-every earlier link and viewer session.
+every earlier link and viewer session. Removing the plugin or rolling back does **not** stop a
+running stack: stop or wipe it first (SECURITY.md has the commands).
 
 **Smoke test** (developers, on a host with Docker): `SMOKE_PLAYWRIGHT_CORE=<dir with node_modules/playwright-core> SMOKE_CHROMIUM=<chrome binary> node --experimental-strip-types --no-warnings scripts/smoke-signed-in.mjs`
 builds missing images (without the settings' consent step, only in this script), starts the stack on
