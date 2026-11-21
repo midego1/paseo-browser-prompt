@@ -810,10 +810,11 @@ export function BrowserPromptCard({
           accessibilityLabel={`Take over the signed-in browser for ${displayTitle}`}
           accessibilityHint="Opens the signed-in browser on the Paseo server, where you can log in or enter a code in a new tab"
           disabled={openingViewer}
+          accessibilityState={{ disabled: openingViewer }}
           onPress={() => void takeOver()}
-          style={[styles.primary, { alignSelf: "flex-start" }]}
+          style={[styles.primary, { alignSelf: "flex-start", opacity: openingViewer ? 0.5 : 1 }]}
         >
-          <Icon name="MonitorUp" size={14} color={theme.colors.accentForeground} />
+          <Icon name="Globe" size={14} color={theme.colors.accentForeground} />
           <Text style={styles.primaryText}>{openingViewer ? "Opening…" : "Take over the browser"}</Text>
         </Pressable>
       ) : null}
