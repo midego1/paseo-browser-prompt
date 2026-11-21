@@ -1336,3 +1336,11 @@ test("no viewer and a failing neko control poll: the run is not paused", async (
     await neko.close();
   }
 });
+
+test("a signed-in run that waits for the owner shows a full Take over button above the question", () => {
+  const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
+  const button = card.indexOf('"Take over the browser"');
+  const question = card.indexOf("<OwnerPromptBox");
+  assert.ok(button > 0 && button < question, "the button comes before the question box");
+  assert.match(card, /runBrowser === "signed-in" && \(runState === "needs-input" \|\| shownState === "asking"\)/);
+});

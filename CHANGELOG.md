@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.22.1 (unreleased)
+
+- When a signed-in Server browser run waits for you (a login or a 2FA code), the card shows a
+  full **Take over the browser** button right above the question, not only the small link in the
+  status line.
+
 ## 0.22.0 (unreleased)
 
 - New: Paseo › **Server (signed in)** on the card (desktop and phones), and as a usual way to start.
