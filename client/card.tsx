@@ -802,6 +802,21 @@ export function BrowserPromptCard({
           compact={layout.compact}
         />
       ) : null}
+      {runAgentId && runBrowser === "signed-in" && (runState === "needs-input" || shownState === "asking") ? (
+        // The agent waits for the owner (a login, a 2FA code): Take over is the main action here, so
+        // it is a full button right above the question, not only the small link in the status line.
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Take over the signed-in browser for ${displayTitle}`}
+          accessibilityHint="Opens the signed-in browser on the Paseo server, where you can log in or enter a code in a new tab"
+          disabled={openingViewer}
+          onPress={() => void takeOver()}
+          style={[styles.primary, { alignSelf: "flex-start" }]}
+        >
+          <Icon name="MonitorUp" size={14} color={theme.colors.accentForeground} />
+          <Text style={styles.primaryText}>{openingViewer ? "Opening…" : "Take over the browser"}</Text>
+        </Pressable>
+      ) : null}
       {runAgentId && runState === "needs-input" ? (
         <OwnerPromptBox
           prompts={owner.prompts}
