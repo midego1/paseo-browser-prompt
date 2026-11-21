@@ -168,8 +168,8 @@ that choice.
   policy, so no saved passwords are in it.
 - **Chromium's internal pages are blocked** by policy (`URLBlocklist`): `chrome://*`,
   `chrome-untrusted://*`, `chrome-search://*`, `chrome-extension://*`, `devtools://*`,
-  `view-source:*`, `about:*` and `file://*`, with only `about:blank` and `chrome://newtab` (which
-  opens `about:blank`) allowed back. Neither the agent nor a page can open the history, the settings
+  `view-source:*`, `about:*`, `javascript:` and `data:` URLs and `file://*`, with only
+  `about:blank` and `chrome://newtab` (which opens `about:blank`) allowed back. Neither the agent nor a page can open the history, the settings
   (where the list of sites with cookies is), the version page or view-source; such a navigation
   ends in `ERR_BLOCKED_BY_ADMINISTRATOR` (`about:` pages other than `about:blank` load empty). The
   owner cannot open them in the viewer either. The address bar uses Chromium's native suggestion
@@ -231,15 +231,24 @@ that choice.
   with snapshots and screenshots. `browser_run_code_unsafe`, `browser_file_upload`, `browser_drop`
   and `browser_install` are refused as for every run. The relay is in another network namespace and
   cannot reach the DevTools port.
-- **The owner's tabs are hidden from the agent (enforced).** Playwright MCP does not talk to
-  Chromium directly: a DevTools-protocol filter in the run's container
-  (`server-browser/cdp-filter.mjs`) is its only endpoint. Every page open when the run attaches
-  (the owner's, including tabs restored at start), every page the owner opens while holding
-  control, and every popup of such a page is hidden: Playwright is never attached to it, it is
-  missing from target lists and events, and commands on it (attach, activate, close, info) are
-  refused, as is closing or crashing the browser (`Browser.close`). The agent cannot list, select,
-  close, read or act on those tabs; its `browser_close` leaves the owner's browser and tabs as they
-  are (checked in the smoke test). Pages the agent opens, and their popups, are its own.
+- **The owner's tabs are hidden from the agent (enforced, an allowlist).** Playwright MCP does not
+  talk to Chromium directly: a DevTools-protocol filter in the run's container
+  (`server-browser/cdp-filter.mjs`) is its only endpoint, and it shows the run only the pages the
+  run created itself (`Target.createTarget` through the filter), popups of those that open while
+  you do not hold control, and the frames and workers inside them. Everything else stays hidden:
+  tabs open when the run starts, tabs restored after a Chromium restart, tabs you open (also while
+  no Playwright client is connected, or in the first seconds of a takeover), popups that open while
+  you hold control, service workers and tab targets. Playwright is never attached to them, they are
+  missing from target lists and events, and commands on them (attach, activate, close, info,
+  messages, related auto-attach, detach, window) and on their sessions (input, cookies, script) are
+  refused, as are closing or crashing the browser and reading, setting or clearing every site's
+  cookies at once. The agent cannot list, select, close, read or act on those tabs; its
+  `browser_close` leaves your browser and tabs as they are (checked in the smoke test).
+- **The agent can read its own tab.** If you log in inside the agent's tab during a takeover, the
+  agent sees that page afterwards (not the password: password fields are masked in snapshots, and
+  its calls are paused while you hold control). Where the site allows it, log in **in a new tab**
+  (the + button): that tab stays hidden from the agent, the session cookie it sets is shared, and
+  the agent reloads its own tab afterwards. The agent is told to ask you to do that.
 - **Pages** in the browser cannot reach neko, the DevTools port, the relay, your tailnet, private or
   host addresses: Chromium sends every request, loopback included (`--proxy-bypass-list=<-loopback>`),
   to the proxy sidecar, which refuses them (the same list as the Server browser below), and neko's
@@ -261,12 +270,14 @@ alongside a run.
 **Takeover pauses the agent (enforced).** The relay polls neko's control state every second (one
 poll at a time, older results ignored) with its own admin session and answers `GET /control` with
 `{ ownerControl, known }` on port 8081, bound only to its address on the stack's internal network
-(not published, not on the outward network). When it cannot read neko's state (`known: false`) while
-a viewer is connected, it reports control as held. The run's MCP container reads it every second
-(one request at a time): `known: false` counts as held; after a failed read the state stays held
-while the last held state is younger than 10 seconds, and opens only after 3 failed reads in a row
-(when the relay cannot be asked at all, no viewer can hold control either: the relay is its only way
-in). While control is held, the MCP filter answers **every** tool call (snapshot, screenshot,
+(not published, not on the outward network). `ownerControl` is true only while a viewer is
+connected and holds control, or while a viewer is connected and the relay cannot read neko's state
+(fail closed); without a viewer nobody can hold control, so the run never waits on a stale or
+unknown state, and a control left held without a viewer is reset (retried every second). `known`
+is informational. The run's MCP container reads it every second (one request at a time); after a
+failed read the state stays held while the last held state is younger than 10 seconds, and opens
+only after 3 failed reads in a row (when the relay cannot be asked at all, no viewer can hold control
+either: the relay is its only way in). While control is held, the MCP filter answers **every** tool call (snapshot, screenshot,
 typing, navigation) with "the owner has taken over…", and a result that arrives while control is
 held, or whose call overlapped a held period, is withheld and replaced by that message, so a call
 that started before a takeover cannot hand back what the owner typed. When the last viewer

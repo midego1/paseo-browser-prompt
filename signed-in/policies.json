@@ -32,8 +32,16 @@
     "chrome-extension://*",
     "devtools://*",
     "view-source:*",
-    "about:*"
+    "about:*",
+    "javascript://*",
+    "javascript:*",
+    "data:*"
   ],
-  "URLAllowlist": ["about:blank", "chrome://newtab"],
-  "ExtensionInstallBlocklist": ["*"]
+  "URLAllowlist": [
+    "about:blank",
+    "chrome://newtab"
+  ],
+  "ExtensionInstallBlocklist": [
+    "*"
+  ]
 }

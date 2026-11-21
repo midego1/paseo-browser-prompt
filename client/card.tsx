@@ -58,7 +58,7 @@ const DESKTOP_HINT = "Your Paseo desktop app must be open: the agent drives the 
 const CHROME_HINT = "Chrome must be open with the Claude extension signed in: the agent works there.";
 const SERVER_HINT = "Runs in a browser on the Paseo server: no desktop app needed, but not signed in to your accounts.";
 const SIGNED_IN_HINT =
-  "Runs in your signed-in browser on the Paseo server: no desktop app needed. Use Take over to watch it, log in or enter a 2FA code from any device.";
+  "Runs in your signed-in browser on the Paseo server: no desktop app needed. Use Take over to watch it, or to log in or enter a 2FA code from any device (in a new tab: the agent cannot see tabs you open).";
 const HINTS: Record<BrowserAgent, string> = { paseo: DESKTOP_HINT, chrome: CHROME_HINT, server: SERVER_HINT, "signed-in": SIGNED_IN_HINT };
 const BROWSER_NAMES: Record<BrowserAgent, string> = {
   paseo: "in Paseo browser",

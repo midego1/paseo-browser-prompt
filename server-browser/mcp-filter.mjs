@@ -120,7 +120,8 @@ export function lineSplitter(onLine) {
 
 /**
  * The owner's takeover state as the run sees it. Polled results carry a sequence number; older ones
- * are ignored. `known: false` (the relay is unsure while a viewer is connected) counts as held. After
+ * are ignored. The relay's `ownerControl` decides (it already counts "unsure while a viewer is
+ * connected" as held, and never holds without a viewer). After
  * a failed poll the state stays held while the last held state is younger than `holdMs`, and opens
  * only after `failuresToOpen` failed polls in a row (when the relay cannot be asked at all, no viewer
  * can hold control either: the relay is the viewer's only way in).
@@ -138,7 +139,9 @@ export function createControlGuard({ now = Date.now, holdMs = 10_000, failuresTo
       if (seq <= applied) return;
       applied = seq;
       failures = 0;
-      held = body?.ownerControl === true || body?.known === false;
+      // The relay decides (held only while a viewer is connected and holds control or it is unsure);
+      // `known` is informational.
+      held = body?.ownerControl === true;
       if (held) lastHeldAt = now();
     },
     failure(seq) {

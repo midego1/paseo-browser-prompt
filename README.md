@@ -888,9 +888,8 @@ A signed-in run gets the same pinned, filtered Playwright MCP as a Server browse
 the same host launcher, in a container that joins neko's network namespace and attaches over the
 DevTools protocol to the persistent Chromium (its default context, so your logins). It gets 17
 tools: no `browser_evaluate`, `browser_console_messages` or `browser_network_requests` (they read
-page script state of a browser with your sessions). A DevTools filter in front of Chromium **hides
-your own tabs** from it (those open when it starts and those you open while holding control), so it
-works only in the tabs it opens. It is gated the same way: the run labels with
+page script state of a browser with your sessions). A DevTools filter in front of Chromium shows it **only the tabs it
+opened itself** (and their popups): your tabs, restored tabs and tabs you open stay hidden. It is gated the same way: the run labels with
 `browser-prompt-browser: signed-in`, a one-time ticket for the chat and card on create, the card's
 run record marked `browser:signed-in` on resume. **One run at a time** uses the browser: a second
 press says it is in use. The agent's own tabs are its work area; it is told to leave yours alone and,
@@ -908,7 +907,9 @@ refused with "the owner has taken over" until you release control (the mouse ico
 the viewer). A phone switches the desktop to portrait (720×1280) while it watches;
 it switches back 20 seconds after the last viewer leaves. When a run hits a login, 2FA or captcha,
 the agent does not type anything: it asks you (a question on the card) to press Take over, complete
-it, release control and answer "done"; then it continues. Chromium's internal pages (`chrome://`,
+it, release control and answer "done"; then it continues. Log in **in a new tab** (the + button)
+where the site allows it: the agent cannot see tabs you open, only its own (it reloads its tab
+afterwards and gets the new session). Chromium's internal pages (`chrome://`,
 `view-source:`, `about:` other than `about:blank`) are blocked in this browser, for you and the agent.
 
 **HTTPS (optional).** Clipboard access and Secure cookies need HTTPS on phones. If you put the viewer

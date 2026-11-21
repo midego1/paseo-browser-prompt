@@ -65,6 +65,13 @@
   time is checked and claimed atomically. A missing relay or proxy is restarted alone (neko keeps
   running; Chromium finds the proxy by name), and the relay's 7-day exit waits for viewers to leave.
   `browser_install` is named among the turned-off tools.
+- Final review round: the takeover guard holds only while a viewer is connected (no endless pause when
+  neko's control state cannot be read; a control left held without a viewer is reset, retried).
+  The DevTools filter is an allowlist: the run sees only pages it created and their popups opened
+  while the owner does not hold control; restored tabs, tabs the owner opens (also while no client
+  is connected) and every other target stay hidden; more targeted commands and the all-cookie
+  commands are refused. `javascript:` and `data:` URLs are blocked by policy. The agent asks the
+  owner to log in in a new tab, which it cannot see.
 
 ## 0.21.1 (unreleased)
 

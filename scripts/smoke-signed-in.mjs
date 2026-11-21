@@ -195,6 +195,9 @@ process.exit(0);`;
   const mcp = await si.mcpServer("smoke-agent-1");
   check("MCP server for a run", mcp && "server" in mcp, mcp && "session" in mcp ? mcp.session : JSON.stringify(mcp));
   const agent = await mcpClient(mcp.server);
+  // The MCP connects to Chromium only on its first browser tool call: a tab the owner opens now
+  // appears while no client is connected.
+  helper(`const p = await context.newPage(); await p.goto("https://example.org/?bp-owner=2"); return 1;`);
   const tools = (await agent.rpc("tools/list", {})).result.tools.map((t) => t.name);
   check(
     "MCP lists only the signed-in tools (no evaluate, console or network tools)",
@@ -205,7 +208,7 @@ process.exit(0);`;
     check(`signed-in run refused ${tool}`, /turned off/.test((await agent.call(tool, { function: "() => document.cookie", code: "1" })).text));
   }
   let r = await agent.call("browser_tabs", { action: "list" });
-  check("the owner's tab is hidden from the run", !/example\.org|bp-owner/.test(r.text), r.text.split("\n").filter((l) => /^- \d+:/.test(l)).join(" ").slice(0, 120) || "no tabs");
+  check("the owner's tabs are hidden from the run (one open before it attached, one opened while no client was connected)", !/example\.org|bp-owner/.test(r.text), r.text.split("\n").filter((l) => /^- \d+:/.test(l)).join(" ").slice(0, 120) || "no tabs");
   r = await agent.call("browser_tabs", { action: "select", index: 0 });
   r = await agent.call("browser_snapshot", {});
   check("the run cannot reach the owner's tab by index", !/example\.org|bp-owner/.test(r.text));
@@ -219,12 +222,23 @@ process.exit(0);`;
     check(`agent blocked from ${target}`, (nav.error || /Blocked by the browser-prompt|403/.test(nav.text + snap)) && !leaked, nav.error ? nav.text.split("\n").find((l) => /Error|ERR_/.test(l))?.slice(0, 90) : "403 page");
     await agent.call("browser_tabs", { action: "close" });
   }
-  for (const target of ["chrome://history", "chrome://settings", "chrome://settings/content/all", "chrome://version", "view-source:https://example.com", "about:version", "chrome-untrusted://print/", "devtools://devtools/bundled/inspector.html"]) {
+  for (const target of [
+    "chrome://history",
+    "chrome://settings",
+    "chrome://settings/content/all",
+    "chrome://version",
+    "view-source:https://example.com",
+    "about:version",
+    "chrome-untrusted://print/",
+    "devtools://devtools/bundled/inspector.html",
+    "data:text/html,<h1>Version</h1><p>data page shown</p>",
+    "javascript:document.title='js-ran'",
+  ]) {
     await agent.call("browser_tabs", { action: "new" });
     const nav = await agent.call("browser_navigate", { url: target });
     const snap = (await agent.call("browser_snapshot", {})).text;
     const blocked = /ERR_BLOCKED_BY_ADMINISTRATOR/.test(nav.text) || /chrome-error:\/\//.test(snap);
-    const shown = /Example Domain|History|Settings|Version|Chromium|- (heading|paragraph|link|row|cell) /.test(snap.split("### Snapshot")[1] ?? "");
+    const shown = /Example Domain|History|Settings|Version|Chromium|data page shown|js-ran|- (heading|paragraph|link|row|cell) /.test(snap.split("### Snapshot")[1] ?? "") || /js-ran/.test(snap);
     check(`agent refused ${target}`, blocked || !shown, blocked ? "ERR_BLOCKED_BY_ADMINISTRATOR" : "empty page, nothing shown");
     await agent.call("browser_tabs", { action: "close" });
   }
@@ -336,10 +350,14 @@ process.exit(0);`;
   const fromPublic = docker("exec", proxyName, "node", "-e", `fetch("http://${relayPublicIp}:8081/control",{signal:AbortSignal.timeout(3000)}).then(()=>console.log("open"),()=>console.log("refused"))`);
   check("relay: the takeover port is not on the outward network", fromPublic === "refused", fromPublic);
 
-  // 7. browser_close leaves the owner's tabs alone; a cookie survives a neko restart.
+  // 7. browser_close leaves the owner's tabs alone (and disconnects the run's client); a tab opened
+  // while it is disconnected stays hidden after it reconnects; a cookie survives a neko restart.
   r = await agent.call("browser_close", {});
   const after = helper(`return context.pages().map((p) => p.url());`);
-  check("browser_close leaves the owner's browser and tabs", Array.isArray(after) && after.some((u) => u.includes("bp-owner=1")), (after ?? []).length + " pages");
+  check("browser_close leaves the owner's browser and tabs", Array.isArray(after) && after.some((u) => u.includes("bp-owner=1")) && after.some((u) => u.includes("bp-owner=2")), (after ?? []).length + " pages");
+  helper(`const p = await context.newPage(); await p.goto("https://example.org/?bp-owner=3"); return 1;`);
+  r = await agent.call("browser_tabs", { action: "list" });
+  check("a tab opened while the run's client was disconnected stays hidden after it reconnects", !r.error && !/example\.org|bp-owner/.test(r.text), r.error ? r.text.slice(0, 80) : "");
   const value = Math.random().toString(36).slice(2, 10);
   const set = helper(`const p = await context.newPage(); await p.goto("https://example.com/?bp-smoke=cookie"); await p.evaluate((v) => { document.cookie = "bp_smoke=" + v + "; max-age=86400; path=/; secure"; }, ${JSON.stringify(value)}); return (await context.cookies("https://example.com")).map((c) => c.name);`);
   check("cookie set on https://example.com", Array.isArray(set) && set.includes("bp_smoke"));
@@ -351,6 +369,11 @@ process.exit(0);`;
   await si.viewerLink({ purpose: "login", portrait: false });
   const cookies = helper(`return (await context.cookies("https://example.com")).filter((c) => c.name === "bp_smoke").map((c) => c.value);`);
   check("a cookie survives a neko restart", Array.isArray(cookies) && cookies.includes(value), JSON.stringify(cookies));
+  const restored = helper(`return context.pages().map((p) => p.url()).filter((u) => u.includes("bp-owner"));`);
+  const again = await mcpClient((await si.mcpServer("smoke-agent-2")).server);
+  r = await again.call("browser_tabs", { action: "list" });
+  check("after a restart the restored tabs stay hidden from a new run", !/example\.org|bp-owner/.test(r.text), `${(restored ?? []).length} restored owner tab(s)`);
+  await again.close();
 
   // 8. A missing relay and proxy are started alone; neko keeps running.
   const nekoStarted = inspect(neko, "{{.State.StartedAt}}");

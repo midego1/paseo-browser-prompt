@@ -1,92 +1,188 @@
 // DevTools-protocol filter between a signed-in run's Playwright MCP and the owner's Chromium (neko).
 // It runs inside the run's MCP container (in neko's network namespace) and is the only DevTools
-// endpoint Playwright MCP gets. It hides the owner's tabs from the run: every page that exists when
-// the run attaches, every page the owner opens while holding control in the viewer, and every
-// popup of a hidden page. Playwright never attaches to them, so the agent cannot list, select,
-// close, read or act on them. Commands that target a hidden tab, and closing the browser, are
-// refused. Node's standard library plus the `ws` WebSocket implementation Playwright bundles.
+// endpoint Playwright MCP gets. It is an allowlist: the run sees only the pages it created itself
+// (Target.createTarget through this filter), popups of those opened while the owner does not hold
+// control, and the frames and workers attached under them. Everything else (the owner's tabs, tabs
+// restored after a restart, tabs the owner opens, service workers, tab targets) is hidden:
+// Playwright never attaches to it, and commands that target it are refused, as are closing the
+// browser and reading or clearing every cookie. Node's standard library plus the `ws` WebSocket
+// implementation Playwright bundles.
 import { createServer, get as httpGet } from "node:http";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 
-/** Commands refused whatever their target: they would end the owner's browser. */
-export const REFUSED_METHODS = new Set(["Browser.close", "Browser.crash", "Browser.crashGpuProcess"]);
-/** Commands refused when their `targetId` is a hidden (owner's) page. */
-export const TARGET_METHODS = new Set(["Target.attachToTarget", "Target.activateTarget", "Target.closeTarget", "Target.getTargetInfo", "Target.exposeDevToolsProtocol"]);
+/** Commands refused whatever their target: they end the owner's browser or touch every site's cookies. */
+export const REFUSED_METHODS = new Set([
+  "Browser.close",
+  "Browser.crash",
+  "Browser.crashGpuProcess",
+  "Storage.getCookies",
+  "Storage.setCookies",
+  "Storage.clearCookies",
+  "Network.getAllCookies",
+  "Network.clearBrowserCookies",
+]);
+/** Commands refused when their `targetId` is not one of the run's pages. */
+export const TARGET_METHODS = new Set([
+  "Target.attachToTarget",
+  "Target.activateTarget",
+  "Target.closeTarget",
+  "Target.getTargetInfo",
+  "Target.exposeDevToolsProtocol",
+  "Target.sendMessageToTarget",
+  "Target.autoAttachRelated",
+  "Target.detachFromTarget",
+  "Browser.getWindowForTarget",
+]);
 const TARGET_EVENTS = new Set(["Target.targetCreated", "Target.targetInfoChanged", "Target.targetDestroyed", "Target.targetCrashed"]);
 const INTERNAL_ID_BASE = 2_000_000_000;
+const MAX_QUEUE = 200;
 
 /**
- * The filter's rules, without I/O. `held()` says whether the owner holds control right now (a page
- * created then with no opener is the owner's). `fromClient(message)` returns `{ forward }` or
- * `{ reply }`; `fromBrowser(message)` returns `{ deliver, toBrowser }` (deliver null to drop it; the
- * messages in `toBrowser` go to Chromium: resume and detach a hidden page Chromium auto-attached).
+ * The filter's rules, without I/O. `held()` says whether the owner holds control right now (a popup
+ * opened then is the owner's). `fromClient(message)` returns `{ forward }` or `{ reply }`;
+ * `fromBrowser(message)` returns `{ deliver: [...], toBrowser: [...] }`: the messages for Playwright
+ * (often none or one; held-back events come out together with the answer they waited for) and the
+ * messages for Chromium (resume and detach a hidden page Chromium auto-attached).
  */
 export function createTargetFilter({ held = () => false } = {}) {
-  const hiddenTargets = new Set();
-  const visibleTargets = new Set();
+  /** Pages and other targets the run may see. */
+  const visible = new Set();
+  const hidden = new Set();
+  const visibleSessions = new Set();
   const hiddenSessions = new Set();
+  /** Windows of visible pages (Browser.getWindowForTarget answers), the only ones whose bounds may change. */
+  const windows = new Set();
+  /** Client ids of Target.createTarget / Browser.getWindowForTarget calls on their way. */
+  const creating = new Set();
+  const windowCalls = new Set();
+  /** Events about unknown top-level targets held back while a create is on its way. */
+  let queue = [];
   let internal = INTERNAL_ID_BASE;
 
-  /** Hidden or not, decided once per target when it is first seen. */
-  function hidden(info) {
+  /**
+   * Visible or not, decided once per target. `parentSession`: the session the target was attached
+   * on (a frame or worker of a page). Unknown top-level targets are hidden, except popups of a
+   * visible page opened while the owner does not hold control.
+   */
+  function isVisible(info, parentSession) {
     const id = info?.targetId;
     if (typeof id !== "string") return false;
-    if (hiddenTargets.has(id)) return true;
-    if (visibleTargets.has(id)) return false;
-    const opener = typeof info.openerId === "string" ? info.openerId : "";
-    const hide = info.type === "page" && (opener ? hiddenTargets.has(opener) : held());
-    (hide ? hiddenTargets : visibleTargets).add(id);
-    return hide;
+    if (visible.has(id)) return true;
+    if (hidden.has(id)) return false;
+    let show = false;
+    if (parentSession) show = visibleSessions.has(parentSession);
+    else if (info.type === "page" && typeof info.openerId === "string") show = visible.has(info.openerId) && !held();
+    (show ? visible : hidden).add(id);
+    return show;
+  }
+
+  /** Whether a browser-level event is about a target we cannot classify yet (a create is on its way). */
+  function undecided(message) {
+    if (creating.size === 0 || message.sessionId) return false;
+    const info = message.method === "Target.attachedToTarget" ? message.params?.targetInfo : TARGET_EVENTS.has(message.method) ? message.params?.targetInfo : null;
+    const id = info?.targetId;
+    return typeof id === "string" && !visible.has(id) && !hidden.has(id) && info.type === "page" && typeof info.openerId !== "string";
+  }
+
+  function decide(message) {
+    const out = { deliver: [], toBrowser: [] };
+    if (message.sessionId && hiddenSessions.has(message.sessionId)) return out;
+    if (TARGET_EVENTS.has(message.method)) {
+      const id = message.params?.targetInfo?.targetId ?? message.params?.targetId;
+      if (message.method === "Target.targetDestroyed" || message.method === "Target.targetCrashed") {
+        if (visible.has(id)) out.deliver.push(message);
+        return out;
+      }
+      if (isVisible(message.params?.targetInfo, message.sessionId)) out.deliver.push(message);
+      return out;
+    }
+    if (message.method === "Target.attachedToTarget") {
+      const { sessionId, targetInfo, waitingForDebugger } = message.params ?? {};
+      if (isVisible(targetInfo, message.sessionId)) {
+        visibleSessions.add(sessionId);
+        out.deliver.push(message);
+        return out;
+      }
+      hiddenSessions.add(sessionId);
+      if (waitingForDebugger) out.toBrowser.push({ id: internal++, sessionId, method: "Runtime.runIfWaitingForDebugger" });
+      out.toBrowser.push({ id: internal++, ...(message.sessionId ? { sessionId: message.sessionId } : {}), method: "Target.detachFromTarget", params: { sessionId } });
+      return out;
+    }
+    if (message.method === "Target.detachedFromTarget") {
+      const sessionId = message.params?.sessionId;
+      if (hiddenSessions.has(sessionId)) {
+        hiddenSessions.delete(sessionId);
+        return out;
+      }
+      visibleSessions.delete(sessionId);
+      out.deliver.push(message);
+      return out;
+    }
+    const infos = message.result?.targetInfos;
+    if (Array.isArray(infos)) {
+      out.deliver.push({ ...message, result: { ...message.result, targetInfos: infos.filter((info) => visible.has(info?.targetId)) } });
+      return out;
+    }
+    out.deliver.push(message);
+    return out;
   }
 
   const error = (id, message, sessionId) => ({ id, ...(sessionId ? { sessionId } : {}), error: { code: -32000, message } });
 
   return {
-    /** The pages open when the run attaches: the owner's. */
-    hideExisting(targetIds) {
-      for (const id of targetIds) if (typeof id === "string" && !visibleTargets.has(id)) hiddenTargets.add(id);
-    },
-    isHidden: (targetId) => hiddenTargets.has(targetId),
+    isVisible: (targetId) => visible.has(targetId),
     fromClient(message) {
       if (!message || typeof message !== "object" || typeof message.method !== "string") return { reply: error(message?.id ?? 0, "Malformed message.") };
       if (REFUSED_METHODS.has(message.method)) return { reply: error(message.id, "Not allowed in the signed-in browser.", message.sessionId) };
-      if (message.sessionId && hiddenSessions.has(message.sessionId)) return { reply: error(message.id, "No such target.", message.sessionId) };
-      const targetId = message.params?.targetId;
-      if (TARGET_METHODS.has(message.method) && typeof targetId === "string" && hiddenTargets.has(targetId)) {
+      if (message.sessionId && !visibleSessions.has(message.sessionId)) return { reply: error(message.id, "No such session.", message.sessionId) };
+      const params = message.params ?? {};
+      if (TARGET_METHODS.has(message.method) && typeof params.targetId === "string" && !visible.has(params.targetId)) {
         return { reply: error(message.id, "No such target.", message.sessionId) };
       }
+      if (message.method === "Target.sendMessageToTarget" || message.method === "Target.detachFromTarget") {
+        if (typeof params.sessionId === "string" && !visibleSessions.has(params.sessionId)) return { reply: error(message.id, "No such session.", message.sessionId) };
+      }
+      if (message.method === "Browser.setWindowBounds" || message.method === "Browser.getWindowBounds") {
+        if (!windows.has(params.windowId)) return { reply: error(message.id, "No such window.", message.sessionId) };
+      }
+      if (message.method === "Target.createTarget") creating.add(message.id);
+      if (message.method === "Browser.getWindowForTarget") windowCalls.add(message.id);
       return { forward: message };
     },
     fromBrowser(message) {
-      if (!message || typeof message !== "object") return { deliver: null, toBrowser: [] };
-      if (typeof message.id === "number" && message.id >= INTERNAL_ID_BASE) return { deliver: null, toBrowser: [] };
-      if (message.sessionId && hiddenSessions.has(message.sessionId)) return { deliver: null, toBrowser: [] };
-      if (TARGET_EVENTS.has(message.method)) {
-        const info = message.params?.targetInfo ?? { targetId: message.params?.targetId };
-        if (message.method === "Target.targetDestroyed" || message.method === "Target.targetCrashed") {
-          return { deliver: hiddenTargets.has(message.params?.targetId) ? null : message, toBrowser: [] };
+      if (!message || typeof message !== "object") return { deliver: [], toBrowser: [] };
+      if (typeof message.id === "number" && message.id >= INTERNAL_ID_BASE) return { deliver: [], toBrowser: [] };
+      if (message.id !== undefined && !message.method && !message.sessionId && creating.has(message.id)) {
+        // The run's own new page: visible. Then the events held back for it come out, before the answer.
+        creating.delete(message.id);
+        const id = message.result?.targetId;
+        if (typeof id === "string" && !hidden.has(id)) visible.add(id);
+        const waitingEvents = queue;
+        queue = [];
+        const out = { deliver: [], toBrowser: [] };
+        for (const waiting of waitingEvents) {
+          if (undecided(waiting)) {
+            queue.push(waiting);
+            continue;
+          }
+          const decided = decide(waiting);
+          out.deliver.push(...decided.deliver);
+          out.toBrowser.push(...decided.toBrowser);
         }
-        return { deliver: hidden(info) ? null : message, toBrowser: [] };
+        out.deliver.push(message);
+        return out;
       }
-      if (message.method === "Target.attachedToTarget") {
-        const { sessionId, targetInfo, waitingForDebugger } = message.params ?? {};
-        if (!hidden(targetInfo)) return { deliver: message, toBrowser: [] };
-        hiddenSessions.add(sessionId);
-        const toBrowser = [];
-        if (waitingForDebugger) toBrowser.push({ id: internal++, sessionId, method: "Runtime.runIfWaitingForDebugger" });
-        toBrowser.push({ id: internal++, ...(message.sessionId ? { sessionId: message.sessionId } : {}), method: "Target.detachFromTarget", params: { sessionId } });
-        return { deliver: null, toBrowser };
+      if (message.id !== undefined && windowCalls.has(message.id)) {
+        windowCalls.delete(message.id);
+        if (typeof message.result?.windowId === "number") windows.add(message.result.windowId);
       }
-      if (message.method === "Target.detachedFromTarget" && hiddenSessions.has(message.params?.sessionId)) {
-        hiddenSessions.delete(message.params.sessionId);
-        return { deliver: null, toBrowser: [] };
+      if (undecided(message)) {
+        if (queue.length >= MAX_QUEUE) return decide(message);
+        queue.push(message);
+        return { deliver: [], toBrowser: [] };
       }
-      const infos = message.result?.targetInfos;
-      if (Array.isArray(infos)) {
-        return { deliver: { ...message, result: { ...message.result, targetInfos: infos.filter((info) => !hidden(info)) } }, toBrowser: [] };
-      }
-      return { deliver: message, toBrowser: [] };
+      return decide(message);
     },
   };
 }
@@ -117,14 +213,14 @@ function bundledWs() {
 
 /**
  * Starts the filter on 127.0.0.1 (a random port) in front of `upstream` (Chromium's DevTools HTTP
- * endpoint). Hides the pages open now. Returns `{ endpoint, close() }`: the endpoint to give
- * Playwright MCP. One client at a time.
+ * endpoint). Returns `{ endpoint, close() }`: the endpoint to give Playwright MCP. One client at a
+ * time; what it may see stays the same across its reconnects (one filter per run session).
  */
 export async function startCdpFilter({ upstream, held = () => false, log = () => {}, ws = bundledWs() }) {
   const filter = createTargetFilter({ held });
-  const pages = await getJson(`${upstream}/json/list`);
-  filter.hideExisting((Array.isArray(pages) ? pages : []).filter((page) => page?.type === "page").map((page) => page.id));
-  log(`hiding ${filter && Array.isArray(pages) ? pages.filter((page) => page?.type === "page").length : 0} tab(s) the owner had open`);
+  // Nothing open now is the run's: every page has to be created through this filter to be seen.
+  const pages = await getJson(`${upstream}/json/list`).catch(() => []);
+  log(`hiding the ${(Array.isArray(pages) ? pages : []).filter((page) => page?.type === "page").length} tab(s) open in the signed-in browser`);
   const { WebSocket, WebSocketServer } = ws.ws ? { WebSocket: ws.ws, WebSocketServer: ws.wsServer } : ws;
   const sockets = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 256 * 1024 * 1024 });
   let port = 0;
@@ -179,7 +275,7 @@ export async function startCdpFilter({ upstream, held = () => false, log = () =>
         }
         const verdict = filter.fromBrowser(message);
         for (const extra of verdict.toBrowser) toBrowser(extra);
-        if (verdict.deliver && client.readyState === 1) client.send(JSON.stringify(verdict.deliver));
+        if (client.readyState === 1) for (const out of verdict.deliver) client.send(JSON.stringify(out));
       });
       const end = () => {
         busy = false;

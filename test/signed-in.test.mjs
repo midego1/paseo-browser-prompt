@@ -239,13 +239,25 @@ async function fakeNeko() {
       })
       .end(JSON.stringify({ ok: true, path: req.url }));
   });
+  const upgraded = new Set();
   server.on("upgrade", (req, socket) => {
+    upgraded.add(socket);
     seen.push({ method: "UPGRADE", url: req.url, headers: req.headers });
     socket.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
-    setTimeout(() => socket.end(), 50);
+    socket.on("error", () => {});
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { port: server.address().port, seen, state, close: () => new Promise((resolve) => server.close(resolve)) };
+  return {
+    port: server.address().port,
+    seen,
+    state,
+    close: () =>
+      new Promise((resolve) => {
+        for (const socket of upgraded) socket.destroy();
+        server.closeAllConnections();
+        server.close(resolve);
+      }),
+  };
 }
 
 function http(port, method, path, headers = {}, body, host = "127.0.0.1") {
@@ -442,41 +454,54 @@ test("relay: a ticket counts as used only once neko let the owner in", async () 
   }
 });
 
-test("relay: takeover state on the control listener follows neko's control, unsure counts as held while a viewer is connected, and the last viewer leaving resets control", async () => {
+test("relay: takeover state follows neko's control only while a viewer is connected, unsure counts as held then, and the last viewer leaving resets control", async () => {
   const neko = await fakeNeko();
   const relay = await relayFor(neko, { controlPollMs: 60_000, log: () => {} });
   const port = await relay.startControl("127.0.0.1", 0);
   const read = async () => JSON.parse((await http(port, "GET", "/control")).body);
+  const settle = async (check) => {
+    for (let i = 0; i < 100 && !check(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  };
   try {
     await relay.pollControl();
     assert.deepEqual(await read(), { ownerControl: false, known: true });
-    neko.state.hasHost = true;
-    await relay.pollControl();
-    assert.deepEqual(await read(), { ownerControl: true, known: true });
     assert.equal((await http(port, "GET", "/other")).status, 404);
     assert.equal((await http(port, "POST", "/control")).status, 404);
-    neko.state.hasHost = false;
-    await relay.pollControl();
-    assert.equal((await read()).ownerControl, false);
-    // neko cannot be asked: without viewers nobody can hold control; with one, unsure counts as held.
-    neko.state.controlFails = true;
-    await relay.pollControl();
-    assert.deepEqual(await read(), { ownerControl: false, known: false });
+    // A viewer connects (its WebSocket stays open).
     const created = await postTicket(relay, ticketAt(Date.now(), "ctrl-ctrl-ctrl-001"));
     const cookie = String(created.headers["set-cookie"]).split(";")[0];
     const socket = connect(relay.port, "127.0.0.1");
+    socket.on("error", () => {});
     await new Promise((resolve) => socket.on("connect", resolve));
     socket.write(
       [`GET ${relay.prefix}/api/ws HTTP/1.1`, "Host: 127.0.0.1:5301", "Origin: http://127.0.0.1:5301", `Cookie: ${cookie}`, "Upgrade: websocket", "Connection: Upgrade", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version: 13", "", ""].join("\r\n"),
     );
     await new Promise((resolve) => socket.once("data", resolve));
     assert.equal(relay.state().viewers, 1);
+    neko.state.hasHost = true;
+    await relay.pollControl();
+    assert.deepEqual(await read(), { ownerControl: true, known: true });
+    neko.state.hasHost = false;
+    await relay.pollControl();
+    assert.deepEqual(await read(), { ownerControl: false, known: true });
+    neko.state.controlFails = true;
+    await relay.pollControl();
     assert.deepEqual(await read(), { ownerControl: true, known: false }, "unsure while a viewer is connected: held");
-    // The fake neko ends the WebSocket after 50 ms: the last viewer is gone, control is reset.
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    neko.state.controlFails = false;
+    neko.state.hasHost = true;
+    await relay.pollControl();
+    // The last viewer leaves: control is reset.
+    socket.destroy();
+    await settle(() => relay.state().viewers === 0 && (neko.state.resets ?? 0) >= 1);
     assert.equal(relay.state().viewers, 0);
     assert.equal(neko.state.resets, 1, "control reset when the last viewer left");
-    socket.destroy();
+    assert.deepEqual(await read(), { ownerControl: false, known: true });
+    // Control still held with no viewer (a reset that did not take): the poll loop resets it again;
+    // the run is never paused meanwhile.
+    neko.state.hasHost = true;
+    await relay.pollControl();
+    assert.equal(neko.state.resets, 2, "reset retried from the poll loop");
+    assert.deepEqual(await read(), { ownerControl: false, known: true });
   } finally {
     await relay.close();
     await neko.close();
@@ -1019,7 +1044,7 @@ test("signed-in image: pinned neko, sandbox on, DevTools on loopback only, the p
   assert.equal(policies.PasswordManagerEnabled, false);
   assert.equal(policies.DownloadRestrictions, 3);
   assert.equal(policies.ExtensionInstallForcelist, undefined);
-  for (const blocked of ["file://*", "chrome://*", "chrome-untrusted://*", "chrome-search://*", "chrome-extension://*", "devtools://*", "view-source:*", "about:*"]) {
+  for (const blocked of ["file://*", "chrome://*", "chrome-untrusted://*", "chrome-search://*", "chrome-extension://*", "devtools://*", "view-source:*", "about:*", "javascript://*", "javascript:*", "data:*"]) {
     assert.ok(policies.URLBlocklist.includes(blocked), blocked);
   }
   assert.deepEqual(policies.URLAllowlist, ["about:blank", "chrome://newtab"]);
@@ -1057,6 +1082,8 @@ test("signed-in prompt: signed-in warning, own tabs only, take over for logins a
   assert.match(SIGNED_IN_SAFETY_PREAMBLE, /do NOT type anything into it\. Ask the owner with AskUserQuestion to press Take over/);
   assert.match(SIGNED_IN_SAFETY_PREAMBLE, /Never type, paste, guess or create credentials yourself/);
   assert.match(SIGNED_IN_SAFETY_PREAMBLE, /While the owner holds control of the browser, every browser tool call is refused/);
+  assert.match(SIGNED_IN_SAFETY_PREAMBLE, /if the site allows in a NEW tab \(the \+ button; a tab the owner opens is hidden from you, your own tab is not\)/);
+  assert.match(SIGNED_IN_SAFETY_PREAMBLE, /reload your tab with mcp__server-browser__browser_navigate/);
   assert.match(SIGNED_IN_SAFETY_PREAMBLE, /Work only in your own tabs and only on the sites the steps name/);
   assert.match(SIGNED_IN_SAFETY_PREAMBLE, /3\. HARD RULE/);
   assert.match(SIGNED_IN_SAFETY_PREAMBLE, /mcp__server-browser__browser_tabs/);
@@ -1138,7 +1165,7 @@ test("signed-in runs get no tool that reads page script state; the filter's list
   assert.match(SIGNED_IN_SAFETY_PREAMBLE, /The owner's own tabs are hidden from you/);
 });
 
-test("control guard: unsure counts as held, a held state lasts through failures for 10 s, opens only after sustained failure, ignores old results", () => {
+test("control guard: follows the relay's ownerControl, a held state lasts through failures for 10 s, opens only after sustained failure, ignores old results", () => {
   let t = 0;
   const guard = createControlGuard({ now: () => t });
   assert.equal(guard.held(), false);
@@ -1153,7 +1180,9 @@ test("control guard: unsure counts as held, a held state lasts through failures 
   guard.failure(guard.next());
   assert.equal(guard.held(), false, "11 s and four failures later");
   guard.result(guard.next(), { ownerControl: false, known: false });
-  assert.equal(guard.held(), true, "unsure counts as held");
+  assert.equal(guard.held(), false, "the relay's ownerControl decides; it folds the unsure case in itself");
+  guard.result(guard.next(), { ownerControl: true, known: false });
+  assert.equal(guard.held(), true);
   guard.result(guard.next(), { ownerControl: false, known: true });
   assert.equal(guard.held(), false);
   const late = guard.next();
@@ -1185,40 +1214,64 @@ test("call tracker: a result that arrives while the owner holds control, or whos
   assert.equal(calls.size(), 0);
 });
 
-test("DevTools filter: the owner's tabs are hidden from the run; commands on them and closing the browser are refused", () => {
+test("DevTools filter (allowlist): the run sees only pages it created and their popups opened while the owner does not hold control", () => {
   let held = false;
   const filter = createTargetFilter({ held: () => held });
-  filter.hideExisting(["OWNER1", "OWNER2"]);
-  const attached = (targetId, extra = {}) => ({ method: "Target.attachedToTarget", params: { sessionId: `S-${targetId}`, targetInfo: { targetId, type: "page", ...extra }, waitingForDebugger: false } });
-  // Existing owner pages: never reach Playwright, and are detached.
-  let verdict = filter.fromBrowser(attached("OWNER1"));
-  assert.equal(verdict.deliver, null);
-  assert.deepEqual(verdict.toBrowser.map((m) => m.method), ["Target.detachFromTarget"]);
-  assert.equal(filter.fromBrowser({ method: "Target.targetInfoChanged", params: { targetInfo: { targetId: "OWNER2", type: "page", url: "https://mail.example/" } } }).deliver, null);
-  assert.equal(filter.fromBrowser({ sessionId: "S-OWNER1", method: "Page.frameNavigated", params: {} }).deliver, null, "nothing from a hidden session");
-  // The run's own page: visible.
-  verdict = filter.fromBrowser(attached("AGENT1"));
-  assert.ok(verdict.deliver);
-  // A page the owner opens while holding control: hidden, resumed and detached.
+  const page = (targetId, extra = {}) => ({ targetId, type: "page", ...extra });
+  const attached = (info, waitingForDebugger = false, sessionId) => ({ method: "Target.attachedToTarget", ...(sessionId ? { sessionId } : {}), params: { sessionId: `S-${info.targetId}`, targetInfo: info, waitingForDebugger } });
+  const delivered = (verdict) => verdict.deliver.length > 0;
+  // Pages the run did not create: hidden (open at attach, restored after a restart, opened while no client was connected).
+  for (const id of ["OWNER1", "RESTORED", "OPENED-LATER"]) {
+    const verdict = filter.fromBrowser(attached(page(id)));
+    assert.equal(delivered(verdict), false, id);
+    assert.deepEqual(verdict.toBrowser.map((m) => m.method), ["Target.detachFromTarget"]);
+  }
+  assert.equal(delivered(filter.fromBrowser({ method: "Target.targetCreated", params: { targetInfo: { targetId: "TAB1", type: "tab" } } })), false, "tab targets hidden");
+  assert.equal(delivered(filter.fromBrowser(attached({ targetId: "SW1", type: "service_worker" }))), false, "service workers hidden");
+  // The run creates a page: the attach event that comes before the answer is held back, then both come out, attach first.
+  assert.ok(filter.fromClient({ id: 11, method: "Target.createTarget", params: { url: "about:blank" } }).forward);
+  let verdict = filter.fromBrowser(attached(page("AGENT1"), true));
+  assert.equal(delivered(verdict), false, "held back while the create is on its way");
+  verdict = filter.fromBrowser({ id: 11, result: { targetId: "AGENT1" } });
+  assert.deepEqual(verdict.deliver.map((m) => m.method ?? "answer"), ["Target.attachedToTarget", "answer"]);
+  assert.equal(filter.isVisible("AGENT1"), true);
+  // A page the owner opens while a create is on its way, with no opener: hidden once the answer names another page.
+  filter.fromClient({ id: 12, method: "Target.createTarget", params: { url: "about:blank" } });
+  assert.equal(delivered(filter.fromBrowser(attached(page("OWNER-RACE"), true))), false);
+  assert.equal(delivered(filter.fromBrowser(attached(page("AGENT2"), true))), false);
+  verdict = filter.fromBrowser({ id: 12, result: { targetId: "AGENT2" } });
+  assert.deepEqual(verdict.deliver.map((m) => m.params?.targetInfo?.targetId ?? "answer"), ["AGENT2", "answer"]);
+  assert.deepEqual(verdict.toBrowser.map((m) => m.method), ["Runtime.runIfWaitingForDebugger", "Target.detachFromTarget"], "the owner's page is resumed and detached");
+  // Popups: of a visible page while not held -> visible; while held -> hidden (the owner opened it); of a hidden page -> hidden.
+  assert.equal(delivered(filter.fromBrowser(attached(page("POPUP1", { openerId: "AGENT1" })))), true);
   held = true;
-  verdict = filter.fromBrowser({ method: "Target.attachedToTarget", params: { sessionId: "S-NEW", targetInfo: { targetId: "OWNERNEW", type: "page" }, waitingForDebugger: true } });
-  assert.equal(verdict.deliver, null);
-  assert.deepEqual(verdict.toBrowser.map((m) => m.method), ["Runtime.runIfWaitingForDebugger", "Target.detachFromTarget"]);
-  // A popup of the run's page stays visible even while held; a popup of an owner page is hidden.
-  assert.ok(filter.fromBrowser(attached("POPUP1", { openerId: "AGENT1" })).deliver);
+  assert.equal(delivered(filter.fromBrowser(attached(page("POPUP2", { openerId: "AGENT1" })))), false, "opened from the agent's tab during a takeover: the owner's");
   held = false;
-  assert.equal(filter.fromBrowser(attached("POPUP2", { openerId: "OWNER2" })).deliver, null);
+  assert.equal(delivered(filter.fromBrowser(attached(page("POPUP3", { openerId: "OWNER1" })))), false);
+  // Frames and workers attached under a visible page's session: visible; under a hidden one: never seen.
+  assert.equal(delivered(filter.fromBrowser(attached({ targetId: "FRAME1", type: "iframe" }, false, "S-AGENT1"))), true);
+  assert.equal(delivered(filter.fromBrowser({ sessionId: "S-OWNER1", method: "Page.frameNavigated", params: {} })), false);
   // Commands.
-  for (const method of ["Target.attachToTarget", "Target.activateTarget", "Target.closeTarget", "Target.getTargetInfo"]) {
-    assert.ok(filter.fromClient({ id: 5, method, params: { targetId: "OWNER1" } }).reply, method);
-    assert.ok(filter.fromClient({ id: 6, method, params: { targetId: "AGENT1" } }).forward, method);
+  for (const method of ["Target.attachToTarget", "Target.activateTarget", "Target.closeTarget", "Target.getTargetInfo", "Target.sendMessageToTarget", "Target.autoAttachRelated", "Target.detachFromTarget", "Browser.getWindowForTarget"]) {
+    assert.ok(filter.fromClient({ id: 5, method, params: { targetId: "OWNER1" } }).reply, `${method} on an owner tab`);
+    assert.ok(filter.fromClient({ id: 6, method, params: { targetId: "AGENT1" } }).forward, `${method} on the run's tab`);
   }
   for (const method of REFUSED_METHODS) assert.ok(filter.fromClient({ id: 7, method }).reply, method);
-  assert.ok(filter.fromClient({ id: 8, sessionId: "S-NEW", method: "Runtime.evaluate" }).reply, "a hidden session cannot be used");
-  // Target lists leave out hidden pages; the filter's own messages' answers are dropped.
-  const listed = filter.fromBrowser({ id: 9, result: { targetInfos: [{ targetId: "OWNER1", type: "page" }, { targetId: "AGENT1", type: "page" }] } });
-  assert.deepEqual(listed.deliver.result.targetInfos.map((t) => t.targetId), ["AGENT1"]);
-  assert.equal(filter.fromBrowser({ id: verdict.toBrowser?.[0]?.id ?? 2_000_000_000, result: {} }).deliver, null);
+  for (const method of ["Storage.getCookies", "Storage.clearCookies", "Network.getAllCookies", "Browser.close"]) assert.ok(REFUSED_METHODS.has(method), method);
+  for (const method of ["Input.dispatchKeyEvent", "Network.getCookies", "Runtime.evaluate", "Storage.getStorageKeyForFrame"]) {
+    assert.ok(filter.fromClient({ id: 8, sessionId: "S-OWNER1", method }).reply, `${method} on a hidden session`);
+    assert.ok(filter.fromClient({ id: 8, sessionId: "S-AGENT1", method }).forward, `${method} on the run's session`);
+  }
+  assert.ok(filter.fromClient({ id: 9, method: "Target.detachFromTarget", params: { sessionId: "S-OWNER1" } }).reply);
+  // Windows: only those of the run's pages.
+  assert.ok(filter.fromClient({ id: 20, method: "Browser.setWindowBounds", params: { windowId: 7, bounds: {} } }).reply);
+  filter.fromClient({ id: 21, method: "Browser.getWindowForTarget", params: { targetId: "AGENT1" } });
+  filter.fromBrowser({ id: 21, result: { windowId: 7, bounds: {} } });
+  assert.ok(filter.fromClient({ id: 22, method: "Browser.setWindowBounds", params: { windowId: 7, bounds: {} } }).forward);
+  // Target lists show only the run's pages; the filter's own messages' answers are dropped.
+  const listed = filter.fromBrowser({ id: 30, result: { targetInfos: [page("OWNER1"), page("AGENT1"), page("NEVER-SEEN")] } });
+  assert.deepEqual(listed.deliver[0].result.targetInfos.map((t) => t.targetId), ["AGENT1"]);
+  assert.equal(delivered(filter.fromBrowser({ id: 2_000_000_001, result: {} })), false);
 });
 
 test("daemon: concurrent presses get one ticket, never two", async () => {
@@ -1259,4 +1312,27 @@ test("daemon: a missing proxy or relay is started alone; neko and the owner's se
   docker.calls.length = 0;
   assert.equal(await si.idleCheck(), false);
   assert.deepEqual(docker.calls.filter((args) => args[0] === "run").map((args) => value(args, "--name")[0].replace(/^bp-si-[0-9a-f]{8}-/, "")), ["proxy"], "the idle check repairs too");
+});
+
+test("no viewer and a failing neko control poll: the run is not paused", async () => {
+  const neko = await fakeNeko();
+  const relay = await relayFor(neko, { controlPollMs: 60_000, log: () => {} });
+  const port = await relay.startControl("127.0.0.1", 0);
+  try {
+    neko.state.hasHost = true;
+    await relay.pollControl();
+    neko.state.controlFails = true;
+    for (let i = 0; i < 3; i++) await relay.pollControl();
+    const body = JSON.parse((await http(port, "GET", "/control")).body);
+    assert.deepEqual(body, { ownerControl: false, known: true });
+    const guard = createControlGuard();
+    guard.result(guard.next(), body);
+    assert.equal(guard.held(), false, "the run's guard follows the relay");
+    neko.state.failLogin = true; // a 401 loop on neko's login
+    for (let i = 0; i < 3; i++) await relay.pollControl();
+    assert.equal(JSON.parse((await http(port, "GET", "/control")).body).ownerControl, false);
+  } finally {
+    await relay.close();
+    await neko.close();
+  }
 });

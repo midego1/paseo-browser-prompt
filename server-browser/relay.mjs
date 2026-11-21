@@ -583,8 +583,11 @@ export async function startRelay(options) {
       };
       upstream.pipe(socket);
       socket.pipe(upstream);
+      // A half-close (FIN) from either side ends the viewer: no lingering sockets, an exact viewer count.
       socket.on("close", done);
       upstream.on("close", done);
+      socket.on("end", done);
+      upstream.on("end", done);
       socket.on("data", () => {
         touch();
         if (live) live.lastSeen = now();
@@ -644,17 +647,27 @@ export async function startRelay(options) {
       if (seq > pollApplied) {
         pollApplied = seq;
         controlKnown = false;
+        // Nobody can hold control without a viewer: a stale value must not pause the run.
+        if (viewers === 0) ownerControl = false;
       }
     }
+    // Control still held with no viewer (a reset that failed): try again.
+    if (viewers === 0 && ownerControl) await resetControl();
   }
-  /** Held, or unsure while a viewer is connected (fail closed for the run). */
+  /**
+   * Whether the run must pause: only while a viewer is connected, when it holds control or the relay
+   * cannot tell (fail closed). Without a viewer nobody can hold control, so the run never waits on a
+   * stale or unknown state.
+   */
   function controlHeld() {
-    return ownerControl || (!controlKnown && viewers > 0);
+    return viewers > 0 && (ownerControl || !controlKnown);
   }
   async function resetControl() {
     try {
       serviceToken ??= await nekoLogin("relay");
-      await nekoJson("POST", "/api/room/control/reset", undefined, serviceToken);
+      const result = await nekoJson("POST", "/api/room/control/reset", undefined, serviceToken);
+      if (result.status === 401) serviceToken = null;
+      if (result.status < 200 || result.status >= 300) throw new Error(`reset ${result.status}`);
       ownerControl = false;
       log("no viewer left: control reset");
     } catch {
@@ -674,7 +687,7 @@ export async function startRelay(options) {
     poller.unref?.();
     control = createServer((req, res) => {
       if (req.method !== "GET" || req.url !== "/control") return res.writeHead(404).end();
-      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" }).end(JSON.stringify({ ownerControl: controlHeld(), known: controlKnown }));
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" }).end(JSON.stringify({ ownerControl: controlHeld(), known: controlKnown || viewers === 0 }));
     });
     await new Promise((resolve, reject) => {
       control.once("error", reject);
@@ -698,6 +711,8 @@ export async function startRelay(options) {
         clearInterval(sweeper);
         if (poller) clearInterval(poller);
         control?.close();
+        control?.closeAllConnections?.();
+        for (const entry of openSockets) entry.socket.destroy();
         server.closeAllConnections?.();
         rtc?.close();
         server.close(() => resolve());
