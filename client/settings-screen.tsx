@@ -24,23 +24,26 @@ import { parseReportMode, type ReportMode } from "../shared/report-back";
 import { preferences } from "../shared/settings";
 import { LauncherSettings } from "./launcher-settings";
 import { ServerBrowserSettings } from "./server-browser-settings";
+import { SignedInSettings } from "./signed-in-settings";
 import { UpdateSettings } from "./update-settings";
 
-const DESKTOP_OPTIONS: { label: string; value: "app" | "web-agent" | "copy-only" | "claude-desktop" | "paseo" | "chrome" | "server" }[] = [
+const DESKTOP_OPTIONS: { label: string; value: "app" | "web-agent" | "copy-only" | "claude-desktop" | "paseo" | "chrome" | "server" | "signed-in" }[] = [
   { label: "ChatGPT desktop", value: "app" },
   { label: "ChatGPT web", value: "web-agent" },
   { label: "Claude desktop", value: "claude-desktop" },
   { label: "Paseo browser", value: "paseo" },
   { label: "Server browser", value: "server" },
+  { label: "Server browser (signed in)", value: "signed-in" },
   { label: "Claude Chrome tab", value: "chrome" },
   { label: "Copy only", value: "copy-only" },
 ];
 
-const MOBILE_OPTIONS: { label: string; value: "copy-only" | "web-agent" | "paseo" | "chrome" | "server" }[] = [
+const MOBILE_OPTIONS: { label: string; value: "copy-only" | "web-agent" | "paseo" | "chrome" | "server" | "signed-in" }[] = [
   { label: "Copy only", value: "copy-only" },
   { label: "ChatGPT web", value: "web-agent" },
   { label: "Paseo browser", value: "paseo" },
   { label: "Server browser", value: "server" },
+  { label: "Server browser (signed in)", value: "signed-in" },
   { label: "Claude Chrome tab", value: "chrome" },
 ];
 
@@ -365,6 +368,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
         </SettingsCard>
       </SettingsSection>
       <ServerBrowserSettings theme={theme} />
+      <SignedInSettings theme={theme} />
       <LauncherSettings theme={theme} />
       <UpdateSettings theme={theme} />
     </>

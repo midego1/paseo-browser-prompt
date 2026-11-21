@@ -355,13 +355,14 @@ export function isServerBrowserRun(labels: Record<string, unknown> | null | unde
   return !!labels && labels[BROWSER_LABEL] === SERVER_BROWSER_LABEL_VALUE;
 }
 
-/** Whether the card's `runs` setting records this agent as a Server browser run of that card. */
+/** Whether the card's `runs` setting records this agent as a Server browser run of that card (or, with `marker`, a signed-in run). */
 export function serverRunRecorded(
   runs: readonly (readonly string[])[],
   query: { sourceId: string; cardId: string; runId: string },
+  marker: string = SERVER_RUN_MARKER,
 ): boolean {
   const key = runKey(query.sourceId, query.cardId);
-  return runs.some((entry) => entry[0] === key && entry[1] === query.runId && entry.slice(2).includes(SERVER_RUN_MARKER));
+  return runs.some((entry) => entry[0] === key && entry[1] === query.runId && entry.slice(2).includes(marker));
 }
 
 export interface SessionOpenLike {
@@ -386,8 +387,17 @@ export interface GateDeps {
  * browser marker, the same record the mode guard and report back check. History opens get nothing.
  */
 export async function shouldAttachServerBrowser(request: SessionOpenLike, deps: GateDeps): Promise<boolean> {
+  return attachGate(request, deps, isServerBrowserRun);
+}
+
+/** The same gate for a signed-in run: its own label value, ticket store and run marker (in `deps`). */
+export async function shouldAttachSignedIn(request: SessionOpenLike, deps: GateDeps): Promise<boolean> {
+  return attachGate(request, deps, (labels) => labels[BROWSER_LABEL] === "signed-in");
+}
+
+async function attachGate(request: SessionOpenLike, deps: GateDeps, isRun: (labels: Readonly<Record<string, string>>) => boolean): Promise<boolean> {
   if (request.purpose === "history") return false;
-  if (!isServerBrowserRun(request.labels)) return false;
+  if (!isRun(request.labels)) return false;
   const target = reportTarget(request.agentId, request.labels);
   if (!target) return false;
   if (request.reason === "create") {

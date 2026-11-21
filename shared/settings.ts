@@ -5,6 +5,7 @@ import { DEFAULT_APP_LINK_TEMPLATE } from "./browser-prompt";
 import { DEFAULT_REPORT_MODE, REPORT_MODES } from "./report-back";
 import { THUMBNAIL_MODES } from "./screenshot";
 import { migratePreferences } from "./settings-migrate";
+import { DEFAULT_SIGNED_IN_PORT } from "./signed-in";
 import { DEFAULT_TRAMPOLINE_PORT } from "./trampoline-host";
 
 /** Cap on remembered "done" marks; the oldest are dropped first. */
@@ -28,12 +29,14 @@ export const preferences = defineSettings({
      * paseo, chrome: a Paseo agent in the Paseo browser or in Claude in Chrome.
      * server: a Paseo agent in the Server browser (headless Chromium in a container on the daemon
      *   host; needs no desktop app, not signed in to any account).
+     * signed-in: a Paseo agent in the signed-in Server browser (the owner's persistent Chromium on
+     *   the daemon host, which the owner can watch and take over from any device).
      * This one is highlighted on the card. The card shows the Chrome tab button only with a Claude
      * provider, and no Desktop buttons on phones.
      */
-    startMode: z.enum(["app", "web-agent", "copy-only", "claude-desktop", "paseo", "chrome", "server"]).default("app"),
+    startMode: z.enum(["app", "web-agent", "copy-only", "claude-desktop", "paseo", "chrome", "server", "signed-in"]).default("app"),
     /** iOS and Android. No documented ChatGPT mobile deep link for a new prompt exists. */
-    mobileStartMode: z.enum(["copy-only", "web-agent", "paseo", "chrome", "server"]).default("copy-only"),
+    mobileStartMode: z.enum(["copy-only", "web-agent", "paseo", "chrome", "server", "signed-in"]).default("copy-only"),
     /** Desktop app deep link; `{prompt}` is replaced by the URI-encoded prompt. */
     appLinkTemplate: z.string().default(DEFAULT_APP_LINK_TEMPLATE),
     /**
@@ -99,4 +102,20 @@ export const preferences = defineSettings({
     trampolinePort: z.number().int().default(DEFAULT_TRAMPOLINE_PORT),
   }),
   migrate: migratePreferences,
+});
+
+/**
+ * The signed-in Server browser's own settings, in a document of their own so older plugin versions
+ * never see them (rollback-safe: they ignore it, and nothing in `preferences` changes shape).
+ */
+export const signedInSettings = defineSettings({
+  id: "signed-in",
+  scope: "host",
+  version: 1,
+  schema: z.object({
+    /** Port of the owner's viewer on the bind address (the launcher's: Tailscale or 127.0.0.1); WebRTC uses the next one. */
+    port: z.number().int().min(1024).max(65534).default(DEFAULT_SIGNED_IN_PORT),
+    /** Optional https://name[:port] in front of the viewer (for example `tailscale serve`); empty: http on the bind address. */
+    httpsBaseUrl: z.string().default(""),
+  }),
 });

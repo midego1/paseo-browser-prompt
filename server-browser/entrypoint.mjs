@@ -6,6 +6,12 @@
 // stays pure JSON-RPC. When the session closes stdin, Playwright MCP exits, this process exits, and
 // `docker run --rm` removes the container. A killed `docker run` client may leave stdin open, so it
 // also stops after BP_IDLE_TIMEOUT_S without any MCP message and after BP_MAX_LIFETIME_S in total.
+//
+// Signed-in mode (BP_CDP_ENDPOINT=http://127.0.0.1:9222): the container shares the network namespace
+// of the signed-in browser's neko container and attaches Playwright MCP over the DevTools protocol to
+// the owner's persistent, signed-in Chromium there (its default context) instead of launching one.
+// That Chromium already sends everything through the stack's filtering proxy; the same origin rules
+// apply on top. The same stdio filter, timeouts and denied tools apply.
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -16,8 +22,15 @@ import { BLOCKED_HOST_SUFFIXES, normalizeAddress } from "./proxy.mjs";
 const require = createRequire(import.meta.url);
 const log = (message) => process.stderr.write(`[browser-prompt server browser] ${message}\n`);
 
+export const SIGNED_IN_CDP_ENDPOINT = "http://127.0.0.1:9222";
+const cdpEndpoint = (process.env.BP_CDP_ENDPOINT ?? "").trim();
+const signedIn = cdpEndpoint !== "";
+if (signedIn && cdpEndpoint !== SIGNED_IN_CDP_ENDPOINT) {
+  log(`BP_CDP_ENDPOINT may only be ${SIGNED_IN_CDP_ENDPOINT}; refusing to start`);
+  process.exit(1);
+}
 const proxyServer = (process.env.BP_PROXY ?? "").trim();
-if (!/^http:\/\/[0-9a-fA-F:.[\]]+:\d+$/.test(proxyServer)) {
+if (!signedIn && !/^http:\/\/[0-9a-fA-F:.[\]]+:\d+$/.test(proxyServer)) {
   log("BP_PROXY is missing or not an http://<address>:<port> URL; refusing to start without the proxy");
   process.exit(1);
 }
@@ -40,39 +53,43 @@ const blockedOrigins = [
   ...extraBlocked.map((address) => (address.includes(":") ? `[${address}]` : address)),
 ];
 
-const config = {
-  browser: {
-    browserName: "chromium",
-    isolated: true,
-    launchOptions: {
-      // The image's bundled Chromium (Playwright MCP defaults to the Chrome channel, not installed).
-      channel: "chromium",
-      headless: true,
-      // Chromium's own sandbox: works with the container's seccomp profile (Playwright's, allowing
-      // user namespaces) and CAP_SYS_CHROOT in the bounding set; the container user has no
-      // effective capabilities.
-      chromiumSandbox: true,
-      // Every request goes to the sidecar; Playwright adds <-loopback> so loopback is proxied too.
-      proxy: { server: proxyServer },
-      args: [
-        // WebRTC may not send UDP around the proxy (there is no route anyway).
-        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-        "--webrtc-ip-handling-policy=disable_non_proxied_udp",
-        "--disable-quic",
-        "--no-pings",
-        "--disable-background-networking",
-        "--disable-component-update",
-        "--disable-sync",
-        "--disable-domain-reliability",
-        "--disable-breakpad",
-      ],
-    },
-    contextOptions: {
-      viewport: { width: 1280, height: 800 },
-      acceptDownloads: false,
-      serviceWorkers: "block",
-    },
+const launchedBrowser = {
+  browserName: "chromium",
+  isolated: true,
+  launchOptions: {
+    // The image's bundled Chromium (Playwright MCP defaults to the Chrome channel, not installed).
+    channel: "chromium",
+    headless: true,
+    // Chromium's own sandbox: works with the container's seccomp profile (Playwright's, allowing
+    // user namespaces) and CAP_SYS_CHROOT in the bounding set; the container user has no
+    // effective capabilities.
+    chromiumSandbox: true,
+    // Every request goes to the sidecar; Playwright adds <-loopback> so loopback is proxied too.
+    proxy: { server: proxyServer },
+    args: [
+      // WebRTC may not send UDP around the proxy (there is no route anyway).
+      "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+      "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+      "--disable-quic",
+      "--no-pings",
+      "--disable-background-networking",
+      "--disable-component-update",
+      "--disable-sync",
+      "--disable-domain-reliability",
+      "--disable-breakpad",
+    ],
   },
+  contextOptions: {
+    viewport: { width: 1280, height: 800 },
+    acceptDownloads: false,
+    serviceWorkers: "block",
+  },
+};
+// The owner's signed-in Chromium: its default context (with the owner's logins), never a new one.
+const attachedBrowser = { browserName: "chromium", isolated: false, cdpEndpoint, cdpTimeout: 30_000 };
+
+const config = {
+  browser: signedIn ? attachedBrowser : launchedBrowser,
   network: { blockedOrigins },
   outputDir,
   imageResponses: "allow",
@@ -85,7 +102,29 @@ writeFileSync(configPath, JSON.stringify(config));
 
 // cli.js is not in the package exports; find it next to its package.json.
 const cli = join(dirname(require.resolve("@playwright/mcp/package.json")), "cli.js");
-const child = spawn(process.execPath, [cli, "--config", configPath, "--headless", "--isolated", "--output-dir", outputDir, "--block-service-workers"], {
+/** Waits until the signed-in browser's DevTools endpoint answers (neko starts Chromium a few seconds after the container). */
+async function waitForCdp(timeoutMs = 90_000) {
+  const until = Date.now() + timeoutMs;
+  while (Date.now() < until) {
+    try {
+      const response = await fetch(`${cdpEndpoint}/json/version`, { signal: AbortSignal.timeout(3000) });
+      if (response.ok) return true;
+    } catch {
+      // not up yet
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  return false;
+}
+if (signedIn && !(await waitForCdp())) {
+  log("the signed-in browser did not answer on its DevTools port; stopping");
+  process.exit(1);
+}
+
+const cliArgs = signedIn
+  ? [cli, "--config", configPath, "--output-dir", outputDir]
+  : [cli, "--config", configPath, "--headless", "--isolated", "--output-dir", outputDir, "--block-service-workers"];
+const child = spawn(process.execPath, cliArgs, {
   cwd: work,
   stdio: ["pipe", "pipe", "inherit"],
   env: { ...process.env, PLAYWRIGHT_MCP_OUTPUT_DIR: outputDir },

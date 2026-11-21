@@ -1,16 +1,20 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { archivedAfterSuccess } from "./shared/archive-rpc";
-import { createLauncher } from "./server/launcher";
+import { createLauncher, systemProbes } from "./server/launcher";
 import { registerModeGuard } from "./server/mode-guard-hook";
 import { createSeenRuns, registerReportBack } from "./server/report-back-hook";
 import { fileReportedStore } from "./server/reported-store";
 import { createServerBrowser, registerServerBrowser, type OpenHookServer } from "./server/server-browser";
+import { createSignedIn } from "./server/signed-in";
 import { createServerUpdater, currentUpdateStatus } from "./server/updater";
 import { CLAUDE_DESKTOP_LINK_TEMPLATE, DEFAULT_APP_LINK_TEMPLATE } from "./shared/browser-prompt";
 import { createRunLocks, runLockKey } from "./shared/run-lock";
 import { acquireRunLock, finishRunLock } from "./shared/run-lock-rpc";
 import { prepareServerBrowserRun, serverBrowserStatus } from "./shared/server-browser-rpc";
-import { preferences } from "./shared/settings";
+import { preferences, signedInSettings } from "./shared/settings";
+import { DEFAULT_SIGNED_IN_PORT, validateHttpsBase } from "./shared/signed-in";
+import { prepareSignedInRun, signedInControl, signedInStatus, signedInViewerLink } from "./shared/signed-in-rpc";
+import { chooseTrampolineHost } from "./shared/trampoline-host";
 import { getLauncherStatus, stashPrompt } from "./shared/trampoline";
 import { DEFAULT_TRAMPOLINE_PORT } from "./shared/trampoline-host";
 import { checkForUpdate, getUpdateStatus, installUpdate, updateSettings } from "./shared/update";
@@ -72,7 +76,27 @@ export default function contribute(server: PluginServerContext) {
   // Server browser: a run's own headless Chromium in a throwaway Docker container on this host,
   // attached as an MCP server only to Server browser runs a card started (see server/server-browser.ts).
   const serverBrowser = createServerBrowser();
-  const serverBrowserHook = registerServerBrowser(server as unknown as OpenHookServer, settings, serverBrowser);
+  // Signed-in Server browser: the owner's persistent Chromium (neko) on this host, which runs use one
+  // at a time and the owner watches or takes over through the relay on this host's Tailscale address
+  // (see server/signed-in.ts). Started on demand, stopped after 30 minutes without use.
+  const signedInConfig = server.registerSettings(signedInSettings);
+  const signedIn = createSignedIn({
+    serverBrowser,
+    // The launcher's bind address: the setting (127.0.0.1 or this host's Tailscale IPv4), else Tailscale.
+    bindHost: async () => {
+      const prefs = await settings.read().catch(() => null);
+      const configured = prefs?.status === "ready" ? prefs.values.trampolineHost : "";
+      return (await chooseTrampolineHost(configured, systemProbes)).host;
+    },
+    config: async () => {
+      const current = await signedInConfig.read().catch(() => null);
+      if (current?.status !== "ready") return { port: DEFAULT_SIGNED_IN_PORT, httpsBaseUrl: "" };
+      const base = current.values.httpsBaseUrl.trim();
+      return { port: current.values.port, httpsBaseUrl: validateHttpsBase(base) === null ? base : "" };
+    },
+  });
+  signedIn.startIdleChecks();
+  const serverBrowserHook = registerServerBrowser(server as unknown as OpenHookServer, settings, serverBrowser, { signedIn });
   server.handle(serverBrowserStatus, async ({ build }) => {
     if (!serverBrowserHook.supported) return { state: "unsupported" as const, image: serverBrowser.image, rootless: null, detail: "" };
     return serverBrowser.status({ build });
@@ -82,7 +106,34 @@ export default function contribute(server: PluginServerContext) {
     return serverBrowser.prepare({ sourceId: sourceAgentId, cardId });
   });
 
+  server.handle(signedInStatus, async ({ build }) => {
+    if (!serverBrowserHook.supported) {
+      return { state: "unsupported" as const, image: signedIn.image, serverImage: serverBrowser.image, running: false, viewers: 0, busy: false, bindHost: null, viewerOrigin: null, detail: "" };
+    }
+    return signedIn.status({ build });
+  });
+  server.handle(prepareSignedInRun, async ({ sourceAgentId, cardId }) => {
+    if (!serverBrowserHook.supported) return { ok: false as const, state: "unsupported" as const, detail: "" };
+    return signedIn.prepare({ sourceId: sourceAgentId, cardId });
+  });
+  server.handle(signedInViewerLink, async ({ purpose, portrait }) => {
+    if (!serverBrowserHook.supported) return { ok: false as const, state: "unsupported" as const, detail: "" };
+    return signedIn.viewerLink({ purpose, portrait });
+  });
+  server.handle(signedInControl, async ({ action }) => {
+    try {
+      if (action === "stop") await signedIn.stop();
+      else if (action === "logout") await signedIn.logout();
+      else await signedIn.rotateKey();
+      const done = { stop: "Stopped the signed-in browser. Your logins are kept.", logout: "Logged out of everything: the signed-in browser's profile was removed.", "rotate-key": "New viewer key: earlier links and viewer sessions no longer work." } as const;
+      return { ok: true, message: done[action] };
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
   return async () => {
+    signedIn.dispose();
     serverBrowserHook.dispose();
     modeGuard.dispose();
     await reportBack.dispose();

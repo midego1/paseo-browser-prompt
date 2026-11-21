@@ -27,9 +27,11 @@ import {
   SESSION_LABEL,
   serverRunRecorded,
   shouldAttachServerBrowser,
+  shouldAttachSignedIn,
   type ServerBrowserState,
   type StdioServer,
 } from "../shared/server-browser.ts";
+import { isSignedInRun, SIGNED_IN_RUN_MARKER } from "../shared/signed-in.ts";
 import { addLifecycleHook, type HookServer } from "./hooks.ts";
 import type { SettingsReader } from "./report-back-hook.ts";
 import { SERVER_BROWSER_FILES, SERVER_BROWSER_RUNTIME_FILES } from "./server-browser-files.ts";
@@ -382,6 +384,17 @@ export function createServerBrowser(options: ServerBrowserOptions = {}) {
   return {
     image,
     status,
+    /** For the signed-in browser (server/signed-in.ts): the same docker, instance, runtime files and host addresses. */
+    docker: dockerCommand,
+    dockerEnv,
+    instance,
+    async runtime() {
+      await writeRuntime();
+      return { launcher: join(runtimeDir, "launch.mjs"), seccomp: join(runtimeDir, "seccomp.json") };
+    },
+    node: () => (options.findNode ?? findNode)(env),
+    blockedIps: () => hostAddressesToBlock(interfaces()),
+    listResources,
     /** Fresh check; issues a ticket only when ready. Never builds: only the settings' Build does. */
     async prepare(target: { sourceId: string; cardId: string }) {
       cached = null;
@@ -477,6 +490,12 @@ export type OpenHookServer = HookServer & {
 
 const MAX_ATTACHED = 1000;
 
+/** What the session-open hook needs from the signed-in browser (server/signed-in.ts). */
+export interface SignedInAttach {
+  consumeTicket(ticket: string, target: { sourceId: string; cardId: string }): boolean;
+  mcpServer(agentId: string): Promise<{ server: StdioServer; session: string } | { refused: "busy" | "unavailable" } | null>;
+}
+
 /**
  * Gives Server browser runs their MCP server when their session opens, and only them (see
  * `shouldAttachServerBrowser`). Returns `supported: false` when the host has no session-open hook.
@@ -485,7 +504,7 @@ export function registerServerBrowser(
   server: OpenHookServer,
   settings: SettingsReader,
   browser: ServerBrowser,
-  options: { log?: (message: string) => void; sweepEveryMs?: number } = {},
+  options: { log?: (message: string) => void; sweepEveryMs?: number; signedIn?: SignedInAttach } = {},
 ) {
   const log = options.log ?? ((message: string) => console.log(`[browser-prompt] ${message}`));
   const attached = new Set<string>();
@@ -504,7 +523,41 @@ export function registerServerBrowser(
     },
   };
 
-  const handler: OpenHandler = async ({ request }) => {
+  const signedInDeps = {
+    consumeTicket: (ticket: string, target: { sourceId: string; cardId: string }) => options.signedIn?.consumeTicket(ticket, target) ?? false,
+    async isRecorded(query: { sourceId: string; cardId: string; runId: string }) {
+      if (attached.has(query.runId)) return true;
+      const state = await settings.read().catch(() => null);
+      return state?.status === "ready" && serverRunRecorded(state.values.runs, query, SIGNED_IN_RUN_MARKER);
+    },
+  };
+
+  const signedInHandler: OpenHandler = async ({ request }) => {
+    const signedIn = options.signedIn;
+    if (!signedIn || !(await shouldAttachSignedIn(request, signedInDeps))) return undefined;
+    const mcp = await signedIn.mcpServer(request.agentId).catch(() => null);
+    if (!mcp) {
+      log(`run ${request.agentId} is a signed-in run, but docker, node or the signed-in browser is not available; no browser attached`);
+      return undefined;
+    }
+    if ("refused" in mcp) {
+      log(`run ${request.agentId}: the signed-in browser is ${mcp.refused === "busy" ? "in use by another run" : "not available"}; none attached (${request.reason})`);
+      return undefined;
+    }
+    remember(request.agentId);
+    log(`attached the signed-in browser to run ${request.agentId} (${request.reason})`);
+    if (request.reason !== "create") {
+      void browser.removeContainers(request.agentId, mcp.session).then(
+        (removed) => removed && log(`removed ${removed} earlier signed-in MCP container(s) of run ${request.agentId}`),
+        () => undefined,
+      );
+    }
+    return { ...request, mcpServers: { ...request.mcpServers, [SERVER_BROWSER_MCP_NAME]: mcp.server } };
+  };
+
+  const handler: OpenHandler = async (input, context) => {
+    const { request } = input;
+    if (request.purpose !== "history" && isSignedInRun(request.labels)) return signedInHandler(input, context);
     if (!(await shouldAttachServerBrowser(request, deps))) return undefined;
     const mcp = await browser.mcpServer(request.agentId).catch(() => null);
     if (!mcp) {

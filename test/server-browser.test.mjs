@@ -324,7 +324,7 @@ test("the build context is pinned: base image digest, exact Playwright MCP versi
   assert.match(BASE_IMAGE, /^mcr\.microsoft\.com\/playwright:v1\.65\.1-noble@sha256:[0-9a-f]{64}$/);
   assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts/);
   assert.match(dockerfile, /^USER pwuser$/m);
-  assert.match(dockerfile, /COPY proxy\.mjs proxy-main\.mjs mcp-filter\.mjs entrypoint\.mjs \.\//);
+  assert.match(dockerfile, /COPY proxy\.mjs proxy-main\.mjs mcp-filter\.mjs entrypoint\.mjs relay\.mjs relay-main\.mjs \.\//);
   const pkg = JSON.parse(readFileSync(new URL("../server-browser/package.json", import.meta.url), "utf8"));
   assert.equal(pkg.dependencies["@playwright/mcp"], PLAYWRIGHT_MCP_VERSION, "exact version, no range");
   assert.deepEqual(pkg.overrides, { playwright: PLAYWRIGHT_VERSION, "playwright-core": PLAYWRIGHT_VERSION }, "the browser the image ships");
