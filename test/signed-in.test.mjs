@@ -1459,13 +1459,14 @@ test("Bitwarden image: built on the plugin's own signed-in image, the install re
   assert.deepEqual(bitwardenLockArgs("0a1b2c3d"), ["exec", "--user", "neko", "--env", "DISPLAY=:99.0", "bp-si-0a1b2c3d-neko", "xdotool", "key", "--clearmodifiers", "ctrl+shift+7"]);
 });
 
-test("Bitwarden policy: the only extension, its own pages only, the store blocked, Chromium's password manager and autofill off", () => {
+test("Bitwarden policy: the only extension, extension pages unblocked for its dynamic frames, the store blocked, Chromium's password manager and autofill off", () => {
   const base = JSON.parse(SIGNED_IN_FILES["policies.json"]);
   const overlay = JSON.parse(bwFile("policy-overlay.json"));
   // The same steps as install-bitwarden.py.
   const policy = { ...base };
   for (const name of overlay.remove) delete policy[name];
   Object.assign(policy, overlay.set);
+  for (const [name, values] of Object.entries(overlay.drop)) policy[name] = policy[name].filter((v) => !values.includes(v));
   for (const [name, values] of Object.entries(overlay.append)) policy[name] = [...(policy[name] ?? []), ...values.filter((v) => !(policy[name] ?? []).includes(v))];
   assert.equal(policy.ExtensionInstallBlocklist, undefined, "Chromium's blocklist * would also block the command-line extension; --disable-extensions-except disables all others");
   assert.deepEqual(policy.ExtensionInstallAllowlist, [BITWARDEN.id]);
@@ -1476,10 +1477,11 @@ test("Bitwarden policy: the only extension, its own pages only, the store blocke
   assert.equal(policy.PasswordManagerEnabled, false);
   assert.equal(policy.AutofillAddressEnabled, false);
   assert.equal(policy.AutofillCreditCardEnabled, false);
-  assert.ok(policy.URLBlocklist.includes("chrome-extension://*"), "every other extension page stays blocked");
+  assert.ok(!policy.URLBlocklist.includes("chrome-extension://*"), "Bitwarden's inline menu frames have dynamic ids no allowlist entry can name");
   assert.deepEqual(policy.URLAllowlist, ["about:blank", "chrome://newtab", `chrome-extension://${BITWARDEN.id}/*`]);
   for (const store of ["chromewebstore.google.com", "chrome.google.com/webstore"]) assert.ok(policy.URLBlocklist.includes(store), store);
-  for (const blocked of base.URLBlocklist) assert.ok(policy.URLBlocklist.includes(blocked), blocked);
+  for (const blocked of base.URLBlocklist.filter((u) => u !== "chrome-extension://*")) assert.ok(policy.URLBlocklist.includes(blocked), blocked);
+  assert.match(bwFile("install-bitwarden.py"), /for name, values in overlay\.get\("drop", \{\}\)\.items\(\):/);
   assert.deepEqual(policy.DownloadRestrictions, 3);
   assert.deepEqual(policy.AllowFileSelectionDialogs, false);
 });

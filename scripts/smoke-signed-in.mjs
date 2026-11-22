@@ -593,8 +593,8 @@ async function bitwardenChecks({ agent, neko, helper, pageByMarker }) {
     JSON.stringify(policy.ExtensionAllowedTypes) === '["extension"]' && Array.isArray(policy.ExtensionInstallSources) && policy.ExtensionInstallSources.length === 0 && policy.BlockExternalExtensions === true && policy.URLBlocklist.includes("chromewebstore.google.com"),
   );
   check(
-    "policy: only Bitwarden's own extension pages are allowed back; every other chrome-extension:// stays blocked",
-    policy.URLBlocklist.includes("chrome-extension://*") && policy.URLAllowlist.filter((u) => u.startsWith("chrome-extension://")).join(",") === `${ext}/*`,
+    "policy: extension pages are not blocked by URL (Bitwarden's dynamic frame ids), every other internal page still is",
+    !policy.URLBlocklist.includes("chrome-extension://*") && ["chrome://*", "devtools://*", "view-source:*", "file://*", "data:*"].every((u) => policy.URLBlocklist.includes(u)),
   );
   const args = exec("sh", "-c", 'tr "\\0" "\\n" < /proc/$(pgrep -o -f "^/usr/lib/chromium/chromium --show")/cmdline');
   check("Chromium: loads only /opt/bitwarden and disables every other extension", /^--load-extension=\/opt\/bitwarden$/m.test(args) && /^--disable-extensions-except=\/opt\/bitwarden$/m.test(args));

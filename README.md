@@ -931,8 +931,10 @@ Paseo server (see [SECURITY.md](SECURITY.md#bitwarden-in-the-signed-in-browser))
   it never updates itself; a plugin release moves the pin and asks you to download again. An idle
   browser picks it up at its next start (or press **Restart**); a running run keeps its browser.
 - **Only Bitwarden:** every other extension is disabled (`--disable-extensions-except`), extension
-  types and install sources are locked, the Chrome Web Store is blocked, and only Bitwarden's own
-  `chrome-extension://` pages are allowed back. Chromium's own password manager and autofill stay off.
+  types and install sources are locked, and the Chrome Web Store is blocked. Extension pages are not
+  blocked by URL in this variant (Bitwarden's inline menu frames use per-session dynamic ids that no
+  allowlist entry can name); the agent is kept off them by its filters. Chromium's own password
+  manager and autofill stay off.
 - **Use it in a new tab** where you can: tap the mouse icon to take control, open a new tab (+), log
   in with Bitwarden there, close the tab and release control. **Every time you release control (or
   close the viewer), the vault is locked before the run goes on:** the relay keeps the run paused,

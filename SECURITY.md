@@ -342,12 +342,17 @@ pinning), a CRX with the store id can only come from the store, and Chromium's
 `ExtensionInstallBlocklist: ["*"]` also blocks an extension loaded from the command line, even when
 its id is allowlisted (checked with Chromium 155).
 
-**Only Bitwarden, and only its own pages.** `--disable-extensions-except=/opt/bitwarden` disables
-every other extension Chromium might find; the policy allows only the `extension` type, no install
-sources and no external extensions, blocks the Chrome Web Store (`chromewebstore.google.com`,
-`chrome.google.com/webstore`), and allows only `chrome-extension://nngceck…/*` back while every
-other `chrome-extension://` stays blocked. Downloads, file pickers and `chrome://` stay blocked
-(no developer mode, no unpacked extensions). Chromium's own password manager and address and card
+**Only Bitwarden.** `--disable-extensions-except=/opt/bitwarden` disables every other extension
+Chromium might find; the policy allows only the `extension` type, no install sources and no
+external extensions, and blocks the Chrome Web Store (`chromewebstore.google.com`,
+`chrome.google.com/webstore`). Downloads, file pickers and `chrome://` stay blocked (no developer
+mode, no unpacked extensions). **Extension pages are no longer blocked by URL in this variant**
+(the plain signed-in browser blocks `chrome-extension://*`): Bitwarden's inline menu and
+notification frames use per-session dynamic ids (`chrome-extension://<random>/overlay/…`, from
+`use_dynamic_url` in its manifest), which no allowlist entry can name, and with the block the inline
+menu does not load (checked in the smoke test). The only extension pages left are Bitwarden's and
+Chromium's built-in component pages (such as the PDF viewer); the agent is kept off all of them by
+the filters below, and web pages can open Bitwarden's pages only where Bitwarden itself allows it. Chromium's own password manager and address and card
 autofill stay off, so only Bitwarden fills. The policy and the extension's files are read-only for
 the browser user.
 

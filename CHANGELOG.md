@@ -19,7 +19,9 @@
   on the desktop and confirmed it for that release. Fail closed: without the lock the run stays
   paused.
 - Only Bitwarden: every other extension is disabled, extension types and install sources are
-  locked, the Chrome Web Store is blocked, and only Bitwarden's own extension pages are allowed back.
+  locked and the Chrome Web Store is blocked. Extension pages are not blocked by URL in this variant:
+  Bitwarden's inline menu frames use per-session dynamic ids that no allowlist entry can name (the
+  agent is kept off them by the filters).
   Chromium's own password manager and autofill stay off.
 - **Turn Bitwarden off** removes it and its data from the profile at the browser's next start (an
   idle browser restarts now). The signed-in image is rebuilt once (its start script changed).
