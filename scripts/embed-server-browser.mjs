@@ -22,7 +22,7 @@ export const SERVER_BROWSER_FILE_NAMES = [
 export const SERVER_BROWSER_RUNTIME_FILE_NAMES = ["launch.mjs", "seccomp.json"];
 
 /** The signed-in Server browser image's build context (signed-in/): neko plus the plugin's overrides. */
-export const SIGNED_IN_FILE_NAMES = ["Dockerfile", "chromium-start.sh", "chromium.conf", "policies.json", "viewer.css"];
+export const SIGNED_IN_FILE_NAMES = ["Dockerfile", "chromium-start.sh", "chromium.conf", "policies.json", "viewer.css", "viewer.js"];
 /** The Bitwarden variant's build context (signed-in-bitwarden/): built on the signed-in image only after the owner's consent. */
 export const SIGNED_IN_BITWARDEN_FILE_NAMES = ["Dockerfile", "bitwarden.json", "install-bitwarden.py", "policy-overlay.json"];
 

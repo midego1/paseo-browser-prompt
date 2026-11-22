@@ -20,7 +20,9 @@
 // in through the key flow (cookie with a random name, scoped to a random path), takes control (the
 // agent's tool calls are paused meanwhile), taps and types into the agent's page, and releases it;
 // the same with WebKit as an iPad, an iPhone and desktop Safari, pressing every neko control their
-// layout shows, without one refused request or "Blocked" toast;
+// layout shows, without one refused request or "Blocked" toast; on the iPad a hardware keyboard
+// types right after a tap (no keyboard button, Shift, Backspace, arrows, Enter), the on-screen
+// keyboard (iPad, iPhone) keeps capitals and symbols, desktop Safari types as before;
 // one run at a time; a cookie survives a neko restart; the relay refuses /metrics, admin APIs,
 // foreign Host and foreign-Origin WebSockets; no STUN servers; the hardening as Docker reports it;
 // and the cleanup.
@@ -380,7 +382,9 @@ process.exit(0);`;
       ["desktop Safari", devices["Desktop Safari"], false],
     ]) {
       if (!webkitBrowser) break;
-      helper(`${pageByMarker("bp-smoke=takeover")} await page.bringToFront(); await page.evaluate(() => { window.clicks = 0; document.getElementById("user").value = ""; }); return 1;`);
+      helper(`${pageByMarker("bp-smoke=takeover")} await page.bringToFront(); await page.evaluate(() => { window.clicks = 0; window.keys = []; const user = document.getElementById("user"); user.value = ""; if (!window.bpKeysHooked) { window.bpKeysHooked = true; user.addEventListener("keydown", (e) => window.keys.push(e.key)); } }); return 1;`);
+      const remote = () => helper(`${pageByMarker("bp-smoke=takeover")} return page.evaluate(() => ({ user: document.getElementById("user").value, clicks: window.clicks || 0, keys: window.keys.join(" ") }));`);
+      const captureState = () => wpage.evaluate(() => { const t = document.querySelector("canvas + textarea"); return { focused: !!t && document.activeElement === t, inputMode: t?.getAttribute("inputmode") ?? null, autocorrect: t?.getAttribute("autocorrect") ?? null, autocapitalize: t?.getAttribute("autocapitalize") ?? null, spellcheck: t?.spellcheck ?? null }; });
       const wlink = await si.viewerLink({ purpose: "takeover", portrait: phoneLink });
       const ctx = await webkitBrowser.newContext({ ...descriptor });
       const wpage = await ctx.newPage();
@@ -410,26 +414,61 @@ process.exit(0);`;
         await wpage.waitForTimeout(2500);
         r = await agent.call("browser_snapshot", {});
         check(`WebKit ${name}: Request controls takes control (the run pauses)`, r.error && /owner has taken over/.test(r.text), r.text.slice(0, 70));
+        const touch = !!descriptor.hasTouch;
+        let cap = await captureState();
+        check(
+          `WebKit ${name}: neko's key textarea without autocorrect, autocapitalize or spell check${touch ? ", focused once control arrives, no on-screen keyboard (inputmode none)" : ""}`,
+          cap.autocorrect === "off" && cap.autocapitalize === "off" && cap.spellcheck === false && (!touch || (cap.focused && cap.inputMode === "none")),
+          JSON.stringify(cap),
+        );
         const vbox = await wpage.locator("video").first().boundingBox();
         const sc = Math.min(vbox.width / wvideo.w, vbox.height / wvideo.h);
         const wat = (fx, fy) => ({ x: vbox.x + (vbox.width - wvideo.w * sc) / 2 + wvideo.w * sc * fx, y: vbox.y + (vbox.height - wvideo.h * sc) / 2 + wvideo.h * sc * fy });
-        const touch = !!descriptor.hasTouch;
+        // Touch: blur it first, the tap on the video must focus it by itself.
+        if (touch) await wpage.evaluate(() => document.querySelector("canvas + textarea")?.blur());
         for (const [fx, fy] of [[0.5, 0.85], [0.5, 0.85], [0.5, 0.3]]) {
           const p = wat(fx, fy);
           if (touch) await wpage.touchscreen.tap(p.x, p.y);
           else await wpage.mouse.click(p.x, p.y);
           await wpage.waitForTimeout(600);
         }
+        let expected = "";
+        if (name.startsWith("iPad") || !touch) {
+          // A hardware keyboard (an iPad's Magic Keyboard): keydown/keyup only, no keyboard button.
+          cap = await captureState();
+          if (touch) check(`WebKit ${name}: a tap on the video focuses the key textarea without the on-screen keyboard`, cap.focused && cap.inputMode === "none", JSON.stringify(cap));
+          await wpage.keyboard.type("safari", { delay: 60 });
+          await wpage.keyboard.press("Shift+KeyA");
+          await wpage.keyboard.press("x");
+          await wpage.keyboard.press("Backspace");
+          await wpage.keyboard.press("ArrowLeft");
+          await wpage.keyboard.press("1");
+          await wpage.keyboard.press("ArrowRight");
+          await wpage.keyboard.press("Enter");
+          await wpage.waitForTimeout(1000);
+          expected = "safari1A";
+          const hw = remote();
+          check(
+            `WebKit ${name}: hardware-keyboard typing reaches the agent's page${touch ? " without the keyboard button" : ""} (Shift, Backspace, arrows, Enter)`,
+            hw?.user === expected && /Shift A x Backspace ArrowLeft 1 ArrowRight Enter$/.test(hw?.keys ?? ""),
+            JSON.stringify(hw),
+          );
+        }
         if (touch) {
+          // The on-screen keyboard: neko's keyboard button, then text input as iOS sends it.
           const wkeyboard = wpage.locator("[data-testid=keyboard-toggle]");
           check(`WebKit ${name}: keyboard toggle shown while in control`, (await wkeyboard.count()) > 0);
           if (await wkeyboard.count()) await wkeyboard.first().tap().catch(() => {});
           await wpage.waitForTimeout(300);
+          cap = await captureState();
+          check(`WebKit ${name}: the keyboard button opens the on-screen keyboard (focused, inputmode text)`, cap.focused && cap.inputMode === "text", JSON.stringify(cap));
+          await wpage.keyboard.insertText("Pw!@");
+          await wpage.keyboard.type("safari", { delay: 60 });
+          await wpage.waitForTimeout(1000);
+          expected += "Pw!@safari";
         }
-        await wpage.keyboard.type("safari", { delay: 60 });
-        await wpage.waitForTimeout(1000);
-        const wseen = helper(`${pageByMarker("bp-smoke=takeover")} return page.evaluate(() => ({ user: document.getElementById("user").value, clicks: window.clicks || 0 }));`);
-        check(`WebKit ${name}: taps and typing reach the agent's page`, wseen?.user === "safari" && wseen?.clicks === 2, JSON.stringify(wseen));
+        const wseen = remote();
+        check(`WebKit ${name}: taps and typing reach the agent's page${touch ? " (on-screen keyboard text keeps capitals and symbols)" : ""}`, wseen?.user === expected && wseen?.clicks === 2, JSON.stringify(wseen));
         check(`WebKit ${name}: no refused requests and no "Blocked" toast`, wrefused.length === 0 && (await blockedToasts()) === 0, wrefused.join(", "));
         if (BITWARDEN_ON) {
           // Release control with the viewer's own button: the vault is locked before the run goes on.
