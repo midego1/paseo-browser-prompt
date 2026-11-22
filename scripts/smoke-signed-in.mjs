@@ -17,6 +17,17 @@
 // one run at a time; a cookie survives a neko restart; the relay refuses /metrics, admin APIs,
 // foreign Host and foreign-Origin WebSockets; no STUN servers; the hardening as Docker reports it;
 // and the cleanup.
+//
+// Bitwarden (on unless SMOKE_BITWARDEN=0; every check above then runs with it installed): the pinned
+// release is downloaded (the consent bypass, again only here) and built into the image; the pin,
+// read-only files, policies (only extension, store blocked, Chromium's password manager off) and the
+// command line; it loads and its content script is on https pages and intercepts
+// navigator.credentials (webauthn.io); the agent never sees, attaches to or opens any extension
+// target or chrome-extension:// page (through its MCP and through the same DevTools filter used
+// directly); a real Bitwarden frame inside the agent's tab stays unreadable and unclickable for it;
+// the lock shortcut reaches Chromium as a command (the page never sees it); the relay keeps the run
+// paused until the vault is locked, also after a takeover from WebKit (Safari's engine, in a
+// container on the stack's outward network).
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { request } from "node:http";
@@ -32,10 +43,13 @@ const { createServerBrowser } = await import("../server/server-browser.ts");
 const { createSignedIn } = await import("../server/signed-in.ts");
 const instanceId = `smoke-${Math.random().toString(16).slice(2, 10)}`;
 const sb = createServerBrowser({ instanceId, runtimeRoot: join(state, "rt"), buildRoot: join(state, "build") });
+const BITWARDEN_ON = process.env.SMOKE_BITWARDEN !== "0";
+const { BITWARDEN, bitwardenLockArgs } = await import("../shared/signed-in.ts");
+let locks = 0;
 const si = createSignedIn({
   serverBrowser: sb,
   bindHost: async () => "127.0.0.1",
-  config: async () => ({ port: PORT, httpsBaseUrl: "" }),
+  config: async () => ({ port: PORT, httpsBaseUrl: "", bitwarden: BITWARDEN_ON }),
   keysFile: join(state, "keys.json"),
   buildRoot: join(state, "build"),
 });
@@ -128,6 +142,8 @@ function upgrade(headers, path) {
 
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 let browser = null;
+// The daemon's lock check (startIdleChecks runs it in the plugin): presses Bitwarden's Lock when the relay asks.
+const lockTimer = setInterval(() => void si.lockCheck().then((done) => done && locks++), 1000);
 try {
   // 1. Images (the consent bypass: only in this script).
   let status = await si.status({ build: true });
@@ -136,6 +152,17 @@ try {
     status = await si.status();
   }
   check("images ready", status.state === "ready" || status.state === "running", `${status.serverImage}, ${status.image}`);
+  if (BITWARDEN_ON) {
+    // The consent bypass for Bitwarden's download: only in this script.
+    const started = Date.now();
+    const answer = await si.bitwarden("download");
+    status = await si.status();
+    while (status.bitwarden.state === "building") {
+      await sleep(3000);
+      status = await si.status();
+    }
+    check("Bitwarden: pinned release downloaded, verified and built into the image", answer.ok && status.bitwarden.state === "ready", `${si.bitwardenImage}, ${Date.now() - started} ms${status.bitwarden.detail ? `, ${status.bitwarden.detail}` : ""}`);
+  }
 
   // 2. Start.
   const started = Date.now();
@@ -244,6 +271,7 @@ process.exit(0);`;
   }
   r = await agent.call("browser_navigate", { url: "https://example.com" });
   check("normal https still works after the internal-page checks", !r.error && /Example Domain/.test(r.text));
+  if (BITWARDEN_ON) await bitwardenChecks({ agent, neko, helper, pageByMarker, status });
   r = await agent.call("browser_tabs", { action: "new", url: "https://example.com/?bp-smoke=takeover" });
   helper(`${pageByMarker("bp-smoke=takeover")} await page.bringToFront(); await page.evaluate(() => { document.body.innerHTML = '<input id=user autocomplete=off style="position:fixed;left:0;top:0;width:100vw;height:45vh;font-size:40px"><button id=btn style="position:fixed;left:0;top:55vh;width:100vw;height:45vh;font-size:40px" onclick="window.clicks=(window.clicks||0)+1">tap</button>'; }); return 1;`);
   const busy = await si.prepare({ sourceId: "smoke", cardId: "card" });
@@ -307,7 +335,8 @@ process.exit(0);`;
   check("takeover: the phone's taps and typing reach the agent's page", seen?.user === "alice" && seen?.clicks === 2, JSON.stringify(seen));
   check("viewer: no refused requests from the neko client", refused.length === 0, refused.join(", "));
   await page.close();
-  await sleep(3500);
+  // The relay resets control (and with Bitwarden, the daemon locks the vault first): give it a few seconds.
+  await sleep(BITWARDEN_ON ? 6000 : 3500);
   r = await agent.call("browser_snapshot", {});
   check("closing the viewer without releasing control resets it: the run goes on", !r.error, r.error ? r.text.slice(0, 80) : "");
 
@@ -347,6 +376,7 @@ process.exit(0);`;
   const control = helper(`return (await fetch("http://${relayName}:8081/control")).json();`);
   check("relay: takeover state reachable from the run's network namespace", control && typeof control.ownerControl === "boolean", JSON.stringify(control));
   const relayPublicIp = inspect(relayName, `{{(index .NetworkSettings.Networks "${neko.replace(/-neko$/, "-pub")}").IPAddress}}`);
+  if (BITWARDEN_ON) await webkitTakeover({ neko, relayPublicIp, agent, serverImage: status.serverImage });
   const fromPublic = docker("exec", proxyName, "node", "-e", `fetch("http://${relayPublicIp}:8081/control",{signal:AbortSignal.timeout(3000)}).then(()=>console.log("open"),()=>console.log("refused"))`);
   check("relay: the takeover port is not on the outward network", fromPublic === "refused", fromPublic);
 
@@ -388,6 +418,7 @@ process.exit(0);`;
 } catch (error) {
   check("smoke run", false, error instanceof Error ? error.stack : String(error));
 } finally {
+  clearInterval(lockTimer);
   if (browser) await browser.close().catch(() => {});
   // 8. Cleanup: everything but the images.
   await si.logout().catch((error) => console.log(`logout failed: ${error.message}`));
