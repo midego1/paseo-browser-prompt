@@ -1736,7 +1736,18 @@ test("chromium-start.sh: records the installed Bitwarden build and removes the d
   mkdirSync(join(dir, "profile"), { recursive: true });
   for (const path of [...data(oldId), ...data(newId), "Default/Local Extension Settings/other"]) mkdirSync(join(dir, "profile", path), { recursive: true });
   writeFileSync(join(dir, "profile", ".bp-bitwarden-ids"), `${oldId}\n`);
-  writeFileSync(join(dir, "profile", "Default", "Preferences"), JSON.stringify({ extensions: { settings: { [oldId]: { location: 7 }, [newId]: { location: 7 }, other: { location: 5 } }, external_uninstalls: [oldId], pinned: [`chrome-extension://${oldId}/popup`, "x"] }, keep: `chrome-extension://${newId}/a` }));
+  writeFileSync(
+    join(dir, "profile", "Default", "Preferences"),
+    JSON.stringify({
+      extensions: {
+        settings: { [oldId]: { location: 7 }, [newId]: { location: 7 }, other: { location: 5 } },
+        external_uninstalls: [oldId],
+        pinned: [`chrome-extension://${oldId}/popup`, "x"],
+        commands: { "linux:Ctrl+Shift+9": { command_name: "generate_password", extension: oldId, global: false }, "linux:Ctrl+Shift+L": { command_name: "autofill_login", extension: newId, global: false } },
+      },
+      keep: `chrome-extension://${newId}/a`,
+    }),
+  );
   writeFileSync(join(dir, "profile", "Default", "Secure Preferences"), JSON.stringify({ protection: { macs: { extensions: { settings: { [oldId]: "m", other: "m" } } } } }));
   // Bitwarden with a new build (a new pin): the new id is recorded, the old build's data goes.
   writeFileSync(join(dir, "pin.json"), JSON.stringify({ version: "x", id: newId }));
@@ -1747,7 +1758,19 @@ test("chromium-start.sh: records the installed Bitwarden build and removes the d
   for (const path of data(oldId)) assert.equal(existsSync(join(dir, "profile", path)), false, `${path} removed`);
   for (const path of data(newId)) assert.equal(existsSync(join(dir, "profile", path)), true, `${path} kept`);
   const prefs = JSON.parse(readFileSync(join(dir, "profile", "Default", "Preferences"), "utf8"));
-  assert.deepEqual(prefs, { extensions: { settings: { [newId]: { location: 7 }, other: { location: 5 } }, external_uninstalls: [], pinned: ["x"] }, keep: `chrome-extension://${newId}/a` }, "the old build's preference entries are gone");
+  assert.deepEqual(
+    prefs,
+    {
+      extensions: {
+        settings: { [newId]: { location: 7 }, other: { location: 5 } },
+        external_uninstalls: [],
+        pinned: ["x"],
+        commands: { "linux:Ctrl+Shift+L": { command_name: "autofill_login", extension: newId, global: false } },
+      },
+      keep: `chrome-extension://${newId}/a`,
+    },
+    "the old build's preference entries (settings, uninstall records, shortcuts) are gone",
+  );
   assert.deepEqual(JSON.parse(readFileSync(join(dir, "profile", "Default", "Secure Preferences"), "utf8")), { protection: { macs: { extensions: { settings: { other: "m" } } } } });
   assert.equal(readFileSync(join(dir, "profile", ".bp-bitwarden-ids"), "utf8"), `${oldId}\n${newId}\n`);
   // Bitwarden off: every recorded build's data goes; nothing else.
@@ -2001,7 +2024,7 @@ test("Bitwarden lock: only when the relay asks; verified through DevTools (lock,
   assert.equal(docker.state.tools.length, 0, "at most every 15 seconds");
 });
 
-test("Bitwarden cleanup: the storage of builds no longer installed is cleared through DevTools once Chromium runs, then forgotten", async () => {
+test("Bitwarden cleanup: the storage of builds no longer installed is cleared through DevTools once Chromium runs", async () => {
   const docker = fakeStackDocker();
   const { si } = makeSignedIn(docker, { config: async () => ({ port: 5301, httpsBaseUrl: "", bitwarden: false }) });
   await si.viewerLink({ purpose: "login", portrait: false });
@@ -2012,8 +2035,9 @@ test("Bitwarden cleanup: the storage of builds no longer installed is cleared th
   docker.state.tool = (mode, ids) => (mode === "cleanup" ? { cleared: ids } : { locked: true });
   assert.deepEqual(await si.cleanupOldBitwarden(), [oldA, oldB]);
   assert.deepEqual(docker.state.tools.map((t) => `${t.mode} ${t.ids.join(",")}`), [`cleanup ${oldA},${oldB}`]);
-  assert.equal(docker.state.idsFile, "", "forgotten once cleared");
-  assert.deepEqual(await si.cleanupOldBitwarden(), []);
+  assert.equal(docker.state.idsFile, `${oldA}\n${oldB}\n../etc\n`, "kept: the start script cleans leftovers on every start");
+  docker.state.tools = [];
+  assert.deepEqual(await si.cleanupOldBitwarden(), [oldA, oldB], "idempotent");
 });
 
 test("DevTools filter: extension targets are hidden everywhere, the run cannot open extension pages, and clicks on extension frames are checked", () => {

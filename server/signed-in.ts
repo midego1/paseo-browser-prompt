@@ -839,8 +839,9 @@ export function createSignedIn(options: SignedInOptions) {
     for (let i = 0; i < 5; i++) {
       const answer = await bitwardenTool("cleanup", old);
       if (answer?.cleared && answer.cleared.length === old.length) {
-        await docker(["exec", "--user", "neko", names.neko, "sh", "-c", `printf '%s' '${current ? `${current}\n` : ""}' > ${file}`], 15_000).catch(() => undefined);
-        log(`removed the data of ${old.length} earlier Bitwarden build(s) from the profile`);
+        // The ids stay recorded: the start script cleans their leftovers on every start (Chromium can
+        // bring back an empty preference stub for a replaced build once; it holds no data).
+        log(`cleared the storage of ${old.length} earlier Bitwarden build(s)`);
         return old;
       }
       await sleep(3000);

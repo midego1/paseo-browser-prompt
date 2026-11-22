@@ -464,9 +464,11 @@ with a new id: the old one is uninstalled and **its local data is removed** (you
 and log in again). **Turn Bitwarden off**: the browser starts without it (an idle browser restarts
 now; under a run the settings show "Update pending" and it switches when the run ends). Chromium
 uninstalls the force-installed extension (and deletes its data), the start script removes the data
-directories of every Bitwarden build the profile has seen (recorded in `.bp-bitwarden-ids`), and
-the daemon clears those extension origins' storage through DevTools (service worker, local storage,
-IndexedDB). **Log out of everything** removes the whole profile. The variant images stay until you
+directories of every Bitwarden build the profile has seen (recorded in `.bp-bitwarden-ids`), the
+shared extension databases (Extension State, Rules, Scripts) and their preference entries (settings,
+uninstall records, shortcuts, MACs) on every start, and the daemon clears those extension origins'
+storage through DevTools (service worker, local storage, IndexedDB). After a new pin Chromium may
+bring back an empty preference entry for the replaced build once (no data); the next start removes it. **Log out of everything** removes the whole profile. The variant images stay until you
 remove them: `docker image ls 'browser-prompt-signed-in'` and `docker image rm <tag>-bw…`.
 
 ## Design limits

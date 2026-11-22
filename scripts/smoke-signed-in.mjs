@@ -966,8 +966,11 @@ async function bitwardenLifecycle({ neko, relayName, helper }) {
   check("the run ended: neko is stopped gracefully and starts again with the new image", image === si2.bitwardenImage, image);
   const id2 = JSON.parse(docker("exec", neko, "cat", "/opt/bitwarden/browser-prompt-pin.json")).id;
   check("pin bump: the new build has its own id and is installed", id2 !== id1 && !!(await until(async () => swOf(id2), 60_000, 2000)), `${id1} -> ${id2}`);
-  const cleaned1 = await until(async () => profileFind(id1) === "", 60_000, 3000);
-  check("pin bump: the old build and its data are gone from the profile (files, preferences, storage)", !!cleaned1, profileFind(id1));
+  // Files and storage go at once; Chromium may bring back an empty preference stub for the replaced
+  // build once (no data), which the next start removes (checked after turning Bitwarden off below).
+  const dataOf = (id) => exec("sh", "-c", `find /home/neko/.config/chromium -name '*${id}*' 2>/dev/null | head -5; true`).trim();
+  const cleaned1 = await until(async () => dataOf(id1) === "", 60_000, 3000);
+  check("pin bump: the old build's files and data are gone from the profile", !!cleaned1, dataOf(id1));
   const lock = await si2.lockNow();
   check("pin bump: the lock is verified with the new build", lock.ok, lock.detail);
 
@@ -976,8 +979,8 @@ async function bitwardenLifecycle({ neko, relayName, helper }) {
   const off = await si2.bitwarden("apply");
   await si2.viewerLink({ purpose: "login", portrait: false });
   check("turned off: the browser starts without Bitwarden", off.ok && !/-bw/.test(docker("inspect", "--format", "{{.Config.Image}}", neko)) && !(await until(async () => swOf(id2), 8000, 2000)));
-  const cleaned2 = await until(async () => profileFind(id2) === "" && exec("sh", "-c", "cat /home/neko/.config/chromium/.bp-bitwarden-ids 2>/dev/null; true").trim() === "", 60_000, 3000);
-  check("turned off: Bitwarden and its data are gone from the profile (files, preferences, storage, recorded ids)", !!cleaned2, profileFind(id2));
+  const cleaned2 = await until(async () => profileFind(id2) === "" && profileFind(id1) === "", 60_000, 3000);
+  check("turned off: every Bitwarden build and its data are gone from the profile (files, preferences, storage)", !!cleaned2, `${profileFind(id2)} ${profileFind(id1)}`);
   bitwardenChoice = BITWARDEN_ON;
 }
 

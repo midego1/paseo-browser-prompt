@@ -6,8 +6,9 @@
 # host addresses. Without a valid BP_PROXY it does not start Chromium at all.
 # Bitwarden (only in the image variant built after the owner's consent, see signed-in-bitwarden/):
 # the variant force-installs it by policy, with an id made for that build. This script records the
-# ids of the Bitwarden builds the profile has seen (.bp-bitwarden-ids) and removes the data of every
-# one not installed now: all of them when Bitwarden is off, the old one after a new pin. (Chromium
+# ids of the Bitwarden builds the profile has seen (.bp-bitwarden-ids) and, on every start, removes
+# what is left of every one not installed now: all of them when Bitwarden is off, the old one after a
+# new pin (data directories, the shared extension databases, preference entries). (Chromium
 # itself uninstalls a force-installed extension once the policy no longer names it, and the plugin
 # clears the extension origins' storage through DevTools after the start.)
 PROFILE=/home/neko/.config/chromium
@@ -36,16 +37,27 @@ if [ -f "$IDS" ]; then
         "$dir/IndexedDB/chrome-extension_${id}_0.indexeddb.blob" "$dir/File System/chrome-extension_${id}_0"
     done
   done
-  # Their entries in Chromium's preferences (settings, uninstall records, MACs), before Chromium reads them.
+  # Chromium's shared extension databases (state, rules, dynamic scripts) are keyed by extension id;
+  # Bitwarden is the only extension besides Chromium's own components, which rebuild their entries.
+  if [ -n "$STALE" ]; then
+    for dir in "$PROFILE"/Default "$PROFILE"/Profile*; do
+      [ -d "$dir" ] && rm -rf "$dir/Extension State" "$dir/Extension Rules" "$dir/Extension Scripts"
+    done
+  fi
+  # Their entries in Chromium's preferences (settings, uninstall records, shortcuts, MACs), before Chromium reads them.
   if [ -n "$STALE" ] && command -v python3 >/dev/null 2>&1; then
     python3 -I -c '
 import json, os, sys
 stale = set(sys.argv[2:])
+def names(v):
+    return isinstance(v, str) and (v in stale or any(("chrome-extension://" + s) in v for s in stale))
 def clean(value):
     if isinstance(value, dict):
-        return {k: clean(v) for k, v in value.items() if k not in stale}
+        # Drop entries named after a stale build, and records that point at one (keyboard shortcuts:
+        # {"extension": id, ...}), so Chromium does not bring them back.
+        return {k: clean(v) for k, v in value.items() if k not in stale and not names(v) and not (isinstance(v, dict) and any(names(x) for x in v.values()))}
     if isinstance(value, list):
-        return [clean(v) for v in value if not (isinstance(v, str) and (v in stale or any(("chrome-extension://" + s) in v for s in stale)))]
+        return [clean(v) for v in value if not names(v)]
     return value
 for root, dirs, files in os.walk(sys.argv[1]):
     if root.count(os.sep) - sys.argv[1].count(os.sep) > 1:
