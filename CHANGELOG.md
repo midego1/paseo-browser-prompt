@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.22.2 (unreleased)
+
+- Signed-in browser on an iPad (Safari): no more "Blocked by the browser-prompt relay." toast, and
+  you can type. The viewer logged you in to neko as an admin, so on a tablet or computer neko showed
+  its admin buttons (the mouse and lock icons at the top lock the room's controls and logins; the
+  settings tab had room toggles and a broadcast field), and the relay refused each of them. You now
+  log in as a regular member that can watch and take control, so neko no longer shows them; take
+  control with **Request controls** at the bottom, as before. Only the relay's own service login is
+  an admin. neko's screen resolution menu (an admin action) is gone with them; the relay still
+  switches to a portrait stream for phones.
+- The on-screen keyboard button now shows on iPads: neko showed it only on screens up to 768 px
+  wide, so an iPad could tap into the page but not type. The signed-in image links a small
+  stylesheet (`signed-in/viewer.css`) that shows it on touch screens of any width. The image is
+  rebuilt once (it is tagged with a hash of its build context).
+- Safari fetched neko's `site.webmanifest` without the viewer cookie and got a 401; the relay now
+  answers that one path itself with a constant manifest.
+- The relay also logs a write it refuses for a missing or foreign Origin (method and path only).
+- Smoke test: the viewer checks now also run in WebKit (iPad as iPadOS Safari reports itself,
+  iPhone, desktop Safari), press every neko control those layouts show, and require no refused
+  request and no "Blocked" toast; taps and typing must reach the agent's page.
+
 ## 0.22.1 (unreleased)
 
 - When a signed-in Server browser run waits for you (a login or a 2FA code), the card shows a

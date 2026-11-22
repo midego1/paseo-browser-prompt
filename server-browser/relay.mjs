@@ -5,11 +5,14 @@
 //   1. Owner login with the plugin's key: Paseo hands the owner a link whose URL fragment holds a
 //      one-time ticket signed with this relay start's key (never in a query string, so never in
 //      logs). The page at /bp/open posts it to /bp/session; the relay checks it (signature, expiry,
-//      used once), logs in to neko as an admin with a generated password the owner never sees, and
+//      used once), logs in to neko as a regular member (watch and take control, no admin rights) with
+//      a generated password the owner never sees, and
 //      sets an HttpOnly, SameSite=Strict cookie with a random name, scoped to a random path prefix
 //      of this relay start (the viewer lives under it), valid 2 hours and 20 minutes without use,
 //      and bound to the peer address. neko's own token never reaches the browser: the relay adds
-//      it to every request it forwards.
+//      it to every request it forwards. Not an admin: neko's client then neither shows nor calls its
+//      admin actions (room locks and settings, broadcast, kicking members), which the relay refuses
+//      anyway. Only the relay's own service login (screen size, control state and reset) is an admin.
 //   2. A narrow allowlist: neko's web client files, the WebSocket and the few API routes the client
 //      needs to watch and take control. Everything else (member and session management, uploads,
 //      file transfer, broadcast, metrics, health, debug) is refused. Host and Origin are checked on
@@ -44,6 +47,12 @@ export const MAX_SESSIONS = 32;
  */
 export const BAD_TICKET_DELAY_MS = 500;
 export const BLOCKED_TEXT = "Blocked by the browser-prompt relay.";
+/**
+ * The web app manifest neko's page links to. Browsers fetch it without cookies (Safari/WebKit does,
+ * so it never had a session), so the relay answers it itself under the viewer prefix, session or
+ * not: a constant, nothing of neko's.
+ */
+export const MANIFEST = JSON.stringify({ name: "Signed-in browser", short_name: "Signed-in browser", display: "browser", background_color: "#111111", theme_color: "#19bd9c" });
 
 const TICKET = /^v1\.(\d{10})\.([A-Za-z0-9_-]{16,64})\.(login|takeover)\.([A-Za-z0-9_-]{43})$/;
 
@@ -214,7 +223,8 @@ export function parseScreen(text) {
 
 /**
  * Starts the relay. Options: `nekoHost`, `nekoPort`, `listenPort`, `listenHost`, `rtcPort` (0: no
- * ICE-TCP forward), `origins` (list), `secret`, `statusToken`, `adminPassword`, `landscape`,
+ * ICE-TCP forward), `origins` (list), `secret`, `statusToken`, `adminPassword` (the relay's own
+ * service login), `userPassword` (the owner's viewer logins, no admin rights), `landscape`,
  * `portrait`, `log`, `now`, `nekoRequest` (tests). Returns `{ port, rtcPort, close(), state() }`.
  */
 export async function startRelay(options) {
@@ -229,6 +239,7 @@ export async function startRelay(options) {
     secret,
     statusToken,
     adminPassword,
+    userPassword,
     log = () => {},
     now = Date.now,
   } = options;
@@ -240,6 +251,7 @@ export async function startRelay(options) {
   if (!secret || secret.length < 32) throw new Error("the viewer secret is missing");
   if (!statusToken || statusToken.length < 32) throw new Error("the status token is missing");
   if (!adminPassword) throw new Error("the neko admin password is missing");
+  if (!userPassword || userPassword === adminPassword) throw new Error("the neko user password is missing");
   if (!nekoHost) throw new Error("the neko address is missing");
   if (origins.length === 0) throw new Error("no viewer origin");
 
@@ -328,9 +340,10 @@ export async function startRelay(options) {
     });
   }
 
-  async function nekoLogin(prefix) {
+  /** A neko login: the relay's service login as an admin, the owner's viewer logins as a regular member. */
+  async function nekoLogin(prefix, password = adminPassword) {
     const username = `${prefix}-${randomBytes(3).toString("hex")}`;
-    const result = await nekoJson("POST", "/api/login", { username, password: adminPassword });
+    const result = await nekoJson("POST", "/api/login", { username, password });
     const token = result.body && typeof result.body.token === "string" ? result.body.token : null;
     if (result.status !== 200 || !token) throw new Error(`neko login failed (${result.status})`);
     return token;
@@ -440,7 +453,7 @@ export async function startRelay(options) {
     usedNonces.set(checked.nonce, checked.exp);
     let token;
     try {
-      token = await nekoLogin("owner");
+      token = await nekoLogin("owner", userPassword);
     } catch (error) {
       usedNonces.delete(checked.nonce);
       log(`could not log in to neko: ${error instanceof Error ? error.message : String(error)}`);
@@ -530,6 +543,9 @@ export async function startRelay(options) {
       if (path === "/bp/session" && req.method === "POST") return await createSession(req, res);
       // Everything else of the viewer lives under this relay start's prefix.
       const inner = path === prefix ? "/" : path.startsWith(`${prefix}/`) ? path.slice(prefix.length) : null;
+      if (inner === "/site.webmanifest" && (req.method === "GET" || req.method === "HEAD")) {
+        return send(res, 200, req.method === "HEAD" ? undefined : MANIFEST, { "Content-Type": "application/manifest+json" });
+      }
       const session = inner === null ? null : sessionOf(req);
       if (!session) {
         if (req.method === "GET" && (path === "/" || path === "/index.html" || inner === "/" || inner === "/index.html")) {
@@ -547,7 +563,10 @@ export async function startRelay(options) {
         return sendJson(res, 403, { message: BLOCKED_TEXT });
       }
       // Writes need the viewer's own origin (no cross-site form posts).
-      if (req.method !== "GET" && req.method !== "HEAD" && !originOk(req)) return sendJson(res, 403, { message: BLOCKED_TEXT });
+      if (req.method !== "GET" && req.method !== "HEAD" && !originOk(req)) {
+        log(`refused ${req.method} ${inner.slice(0, 80)} (origin)`);
+        return sendJson(res, 403, { message: BLOCKED_TEXT });
+      }
       touch();
       forward(req, res, session, inner);
     } catch (error) {

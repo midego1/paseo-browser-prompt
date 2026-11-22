@@ -85,8 +85,10 @@ import {
 } from "../server-browser/mcp-filter.mjs";
 import { createTargetFilter, isExtensionUrl, REFUSED_METHODS } from "../server-browser/cdp-filter.mjs";
 import {
+  BLOCKED_TEXT,
   classifyRequest,
   hostsOf,
+  MANIFEST,
   OPEN_PAGE,
   OPEN_PAGE_CSP,
   parseCookies,
@@ -218,15 +220,18 @@ async function fakeNeko() {
       let body = "";
       req.on("data", (d) => (body += d));
       req.on("end", () => {
-        const { password } = JSON.parse(body);
+        const { password, username } = JSON.parse(body);
         if (state.failLogin) return res.writeHead(503).end("{}");
-        if (password !== "admin-pw") return res.writeHead(401).end("{}");
-        res.writeHead(200, { "Content-Type": "application/json", "Set-Cookie": "NEKO_SESSION=leak" }).end(JSON.stringify({ id: "s1", token: "neko-token" }));
+        // The relay's service login is an admin ("neko-token"); the owner's viewer logins are not ("user-token").
+        const token = password === "admin-pw" ? "neko-token" : password === "user-pw" ? "user-token" : null;
+        if (!token) return res.writeHead(401).end("{}");
+        (state.logins ??= []).push({ username, admin: token === "neko-token" });
+        res.writeHead(200, { "Content-Type": "application/json", "Set-Cookie": "NEKO_SESSION=leak" }).end(JSON.stringify({ id: "s1", token }));
       });
       return;
     }
     if (req.url === "/health") return res.writeHead(200).end("true");
-    if (req.headers.authorization !== "Bearer neko-token") return res.writeHead(401).end("{}");
+    if (req.headers.authorization !== "Bearer neko-token" && req.headers.authorization !== "Bearer user-token") return res.writeHead(401).end("{}");
     if (req.url === "/api/room/control") {
       if (state.controlFails) return res.writeHead(500).end("{}");
       return res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ has_host: state.hasHost }));
@@ -311,6 +316,7 @@ async function relayFor(neko, extra = {}) {
     secret: SECRET,
     statusToken: STATUS,
     adminPassword: "admin-pw",
+    userPassword: "user-pw",
     badTicketDelayMs: 0,
     ...extra,
   });
@@ -352,7 +358,7 @@ test("relay end to end: ticket to a scoped cookie, forwarding under the prefix w
     assert.equal(whoami.headers["x-frame-options"], "DENY");
     const forwarded = neko.seen.findLast((r) => r.url.startsWith("/api/whoami"));
     assert.equal(forwarded.url, "/api/whoami", "prefix and query string stripped");
-    assert.equal(forwarded.headers.authorization, "Bearer neko-token");
+    assert.equal(forwarded.headers.authorization, "Bearer user-token", "the owner's own login, not the relay's admin one");
     assert.equal(forwarded.headers.cookie, undefined);
     assert.equal((await http(relay.port, "GET", `${P}/`, { ...HOST, Cookie: cookie })).status, 200, "the client under the prefix");
     assert.equal((await http(relay.port, "GET", `${P}/api/whoami`, HOST)).status, 401, "no session");
@@ -364,6 +370,48 @@ test("relay end to end: ticket to a scoped cookie, forwarding under the prefix w
     assert.equal((await http(relay.port, "POST", `${P}/api/room/control/take`, { ...ORIGIN_HEADERS, Cookie: cookie })).status, 200);
     assert.ok(!neko.seen.some((r) => r.url === "/metrics" || r.url === "/api/members"), "refused routes never reach neko");
 
+    // The owner logs in to neko as a regular member, so neko's client (the iPad and desktop layout)
+    // neither shows nor calls its admin actions; those routes stay refused all the same.
+    assert.deepEqual(
+      neko.state.logins.filter((l) => l.username.startsWith("owner-")).map((l) => l.admin),
+      [false],
+      "the owner's viewer login is not an admin",
+    );
+    for (const [method, path] of [
+      ["POST", "/api/room/settings"],
+      ["POST", "/api/room/broadcast/start"],
+      ["POST", "/api/room/broadcast/stop"],
+      ["POST", "/api/members/abc"],
+      ["DELETE", "/api/sessions/abc"],
+      ["POST", "/api/room/upload/drop"],
+      ["POST", "/api/filetransfer"],
+      ["GET", "/api/filetransfer"],
+    ]) {
+      const refused = await http(relay.port, method, `${P}${path}`, { ...ORIGIN_HEADERS, Cookie: cookie });
+      assert.equal(refused.status, 403, `${method} ${path}`);
+      assert.equal(JSON.parse(refused.body).message, BLOCKED_TEXT);
+    }
+    assert.ok(!neko.seen.some((r) => /^\/api\/(room\/settings|room\/broadcast|members|sessions|room\/upload|filetransfer)/.test(r.url)), "admin routes never reach neko");
+    assert.ok(logs.includes("refused POST /api/room/settings"), "refusals are logged by method and path");
+    assert.equal((await http(relay.port, "POST", `${P}/api/room/control/request`, { ...HOST, Cookie: cookie })).status, 403);
+    assert.ok(logs.includes("refused POST /api/room/control/request (origin)"), "an Origin refusal is logged too");
+
+    // The web app manifest: WebKit fetches it without cookies, so the relay answers it itself (a
+    // constant, never neko's file), under the prefix only.
+    const seenBefore = neko.seen.length;
+    for (const headers of [HOST, { ...HOST, Cookie: cookie }]) {
+      const manifest = await http(relay.port, "GET", `${P}/site.webmanifest`, headers);
+      assert.equal(manifest.status, 200);
+      assert.equal(manifest.headers["content-type"], "application/manifest+json");
+      assert.equal(manifest.body, MANIFEST);
+      assert.equal(manifest.headers["set-cookie"], undefined);
+    }
+    assert.equal((await http(relay.port, "HEAD", `${P}/site.webmanifest`, HOST)).status, 200);
+    assert.equal(neko.seen.length, seenBefore, "the manifest never goes to neko");
+    assert.equal((await http(relay.port, "POST", `${P}/site.webmanifest`, ORIGIN_HEADERS)).status, 401, "only GET and HEAD without a session");
+    assert.equal((await http(relay.port, "GET", "/site.webmanifest", HOST)).status, 401, "not outside the prefix");
+    assert.equal((await http(relay.port, "GET", `/s-${"0".repeat(32)}/site.webmanifest`, HOST)).status, 401, "not under another prefix");
+
     // WebSocket: only under the prefix, own Origin and session; upstream carries neko's token, no query.
     assert.match(await upgrade(relay.port, { ...HOST, Cookie: cookie, Origin: "http://evil.example" }, `${P}/api/ws`), / 403 /);
     assert.match(await upgrade(relay.port, { ...HOST, Cookie: cookie }, `${P}/api/ws`), / 403 /);
@@ -373,7 +421,7 @@ test("relay end to end: ticket to a scoped cookie, forwarding under the prefix w
     assert.match(await upgrade(relay.port, { ...ORIGIN_HEADERS, Cookie: cookie }, `${P}/api/ws?token=evil`), / 101 /);
     const ws = neko.seen.findLast((r) => r.method === "UPGRADE");
     assert.equal(ws.url, "/api/ws");
-    assert.equal(ws.headers.authorization, "Bearer neko-token");
+    assert.equal(ws.headers.authorization, "Bearer user-token");
     assert.equal(ws.headers.cookie, undefined);
 
     // Status: only with the daemon's token.
@@ -389,7 +437,7 @@ test("relay end to end: ticket to a scoped cookie, forwarding under the prefix w
     // No lockout (with rootless Docker every client has the same address): after many bad tickets a good one works.
     for (let i = 0; i < 25; i++) assert.equal((await postTicket(relay, `v1.${Math.floor(now / 1000) + 60}.aaaaaaaaaaaaaaaa.login.${"A".repeat(43)}`)).status, 401);
     assert.equal((await postTicket(relay, ticketAt(now, "nonce-nonce-nonce-2"))).status, 200);
-    assert.ok(logs.every((line) => !line.includes(SECRET) && !line.includes("neko-token") && !line.includes(ticket)), "logs hold no secrets or tickets");
+    assert.ok(logs.every((line) => !line.includes(SECRET) && !line.includes("neko-token") && !line.includes("user-token") && !line.includes(ticket)), "logs hold no secrets or tickets");
   } finally {
     await relay.close();
     await neko.close();
@@ -408,6 +456,7 @@ test("relay sessions: 2 hours at most, 20 minutes without use, bound to the addr
     secret: SECRET,
     statusToken: STATUS,
     adminPassword: "admin-pw",
+    userPassword: "user-pw",
     now: () => now,
   });
   const P = relay.prefix;
@@ -516,7 +565,7 @@ test("relay: takeover state follows neko's control only while a viewer is connec
 
 test("relay: an https origin gets Secure cookies, and the relay refuses to start without its secrets", async () => {
   const neko = await fakeNeko();
-  const base = { nekoHost: "127.0.0.1", nekoPort: neko.port, listenHost: "127.0.0.1", listenPort: 0, secret: SECRET, statusToken: STATUS, adminPassword: "admin-pw" };
+  const base = { nekoHost: "127.0.0.1", nekoPort: neko.port, listenHost: "127.0.0.1", listenPort: 0, secret: SECRET, statusToken: STATUS, adminPassword: "admin-pw", userPassword: "user-pw" };
   const relay = await startRelay({ ...base, origins: ["http://127.0.0.1:5301", "https://box.tail.ts.net"] });
   try {
     const ticket = signViewerTicket(SECRET, { exp: Math.floor(Date.now() / 1000) + 300, nonce: "nonce-nonce-nonce-3", purpose: "takeover" });
@@ -530,6 +579,8 @@ test("relay: an https origin gets Secure cookies, and the relay refuses to start
   await assert.rejects(startRelay({ ...base, origins: ["http://127.0.0.1:5301"], secret: "" }), /secret/);
   await assert.rejects(startRelay({ ...base, origins: [] }), /origin/);
   await assert.rejects(startRelay({ ...base, origins: ["http://127.0.0.1:5301"], adminPassword: "" }), /password/);
+  await assert.rejects(startRelay({ ...base, origins: ["http://127.0.0.1:5301"], userPassword: "" }), /user password/);
+  await assert.rejects(startRelay({ ...base, origins: ["http://127.0.0.1:5301"], userPassword: "admin-pw" }), /user password/, "the owner never logs in as an admin");
 });
 
 test("the run's MCP filter pauses every tool call while the owner holds control", () => {
@@ -621,6 +672,8 @@ test("relay and proxy: published only on the bind address, no capabilities, no m
   assert.equal(value(relay, "--mount").length, 0);
   assert.ok(value(relay, "--env").includes("BP_PUBLIC_ORIGINS=http://100.96.145.38:5301"));
   assert.ok(value(relay, "--env").includes("BP_NEKO_HOST=bp-si-0a1b2c3d-neko"));
+  assert.ok(value(relay, "--env").includes(`BP_NEKO_USER_PASSWORD=${KEYS.nekoUserPassword}`), "the owner's viewer logs in as a regular member");
+  assert.ok(value(relay, "--env").includes(`BP_NEKO_ADMIN_PASSWORD=${KEYS.nekoAdminPassword}`), "the relay's own service login");
   assert.ok(value(relay, "--env").includes("BP_CONTROL_PORT=8081"));
   assert.ok(value(relay, "--env").includes("BP_CONTROL_SUBNET=__BP_SUBNET__"));
   assert.ok(value(relay, "--env").includes("BP_MAX_LIFETIME_S=604800"));
@@ -1066,6 +1119,13 @@ test("signed-in image: pinned neko, sandbox on, DevTools on loopback only, the p
   assert.match(conf, /--disable-features=WebUIOmniboxPopup,WebUIOmniboxFullPopup,WebUIOmniboxAimPopup\n/, "the native address-bar popup: its WebUI one is a blocked chrome:// page");
   for (const flag of ["--disable-component-update", "--disable-domain-reliability", "--disable-breakpad", "--disable-sync", "--disable-quic"]) assert.ok(conf.includes(`${flag}\n`), flag);
   assert.deepEqual(policies.ExtensionInstallBlocklist, ["*"]);
+  // iPad: neko shows its on-screen keyboard button only up to 768 px; the image links a stylesheet
+  // that shows it on touch screens of any width (served under /assets/, which the relay allows).
+  const css = SIGNED_IN_FILES["viewer.css"];
+  assert.match(css, /@media \(pointer: coarse\) and \(min-width: 769px\) \{\s*\.phone\\:block \{\s*display: block;/);
+  assert.match(SIGNED_IN_FILES.Dockerfile, /^COPY viewer\.css \/var\/www\/assets\/bp-viewer\.css$/m);
+  assert.ok(SIGNED_IN_FILES.Dockerfile.includes(`sed -i 's#</head>#<link rel="stylesheet" href="./assets/bp-viewer.css"></head>#' /var/www/index.html`));
+  assert.equal(classifyRequest("GET", "/assets/bp-viewer.css"), "static");
   for (const name of Object.keys(SIGNED_IN_FILES)) assert.equal(SIGNED_IN_FILES[name], readFileSync(new URL(`../signed-in/${name}`, import.meta.url), "utf8"), name);
 });
 
