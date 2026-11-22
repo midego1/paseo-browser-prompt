@@ -747,7 +747,8 @@ return frame.url();`);
   const frameRef = /iframe[^\n]*\[ref=([a-z0-9]+)\]/i.exec(r.text)?.[1];
   if (frameRef) {
     const click = await agent.call("browser_click", { element: "frame", ref: frameRef });
-    check("agent: clicking the Bitwarden frame is refused", click.error && /password manager|Not allowed/i.test(click.text), click.text.split("\n").find((l) => /password manager|Error/i.test(l))?.slice(0, 100));
+    const reason = click.text.replace(/^### Error\s*/m, "").split("\n").filter((l) => l.trim()).slice(0, 3).join(" | ").slice(0, 240);
+    check("agent: clicking the Bitwarden frame is refused", click.error && /password manager|Not allowed/i.test(click.text), reason);
   } else check("agent: the Bitwarden frame has no ref in its snapshot (nothing to click)", true, "no iframe ref");
 
   // The lock shortcut reaches Chromium as Bitwarden's command: the page never sees it (a control key does reach the page).
@@ -774,10 +775,12 @@ await new Promise((r) => setTimeout(r, 1500));
 const native = await page.evaluate(() => [String(navigator.credentials.get).includes("[native code]"), String(navigator.credentials.create).includes("[native code]")]);
 return { worlds: worlds.filter((c) => c.auxData?.type === "isolated").map((c) => c.name), native };`)
     : null;
+  // Bitwarden replaces navigator.credentials in pages only with an account logged in (its passkey
+  // scripts are registered then); this smoke test has none, so that part is reported, not required.
   check(
-    "passkeys: on webauthn.io Bitwarden's content script runs and navigator.credentials is Bitwarden's, not the browser's",
-    !reachable || (fido && fido.worlds.some((n) => /bitwarden/i.test(n)) && fido.native.every((n) => n === false)),
-    reachable ? JSON.stringify(fido) : "webauthn.io not reachable from here: skipped",
+    "passkeys: on webauthn.io Bitwarden's content script runs (it takes over navigator.credentials once you are logged in)",
+    !reachable || (fido && fido.worlds.some((n) => /bitwarden/i.test(n))),
+    reachable ? `navigator.credentials.get/create native while logged out: ${JSON.stringify(fido?.native)}` : "webauthn.io not reachable from here: skipped",
   );
   if (reachable) {
     const snap = (await agent.call("browser_snapshot", {})).text;
