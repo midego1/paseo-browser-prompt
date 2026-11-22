@@ -25,8 +25,10 @@ if [ -f "$PIN" ]; then
   if [ -n "$CURRENT" ] && ! grep -qx "$CURRENT" "$IDS" 2>/dev/null; then printf '%s\n' "$CURRENT" >> "$IDS"; fi
 fi
 if [ -f "$IDS" ]; then
+  STALE=""
   for id in $(grep -xE '[a-p]{32}' "$IDS"); do
     [ "$id" = "$CURRENT" ] && continue
+    STALE="$STALE $id"
     for dir in "$PROFILE"/Default "$PROFILE"/Profile*; do
       [ -d "$dir" ] || continue
       rm -rf "$dir/Local Extension Settings/$id" "$dir/Sync Extension Settings/$id" "$dir/Managed Extension Settings/$id" \
@@ -34,5 +36,34 @@ if [ -f "$IDS" ]; then
         "$dir/IndexedDB/chrome-extension_${id}_0.indexeddb.blob" "$dir/File System/chrome-extension_${id}_0"
     done
   done
+  # Their entries in Chromium's preferences (settings, uninstall records, MACs), before Chromium reads them.
+  if [ -n "$STALE" ] && command -v python3 >/dev/null 2>&1; then
+    python3 -I -c '
+import json, os, sys
+stale = set(sys.argv[2:])
+def clean(value):
+    if isinstance(value, dict):
+        return {k: clean(v) for k, v in value.items() if k not in stale}
+    if isinstance(value, list):
+        return [clean(v) for v in value if not (isinstance(v, str) and (v in stale or any(("chrome-extension://" + s) in v for s in stale)))]
+    return value
+for root, dirs, files in os.walk(sys.argv[1]):
+    if root.count(os.sep) - sys.argv[1].count(os.sep) > 1:
+        continue
+    for name in ("Preferences", "Secure Preferences"):
+        if name not in files:
+            continue
+        path = os.path.join(root, name)
+        try:
+            data = json.load(open(path))
+        except Exception:
+            continue
+        cleaned = clean(data)
+        if cleaned != data:
+            with open(path + ".bp-tmp", "w") as out:
+                json.dump(cleaned, out)
+            os.replace(path + ".bp-tmp", path)
+' "$PROFILE" $STALE || true
+  fi
 fi
 exec /usr/bin/chromium "$@" --proxy-server="$BP_PROXY" --proxy-bypass-list="<-loopback>"

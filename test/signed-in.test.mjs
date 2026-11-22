@@ -1736,6 +1736,8 @@ test("chromium-start.sh: records the installed Bitwarden build and removes the d
   mkdirSync(join(dir, "profile"), { recursive: true });
   for (const path of [...data(oldId), ...data(newId), "Default/Local Extension Settings/other"]) mkdirSync(join(dir, "profile", path), { recursive: true });
   writeFileSync(join(dir, "profile", ".bp-bitwarden-ids"), `${oldId}\n`);
+  writeFileSync(join(dir, "profile", "Default", "Preferences"), JSON.stringify({ extensions: { settings: { [oldId]: { location: 7 }, [newId]: { location: 7 }, other: { location: 5 } }, external_uninstalls: [oldId], pinned: [`chrome-extension://${oldId}/popup`, "x"] }, keep: `chrome-extension://${newId}/a` }));
+  writeFileSync(join(dir, "profile", "Default", "Secure Preferences"), JSON.stringify({ protection: { macs: { extensions: { settings: { [oldId]: "m", other: "m" } } } } }));
   // Bitwarden with a new build (a new pin): the new id is recorded, the old build's data goes.
   writeFileSync(join(dir, "pin.json"), JSON.stringify({ version: "x", id: newId }));
   let result = runStart();
@@ -1744,6 +1746,9 @@ test("chromium-start.sh: records the installed Bitwarden build and removes the d
   assert.doesNotMatch(result.stdout, /--load-extension|--disable-extensions-except/, "force-installed by policy, not loaded from the command line");
   for (const path of data(oldId)) assert.equal(existsSync(join(dir, "profile", path)), false, `${path} removed`);
   for (const path of data(newId)) assert.equal(existsSync(join(dir, "profile", path)), true, `${path} kept`);
+  const prefs = JSON.parse(readFileSync(join(dir, "profile", "Default", "Preferences"), "utf8"));
+  assert.deepEqual(prefs, { extensions: { settings: { [newId]: { location: 7 }, other: { location: 5 } }, external_uninstalls: [], pinned: ["x"] }, keep: `chrome-extension://${newId}/a` }, "the old build's preference entries are gone");
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, "profile", "Default", "Secure Preferences"), "utf8")), { protection: { macs: { extensions: { settings: { other: "m" } } } } });
   assert.equal(readFileSync(join(dir, "profile", ".bp-bitwarden-ids"), "utf8"), `${oldId}\n${newId}\n`);
   // Bitwarden off: every recorded build's data goes; nothing else.
   rmSync(join(dir, "pin.json"));

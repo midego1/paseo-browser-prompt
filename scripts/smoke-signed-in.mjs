@@ -355,9 +355,9 @@ process.exit(0);`;
   check("takeover: the phone's taps and typing reach the agent's page", seen?.user === "alice" && seen?.clicks === 2, JSON.stringify(seen));
   check("viewer: no refused requests from the neko client", refused.length === 0, refused.join(", "));
   await page.close();
-  // The relay resets control (and with Bitwarden, the daemon locks the vault first): give it a few seconds.
-  await sleep(BITWARDEN_ON ? 6000 : 3500);
-  r = await agent.call("browser_snapshot", {});
+  // The relay resets control (and with Bitwarden, the daemon locks the vault first, a few seconds).
+  await sleep(3500);
+  r = BITWARDEN_ON ? (await until(async () => { const snap = await agent.call("browser_snapshot", {}); return snap.error ? null : snap; }, 40_000, 2000)) ?? (await agent.call("browser_snapshot", {})) : await agent.call("browser_snapshot", {});
   check("closing the viewer without releasing control resets it: the run goes on", !r.error, r.error ? r.text.slice(0, 80) : "");
 
   // 5b. Safari: the same key flow with WebKit (iPad as iPadOS Safari reports itself, iPhone, desktop
@@ -475,27 +475,31 @@ process.exit(0);`;
         check(`WebKit ${name}: no refused requests and no "Blocked" toast`, wrefused.length === 0 && (await blockedToasts()) === 0, wrefused.join(", "));
         if (BITWARDEN_ON) {
           // Release control with the viewer's own button: the vault is locked before the run goes on.
-          const before = locks;
+          const before = (await si.status()).bitwarden.lastLock?.at ?? 0;
           const release = wpage.locator('[data-testid=control-release]:visible, button[aria-label="Release Controls"]:visible, [data-testid=control-request]:visible, button[aria-label="Request Controls"]:visible').first();
           const pressed = await release.click({ force: true, timeout: 5000 }).then(() => true, (e) => e.message.split("\n")[0]);
           let resumed = null;
-          for (let i = 0; i < 12 && !resumed; i++) {
+          for (let i = 0; i < 40 && !resumed; i++) {
             await sleep(1000);
             const snap = await agent.call("browser_snapshot", {});
-            if (!snap.error) resumed = { at: i + 1, locked: locks > before };
+            if (!snap.error) resumed = { at: i + 1, locked: ((await si.status()).bitwarden.lastLock?.at ?? 0) > before };
           }
-          check(`WebKit ${name}: releasing control locks Bitwarden, then the run goes on`, pressed === true && resumed?.locked === true, JSON.stringify({ pressed, resumed, locks: locks - before }));
+          check(`WebKit ${name}: releasing control locks Bitwarden (verified), then the run goes on`, pressed === true && resumed?.locked === true, JSON.stringify({ pressed, resumed }));
         }
       } catch (error) {
         check(`WebKit ${name}: viewer`, false, error instanceof Error ? error.message.split("\n")[0] : String(error));
       } finally {
         await ctx.close().catch(() => {});
       }
-      const locksBeforeClose = locks;
-      await sleep(BITWARDEN_ON ? 6000 : 3500);
-      r = await agent.call("browser_snapshot", {});
+      const lockedBeforeClose = (await si.status()).bitwarden.lastLock?.at ?? 0;
+      await sleep(3500);
+      // With Bitwarden the run goes on once the vault is locked (a verified lock takes a few seconds).
+      r = BITWARDEN_ON ? await until(async () => { const snap = await agent.call("browser_snapshot", {}); return snap.error ? null : snap; }, 40_000, 2000) ?? (await agent.call("browser_snapshot", {})) : await agent.call("browser_snapshot", {});
       check(`WebKit ${name}: closing the viewer resets control`, !r.error, r.error ? r.text.slice(0, 80) : "");
-      if (BITWARDEN_ON) check(`WebKit ${name}: closing the viewer locks Bitwarden too`, locks > locksBeforeClose, `${locks - locksBeforeClose} lock(s)`);
+      if (BITWARDEN_ON) {
+        const after = (await si.status()).bitwarden.lastLock;
+        check(`WebKit ${name}: closing the viewer locks Bitwarden too (verified)`, (after?.at ?? 0) > lockedBeforeClose && after?.ok === true, JSON.stringify(after));
+      }
     }
     // Off the stack's network before the stack stops (a stop removes it).
     await webkitBrowser?.close().catch(() => {});
@@ -894,7 +898,8 @@ return { worlds: worlds.filter((c) => c.auxData?.type === "isolated").map((c) =>
   // The relay asked for a lock when it started; the daemon pressed it and the run went on.
   const keysFile = JSON.parse(readFileSync(join(state, "keys.json"), "utf8"));
   const relayStatus = JSON.parse((await http("GET", "/bp/status", { Authorization: `Bearer ${keysFile.statusToken}` })).body);
-  check("lock: the daemon locked Bitwarden when the relay asked, and nothing is pending", locks > 0 && relayStatus.lockPending === false, `${locks} lock(s), generation ${relayStatus.lockGeneration}`);
+  const lastLock = (await si.status()).bitwarden.lastLock;
+  check("lock: the daemon locked Bitwarden when the relay asked (verified), and nothing is pending", lastLock?.ok === true && relayStatus.lockPending === false, `last lock ${JSON.stringify(lastLock)}, generation ${relayStatus.lockGeneration}`);
 }
 
 /** Waits until `probe()` is truthy (every `stepMs`), at most `ms`; returns its last value. */
