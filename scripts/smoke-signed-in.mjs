@@ -746,7 +746,7 @@ return frame.url();`);
   check("agent: its snapshot with a Bitwarden frame in the page does not contain the frame's contents and does not hang", !r.error && /Example Domain/.test(r.text) && !/BW-SECRET-MARKER|bw-secret-value/.test(r.text) && took < 30_000, `${injected}; ${took} ms`);
   const frameRef = /iframe[^\n]*\[ref=([a-z0-9]+)\]/i.exec(r.text)?.[1];
   if (frameRef) {
-    const click = await agent.call("browser_click", { element: "frame", ref: frameRef });
+    const click = await agent.call("browser_click", { element: "frame", target: frameRef });
     const reason = click.text.replace(/^### Error\s*/m, "").split("\n").filter((l) => l.trim()).slice(0, 3).join(" | ").slice(0, 240);
     check("agent: clicking the Bitwarden frame is refused", click.error && /password manager|Not allowed/i.test(click.text), reason);
   } else check("agent: the Bitwarden frame has no ref in its snapshot (nothing to click)", true, "no iframe ref");
@@ -788,8 +788,8 @@ return { worlds: worlds.filter((c) => c.auxData?.type === "isolated").map((c) =>
     const button = /button "Register"[^\n]*\[ref=([a-z0-9]+)\]/i.exec(snap)?.[1];
     const before = helper(`const cdp = await browser.newBrowserCDPSession(); return (await cdp.send("Target.getTargets")).targetInfos.map((t) => t.targetId);`);
     if (box && button) {
-      await agent.call("browser_type", { element: "username", ref: box, text: `bp-smoke-${Date.now()}` });
-      await agent.call("browser_click", { element: "Register", ref: button });
+      await agent.call("browser_type", { element: "username", target: box, text: `bp-smoke-${Date.now()}` });
+      await agent.call("browser_click", { element: "Register", target: button });
       await sleep(4000);
     }
     const opened = helper(`const cdp = await browser.newBrowserCDPSession(); const before = new Set(${JSON.stringify(before ?? [])}); return (await cdp.send("Target.getTargets")).targetInfos.filter((t) => !before.has(t.targetId)).map((t) => t.type + " " + t.url.slice(0, 80));`);
