@@ -7,8 +7,10 @@
 #     read-only in /opt/bitwarden. chromium-start.sh loads it from there (unpacked, so Chromium never
 #     updates it) and disables every other extension.
 #   - policy-overlay.json: Bitwarden is the only extension (types and install sources locked, no
-#     external extensions, the Chrome Web Store blocked); only its own chrome-extension:// pages are
-#     allowed back; Chromium's password manager and autofill stay off.
+#     external extensions, the Chrome Web Store blocked); chrome-extension:// pages are no longer
+#     blocked by URL (Bitwarden's inline menu frames use per-session dynamic ids no allowlist entry
+#     can name; the agent is kept off them by the plugin's filters); Chromium's password manager
+#     and autofill stay off.
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 COPY bitwarden.json policy-overlay.json install-bitwarden.py /tmp/bp-bitwarden/

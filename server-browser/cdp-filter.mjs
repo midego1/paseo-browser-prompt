@@ -107,9 +107,43 @@ export function createTargetFilter({ held = () => false } = {}) {
     return typeof id === "string" && !visible.has(id) && !hidden.has(id) && info.type === "page" && typeof info.openerId !== "string";
   }
 
+  /**
+   * Whether a message on one of the run's sessions shows that its own target is an extension page now
+   * (a frame attaches before its URL is known: Bitwarden's inline menu commits to its extension page
+   * after Playwright attached). Such a message never reaches the run; the target is revoked first.
+   */
+  function revealsExtension(message) {
+    const p = message.params ?? {};
+    switch (message.method) {
+      case "Page.frameNavigated":
+        return isExtensionUrl(p.frame?.url) || isExtensionUrl(p.frame?.unreachableUrl) || isExtensionUrl(p.frame?.securityOrigin);
+      case "Page.navigatedWithinDocument":
+      case "Page.frameRequestedNavigation":
+      case "Page.frameStartedNavigating":
+        return isExtensionUrl(p.url);
+      case "Runtime.executionContextCreated":
+        // Only a frame's main world: an extension's content-script world in a web page has the
+        // extension's origin too (it is dropped below, not a reason to revoke the page).
+        return p.context?.auxData?.isDefault === true && isExtensionUrl(p.context?.origin);
+      default:
+        return false;
+    }
+  }
+
   function decide(message) {
     const out = { deliver: [], toBrowser: [] };
     if (message.sessionId && hiddenSessions.has(message.sessionId)) return out;
+    // An extension's content-script world in one of the run's pages (Bitwarden's, in every https
+    // page): the run's Playwright never uses foreign worlds, so it never learns of them.
+    if (message.method === "Runtime.executionContextCreated" && message.params?.context?.auxData?.isDefault !== true && isExtensionUrl(message.params?.context?.origin)) return out;
+    if (message.sessionId && visibleSessions.has(message.sessionId) && revealsExtension(message)) {
+      // The session's own target (or its root frame, whose id is the target's) became an extension
+      // page: revoke it. Anything else that names one is just not delivered.
+      const own = sessionInfo.get(message.sessionId)?.targetId;
+      const frameId = message.params?.frame?.id ?? message.params?.frameId ?? message.params?.context?.auxData?.frameId;
+      if (own && (frameId === undefined || frameId === own)) revoke(own, out);
+      return out;
+    }
     if (TARGET_EVENTS.has(message.method)) {
       const id = message.params?.targetInfo?.targetId ?? message.params?.targetId;
       if (message.method === "Target.targetDestroyed" || message.method === "Target.targetCrashed") {
@@ -164,6 +198,8 @@ export function createTargetFilter({ held = () => false } = {}) {
     hidden.add(targetId);
     for (const [sessionId, info] of [...sessionInfo]) {
       if (info.targetId !== targetId) continue;
+      // A frame inside one of the run's pages: remembered for the click check.
+      if (info.parent && visibleSessions.has(info.parent)) extensionFrames.set(targetId, info.parent);
       visibleSessions.delete(sessionId);
       sessionInfo.delete(sessionId);
       hiddenSessions.add(sessionId);

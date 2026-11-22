@@ -1,16 +1,32 @@
 {
-  "remove": ["ExtensionInstallBlocklist"],
+  "remove": [
+    "ExtensionInstallBlocklist"
+  ],
   "set": {
-    "ExtensionInstallAllowlist": ["nngceckbapebfimnlniiiahkandclblb"],
-    "ExtensionAllowedTypes": ["extension"],
+    "ExtensionInstallAllowlist": [
+      "nngceckbapebfimnlniiiahkandclblb"
+    ],
+    "ExtensionAllowedTypes": [
+      "extension"
+    ],
     "ExtensionInstallSources": [],
     "BlockExternalExtensions": true,
     "PasswordManagerEnabled": false,
     "AutofillAddressEnabled": false,
     "AutofillCreditCardEnabled": false
   },
+  "drop": {
+    "URLBlocklist": [
+      "chrome-extension://*"
+    ]
+  },
   "append": {
-    "URLAllowlist": ["chrome-extension://nngceckbapebfimnlniiiahkandclblb/*"],
-    "URLBlocklist": ["chromewebstore.google.com", "chrome.google.com/webstore"]
+    "URLAllowlist": [
+      "chrome-extension://nngceckbapebfimnlniiiahkandclblb/*"
+    ],
+    "URLBlocklist": [
+      "chromewebstore.google.com",
+      "chrome.google.com/webstore"
+    ]
   }
 }

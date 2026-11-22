@@ -217,6 +217,7 @@ connected app shares them.
 | New viewer key | – | After a second press: every earlier viewer link and open viewer session stops working. |
 | Viewer port | `5301` | The viewer's port on the launcher's bind address (this server's Tailscale IPv4, or 127.0.0.1); WebRTC uses the next port (`5302`). |
 | HTTPS address | empty | Optional `https://name[:port]` in front of the viewer (for example `tailscale serve`), used in viewer links; empty: plain http on the Tailscale address. |
+| Bitwarden | off | **Download and enable Bitwarden**, then **Confirm download**: downloads the pinned Bitwarden Password Manager release (about 34 MB, SHA-256 checked) and builds it into the signed-in image, for you while you hold control. Shows whether the running browser has it. **Turn off** removes it and its data at the next start (an idle browser restarts now); **Restart** applies a changed choice now. See [Bitwarden in the signed-in browser](#bitwarden-in-the-signed-in-browser-optional). |
 
 **ChatGPT launcher**
 
@@ -912,6 +913,44 @@ where the site allows it: the agent cannot see tabs you open, only its own (it r
 afterwards and gets the new session). Chromium's internal pages (`chrome://`,
 `view-source:`, `about:` other than `about:blank`) are blocked in this browser, for you and the agent.
 
+### Bitwarden in the signed-in browser (optional)
+
+You can add the **Bitwarden Password Manager** extension to the signed-in browser and use it while
+you hold control: unlock it, fill a login from its toolbar icon, a field's suggestion (inline menu)
+or its shortcut, and use it as the passkey provider when a site asks for a passkey. **The agent
+never gets it.** You accept that while you use it, an unlocked vault lives in a browser on the
+Paseo server (see [SECURITY.md](SECURITY.md#bitwarden-in-the-signed-in-browser)).
+
+- **Turn it on:** Settings › Signed-in Server browser › **Download and enable Bitwarden**, then
+  **Confirm download**. The daemon builds `browser-prompt-signed-in:…-bw<version>-<hash>` on top of
+  the signed-in image from [`signed-in-bitwarden/`](signed-in-bitwarden/): it downloads the release
+  pinned in `bitwarden.json` (version, URL, size, SHA-256) from Bitwarden's GitHub releases, refuses
+  anything else, and puts it read-only in the image. The files are those of the Chrome Web Store
+  build of the same version (only the store's `update_url` differs), and the store's public key gives
+  it its usual id `nngceckbapebfimnlniiiahkandclblb`. Chromium loads it unpacked from the image, so
+  it never updates itself; a plugin release moves the pin and asks you to download again. An idle
+  browser picks it up at its next start (or press **Restart**); a running run keeps its browser.
+- **Only Bitwarden:** every other extension is disabled (`--disable-extensions-except`), extension
+  types and install sources are locked, the Chrome Web Store is blocked, and only Bitwarden's own
+  `chrome-extension://` pages are allowed back. Chromium's own password manager and autofill stay off.
+- **Use it in a new tab** where you can: tap the mouse icon to take control, open a new tab (+), log
+  in with Bitwarden there, close the tab and release control. **Every time you release control (or
+  close the viewer), the vault is locked before the run goes on:** the relay keeps the run paused,
+  the daemon presses Bitwarden's own **Lock vault** command on the desktop (a shortcut the image
+  assigns to it), and only then lets the run continue. Unlock again next time.
+- **Recommended Bitwarden settings** (Bitwarden has no policy the plugin could force them with; its
+  managed settings cover only server URLs): Account security › Vault timeout **1 minute** (or
+  shorter) with action **Lock**, **Unlock with PIN off**, no biometrics; Autofill › **Autofill on
+  page load off** (its default). Log in with your master password and two-step login.
+- **Turn it off:** **Turn Bitwarden off** removes the extension and its data (vault cache, settings,
+  storage) from the profile at the browser's next start; an idle browser restarts now.
+  **Log out of everything** also removes it with the whole profile.
+
+**What to test with your account** (the smoke test has no Bitwarden account): log in to Bitwarden in
+the viewer, check that the inline menu and the toolbar popup fill a login, that a passkey can be
+created and used on a demo such as https://webauthn.io with Bitwarden as the provider, and that after
+you release control Bitwarden shows as locked.
+
 **HTTPS (optional).** Clipboard access and Secure cookies need HTTPS on phones. If you put the viewer
 behind `tailscale serve` (for example `tailscale serve --bg --https=8443 http://<tailscale-ip>:5301`),
 enter that `https://…` address under **HTTPS address**: links then use it and the relay accepts it
@@ -925,8 +964,14 @@ running stack: stop or wipe it first (SECURITY.md has the commands).
 
 **Smoke test** (developers, on a host with Docker): `SMOKE_PLAYWRIGHT_CORE=<dir with node_modules/playwright-core> SMOKE_CHROMIUM=<chrome binary> node --experimental-strip-types --no-warnings scripts/smoke-signed-in.mjs`
 builds missing images (without the settings' consent step, only in this script), starts the stack on
-127.0.0.1 only, runs an agent over CDP, a phone-emulated viewer that takes over, the relay and proxy
-refusals and a cookie across a restart, and removes everything but the images.
+127.0.0.1 only, runs an agent over CDP, a phone-emulated viewer that takes over, the same in WebKit
+(iPad, iPhone, desktop Safari; `SMOKE_WEBKIT=0` skips), the relay and proxy refusals and a cookie
+across a restart, and removes everything but the images. With Bitwarden (on unless
+`SMOKE_BITWARDEN=0`; also downloaded without the consent step, only there) it checks the pin,
+policies and command line, that Bitwarden loads and intercepts `navigator.credentials` (on
+webauthn.io), that the agent cannot see, attach to, open or click any extension target or frame
+(also a real Bitwarden frame in its own tab), that the lock shortcut is Bitwarden's command, and that
+releasing control (also from WebKit) locks the vault before the run goes on.
 
 ## Self-update (opt-in)
 

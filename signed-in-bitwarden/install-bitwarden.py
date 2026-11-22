@@ -9,7 +9,7 @@
 #   3. Checks the manifest (pinned version, Manifest V3, no update_url), adds the Chrome Web Store's
 #      public key for the extension so it gets its usual id, and gives Bitwarden's own "Lock vault"
 #      command a shortcut (the daemon presses it through the desktop when the owner releases control).
-#   4. Applies policy-overlay.json to Chromium's managed policy.
+#   4. Applies policy-overlay.json to Chromium's managed policy (remove, set, drop from lists, append).
 import base64, hashlib, io, json, os, stat, sys, urllib.request, zipfile
 
 here = sys.argv[1]
@@ -89,6 +89,12 @@ policy = json.load(open(policy_file))
 for name in overlay["remove"]:
     policy.pop(name, None)
 policy.update(overlay["set"])
+# Bitwarden's inline menu and notification frames use per-session dynamic ids
+# (chrome-extension://<random>/overlay/...), which no allowlist entry can name: extension pages are
+# no longer blocked by URL. Every other extension is disabled, and the agent's access to extension
+# pages is refused by the plugin's DevTools and MCP filters.
+for name, values in overlay.get("drop", {}).items():
+    policy[name] = [v for v in policy.get(name, []) if v not in values]
 for name, values in overlay["append"].items():
     policy[name] = list(policy.get(name, [])) + [v for v in values if v not in policy.get(name, [])]
 with open(policy_file, "w") as out:

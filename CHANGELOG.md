@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.23.0 (unreleased)
+
+- **Bitwarden in the signed-in Server browser (optional, off by default).** Settings › Signed-in
+  Server browser › **Download and enable Bitwarden**, then **Confirm download**: the daemon builds a
+  variant of the signed-in image with the Bitwarden Password Manager release pinned in
+  `signed-in-bitwarden/bitwarden.json` (2026.11.0 from Bitwarden's GitHub releases; size and SHA-256
+  checked; the same files as the Chrome Web Store build, with the store's id). Chromium loads it
+  read-only from the image, so it never updates itself. Use it while you hold control: unlock it,
+  fill logins from the inline menu, toolbar popup or shortcut, and use it for passkeys.
+- The agent never gets it: the DevTools filter hides every `chrome-extension://` target (service
+  worker, popup and its windows, offscreen document, Bitwarden's frames inside the agent's pages),
+  refuses navigation to extension pages, and refuses clicks and taps that land on an extension frame;
+  the MCP filter refuses `browser_navigate` and `browser_tabs` calls that name an extension page; the
+  agent is told never to open or use the password manager or ask you for its contents.
+- Every time you release control (or close the viewer), the vault is locked before the run goes
+  on: the relay keeps the run paused until the daemon has pressed Bitwarden's own Lock vault command
+  on the desktop and confirmed it for that release. Fail closed: without the lock the run stays
+  paused.
+- Only Bitwarden: every other extension is disabled, extension types and install sources are
+  locked, the Chrome Web Store is blocked, and only Bitwarden's own extension pages are allowed back.
+  Chromium's own password manager and autofill stay off.
+- **Turn Bitwarden off** removes it and its data from the profile at the browser's next start (an
+  idle browser restarts now). The signed-in image is rebuilt once (its start script changed).
+- The card's Take over help names the Bitwarden flow; the settings show the recommended Bitwarden
+  settings (vault timeout 1 minute with Lock, no PIN, autofill on page load off), which Bitwarden
+  offers no policy for.
+- Smoke test: with Bitwarden (on unless `SMOKE_BITWARDEN=0`), the pin, policies and command line, that
+  Bitwarden loads and intercepts `navigator.credentials` on webauthn.io, that the agent cannot see,
+  attach to, open or click any extension target or frame (also a real Bitwarden frame in its tab),
+  that the lock shortcut is Bitwarden's command, and that releasing control, also from WebKit (iPad,
+  iPhone, desktop Safari), locks the vault before the run goes on.
+
 ## 0.22.2 (unreleased)
 
 - Signed-in browser on an iPad (Safari): no more "Blocked by the browser-prompt relay." toast, and

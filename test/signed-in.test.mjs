@@ -1753,3 +1753,36 @@ test("Bitwarden prompt, card and settings: the agent never uses the password man
   assert.match(card, /Bitwarden is locked again before the run goes on/);
   assert.doesNotMatch(card, /signedInBitwarden/, "the card never downloads");
 });
+
+test("DevTools filter: a frame that attaches before its URL is known and then commits to an extension page is taken away before the run sees its content, and its clicks are checked", () => {
+  const filter = createTargetFilter();
+  filter.fromClient({ id: 1, method: "Target.createTarget", params: { url: "about:blank" } });
+  filter.fromBrowser({ method: "Target.attachedToTarget", params: { sessionId: "S-P", targetInfo: { targetId: "P", type: "page", url: "about:blank" }, waitingForDebugger: false } });
+  filter.fromBrowser({ id: 1, result: { targetId: "P" } });
+  // Bitwarden's inline menu: the OOPIF attaches with an empty URL (the run's Playwright gets it).
+  const attach = filter.fromBrowser({ method: "Target.attachedToTarget", sessionId: "S-P", params: { sessionId: "S-F", targetInfo: { targetId: "F", type: "iframe", url: "" }, waitingForDebugger: true } });
+  assert.equal(attach.deliver.length, 1);
+  // Its own session then shows the extension page: never delivered, the frame is revoked first.
+  for (const message of [
+    { sessionId: "S-F", method: "Page.frameNavigated", params: { frame: { id: "F", parentId: "X", url: "chrome-extension://nngceckbapebfimnlniiiahkandclblb/overlay/menu.html" } } },
+  ]) {
+    const verdict = filter.fromBrowser(message);
+    assert.deepEqual(verdict.deliver.map((m) => m.method), ["Target.detachedFromTarget", "Target.targetDestroyed"]);
+    assert.deepEqual(verdict.toBrowser.map((m) => m.method), ["Target.detachFromTarget"]);
+  }
+  assert.equal(filter.fromBrowser({ sessionId: "S-F", method: "Runtime.executionContextCreated", params: { context: { origin: "chrome-extension://x" } } }).deliver.length, 0);
+  assert.ok(filter.fromClient({ id: 2, sessionId: "S-F", method: "Runtime.evaluate", params: {} }).reply, "the run's session on it is gone");
+  assert.deepEqual([...filter.extensionFrames()], ["F"], "remembered for the click check");
+  const verdict = filter.fromClient({ id: 3, sessionId: "S-P", method: "Input.dispatchMouseEvent", params: { type: "mousePressed", x: 5, y: 5 } });
+  assert.equal(filter.hitAllowed(verdict.hitTest.frames, [{ nodeName: "IFRAME", frameId: "F" }]), false);
+  // The same through an execution context (origin) on a fresh frame.
+  filter.fromBrowser({ method: "Target.attachedToTarget", sessionId: "S-P", params: { sessionId: "S-G", targetInfo: { targetId: "G", type: "iframe", url: "" }, waitingForDebugger: false } });
+  const ctx = filter.fromBrowser({ sessionId: "S-G", method: "Runtime.executionContextCreated", params: { context: { origin: "chrome-extension://9f0e-dyn", auxData: { frameId: "G", isDefault: true } } } });
+  assert.deepEqual(ctx.deliver.map((m) => m.method), ["Target.detachedFromTarget", "Target.targetDestroyed"]);
+  // Bitwarden's content-script world in the run's page: not delivered, and the page stays the run's.
+  const world = filter.fromBrowser({ sessionId: "S-P", method: "Runtime.executionContextCreated", params: { context: { id: 9, origin: "chrome-extension://nngceckbapebfimnlniiiahkandclblb", name: "Bitwarden Password Manager", auxData: { frameId: "P", isDefault: false, type: "isolated" } } } });
+  assert.equal(world.deliver.length, 0);
+  assert.equal(filter.isVisible("P"), true);
+  // A normal page's own events pass.
+  assert.equal(filter.fromBrowser({ sessionId: "S-P", method: "Page.frameNavigated", params: { frame: { id: "P", url: "https://example.com/" } } }).deliver.length, 1);
+});

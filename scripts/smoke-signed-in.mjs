@@ -218,7 +218,7 @@ process.stdout.write(JSON.stringify(out ?? null));
 process.exit(0);`;
     const out = execFileSync(
       "docker",
-      ["run", "--rm", "-i", "--network", `container:${neko}`, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/tmp", "--user", "pwuser", "--entrypoint", "node", status.serverImage, "--input-type=module", "-"],
+      ["run", "--rm", "-i", "--init", "--network", `container:${neko}`, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/tmp", "--user", "pwuser", "--entrypoint", "node", status.serverImage, "--input-type=module", "-"],
       { input: script, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: 150_000 },
     );
     return JSON.parse(out || "null");
@@ -598,21 +598,13 @@ async function bitwardenChecks({ agent, neko, helper, pageByMarker }) {
   );
   const args = exec("sh", "-c", 'tr "\\0" "\\n" < /proc/$(pgrep -o -f "^/usr/lib/chromium/chromium --show")/cmdline');
   check("Chromium: loads only /opt/bitwarden and disables every other extension", /^--load-extension=\/opt\/bitwarden$/m.test(args) && /^--disable-extensions-except=\/opt\/bitwarden$/m.test(args));
-  const installed = JSON.parse(
-    exec(
-      "python3",
-      "-I",
-      "-c",
-      "import json,os\nout={}\nfor n in ('Preferences','Secure Preferences'):\n  p='/home/neko/.config/chromium/Default/'+n\n  if os.path.exists(p):\n    for k,v in json.load(open(p)).get('extensions',{}).get('settings',{}).items():\n      if isinstance(v,dict) and 'location' in v: out[k]=v['location']\nprint(json.dumps(out))",
-    ),
-  );
-  // Locations 5 and 10 are Chromium's own component extensions (PDF viewer and the like).
-  const others = Object.entries(installed).filter(([id, location]) => id !== BITWARDEN.id && location !== 5 && location !== 10);
-  check("Chromium: no other extension in the profile", others.length === 0, JSON.stringify(installed));
 
   // Privileged view (the harness, not the agent): Bitwarden runs.
   const loaded = helper(`const cdp = await browser.newBrowserCDPSession(); const { targetInfos } = await cdp.send("Target.getTargets"); return targetInfos.filter((t) => /^chrome-extension:/.test(t.url)).map((t) => t.type + " " + t.url);`);
   check("Bitwarden loads with the store id (its service worker runs)", (loaded ?? []).some((line) => line.startsWith(`service_worker ${ext}/`)), (loaded ?? []).join(", "));
+  // Chromium's own component extensions (PDF viewer) have no background target; any other extension would.
+  const backgrounds = (loaded ?? []).filter((line) => /^(service_worker|background_page|other) /.test(line));
+  check("Chromium: no other extension runs", backgrounds.every((line) => line.includes(`chrome-extension://${BITWARDEN.id}/`)), backgrounds.join(", "));
 
   // The agent through its MCP: no extension target, no extension page, no store.
   let r = await agent.call("browser_tabs", { action: "list" });
@@ -632,20 +624,46 @@ async function bitwardenChecks({ agent, neko, helper, pageByMarker }) {
   // connection that puts a real Bitwarden frame (its own overlay page, with a marker) into the page.
   const filtered = helper(`
 const { startCdpFilter } = await import("/opt/browser-prompt/cdp-filter.mjs");
-const cdpFilter = await startCdpFilter({ upstream: "http://127.0.0.1:9222" });
-const agentBrowser = await chromium.connectOverCDP(cdpFilter.endpoint);
-const actx = agentBrowser.contexts()[0];
 const out = {};
-out.serviceWorkers = actx.serviceWorkers().map((w) => w.url()).filter((u) => u.startsWith("chrome-extension:"));
-const acdp = await agentBrowser.newBrowserCDPSession();
-out.targets = (await acdp.send("Target.getTargets")).targetInfos.filter((t) => t.url.startsWith("chrome-extension:")).map((t) => t.url);
+// A step that hangs ends the harness with what it has (and the step's name), never the smoke run.
+setTimeout(() => {
+  process.stdout.write(JSON.stringify({ ...out, stuck: out.step }));
+  process.exit(0);
+}, 110000).unref();
+out.step = "filter";
+const cdpFilter = await startCdpFilter({ upstream: "http://127.0.0.1:9222" });
 const pcdp = await browser.newBrowserCDPSession();
 const sw = (await pcdp.send("Target.getTargets")).targetInfos.find((t) => t.type === "service_worker" && t.url.startsWith(${JSON.stringify(ext)}));
-out.attach = await acdp.send("Target.attachToTarget", { targetId: sw.targetId, flatten: true }).then(() => "attached", (e) => e.message.slice(0, 120));
+out.step = "raw";
+// Raw DevTools messages through the filter first (as a client of the agent's kind), then Playwright.
+{
+  const version = await (await fetch(cdpFilter.endpoint + "/json/version")).json();
+  const ws = new WebSocket(version.webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => { ws.addEventListener("open", resolve); ws.addEventListener("error", reject); });
+  const pending = new Map();
+  ws.addEventListener("message", (e) => { const m = JSON.parse(e.data); pending.get(m.id)?.(m); });
+  let n = 0;
+  const send = (method, params = {}) => new Promise((resolve) => { const id = ++n; pending.set(id, resolve); ws.send(JSON.stringify({ id, method, params })); setTimeout(() => resolve({ timeout: true }), 10000); });
+  out.targets = ((await send("Target.getTargets")).result?.targetInfos ?? []).filter((t) => t.url.startsWith("chrome-extension:")).map((t) => t.url);
+  out.attach = JSON.stringify((await send("Target.attachToTarget", { targetId: sw.targetId, flatten: true })).error ?? "attached");
+  out.info = JSON.stringify((await send("Target.getTargetInfo", { targetId: sw.targetId })).error ?? "info");
+  out.createExt = JSON.stringify((await send("Target.createTarget", { url: ${JSON.stringify(`${ext}/popup/index.html`)} })).error ?? "created");
+  ws.close();
+  await new Promise((r) => setTimeout(r, 500));
+}
+out.step = "connect";
+const agentBrowser = await chromium.connectOverCDP(cdpFilter.endpoint, { timeout: 20000 });
+const actx = agentBrowser.contexts()[0];
+out.serviceWorkers = actx.serviceWorkers().map((w) => w.url()).filter((u) => u.startsWith("chrome-extension:"));
+out.step = "newPage";
 const apage = await actx.newPage();
+out.step = "open extension page";
 out.open = await apage.goto(${JSON.stringify(`${ext}/popup/index.html`)}, { timeout: 10000 }).then(() => "opened " + apage.url(), (e) => e.message.split("\\n")[0].slice(0, 120));
-await apage.goto("https://example.com/?bp-smoke=bw-frame");
-const ppage = context.pages().find((p) => p.url().includes("bp-smoke=bw-frame"));
+out.step = "goto";
+const marker = "bw-frame-" + Date.now();
+await apage.goto("https://example.com/?bp-smoke=" + marker, { timeout: 20000 });
+out.step = "inject";
+const ppage = context.pages().find((p) => p.url().includes("bp-smoke=" + marker));
 const session = await context.newCDPSession(ppage);
 const worlds = [];
 session.on("Runtime.executionContextCreated", (e) => worlds.push(e.context));
@@ -664,28 +682,34 @@ await new Promise((r) => setTimeout(r, 3000));
 const pframe = ppage.frames().find((f) => f.url().startsWith("chrome-extension:"));
 out.frameLoaded = pframe ? pframe.url() : "no extension frame: " + ppage.frames().map((f) => f.url()).join(" ");
 if (pframe) {
-  await pframe.evaluate(() => {
+  out.step = "mark";
+  await Promise.race([new Promise((r) => setTimeout(r, 10000)), pframe.evaluate(() => {
     document.body.innerHTML = "";
     const b = document.createElement("button");
     b.textContent = "BW-SECRET-MARKER";
     b.style.cssText = "position:fixed;inset:0;width:100%;height:100%";
     b.addEventListener("click", () => (window.bpClicks = (window.bpClicks || 0) + 1));
     document.body.append(b);
-  }).catch((e) => (out.markErr = e.message.slice(0, 120)));
+  }).catch((e) => (out.markErr = e.message.slice(0, 120)))]);
 }
+out.step = "read";
 out.agentFrames = apage.frames().map((f) => f.url());
 out.aria = await apage.locator("body").ariaSnapshot({ timeout: 15000 }).then((t) => t, (e) => "ERR " + e.message.split("\\n")[0]);
 out.html = (await apage.content()).includes("BW-SECRET-MARKER");
+out.step = "click";
 out.clickFrame = await apage.mouse.click(100, 100).then(() => "clicked", (e) => e.message.split("\\n")[0].slice(0, 140));
 out.tapFrame = await apage.mouse.click(390, 290).then(() => "clicked", (e) => e.message.split("\\n")[0].slice(0, 140));
 out.clickPage = await apage.mouse.click(700, 600).then(() => "clicked", (e) => e.message.split("\\n")[0].slice(0, 140));
-out.frameClicks = pframe ? await pframe.evaluate(() => window.bpClicks || 0).catch(() => -1) : -1;
+out.step = "count";
+out.frameClicks = pframe ? await Promise.race([pframe.evaluate(() => window.bpClicks || 0).catch(() => -1), new Promise((r) => setTimeout(() => r(-2), 10000))]) : -1;
+out.step = "done";
 await apage.close().catch(() => {});
 await cdpFilter.close();
 return out;`);
   check("filter: no Bitwarden service worker for the agent's Playwright", filtered && filtered.serviceWorkers.length === 0, JSON.stringify(filtered?.serviceWorkers));
   check("filter: no extension target in the agent's target list", filtered && filtered.targets.length === 0, JSON.stringify(filtered?.targets));
-  check("filter: attaching to Bitwarden's service worker is refused", filtered && /No such target/.test(filtered.attach), filtered?.attach);
+  check("filter: attaching to Bitwarden's service worker, or asking about it, is refused", filtered && /No such target/.test(filtered.attach) && /No such target/.test(filtered.info), `${filtered?.attach} ${filtered?.info}`);
+  check("filter: creating a tab with an extension page is refused", filtered && /password manager/.test(filtered.createExt), filtered?.createExt);
   check("filter: the agent cannot open Bitwarden's popup page", filtered && !/^opened/.test(filtered.open), filtered?.open);
   check("Bitwarden's content script is in https pages (its isolated world)", filtered && filtered.worlds.some((n) => /bitwarden/i.test(n)), JSON.stringify(filtered?.worlds));
   check(
