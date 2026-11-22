@@ -921,7 +921,12 @@ async function bitwardenLifecycle({ neko, relayName, helper }) {
   const id1 = JSON.parse(docker("exec", neko, "cat", "/opt/bitwarden/browser-prompt-pin.json")).id;
 
   // C: the relay goes away while a run uses the Bitwarden browser.
-  const run = await mcpClient((await si.mcpServer("smoke-agent-3")).server);
+  // The previous run's admission may still count for a moment (one run at a time).
+  const admitted = await until(async () => {
+    const answer = await si.mcpServer("smoke-agent-3");
+    return answer && "server" in answer ? answer : null;
+  }, 180_000, 5000);
+  const run = await mcpClient(admitted.server);
   const free = async () => !(await run.call("browser_tabs", { action: "list" })).error;
   check("a new run goes on once the vault is locked", await until(free, 40_000), "");
   await run.call("browser_tabs", { action: "new", url: "https://example.com/?bp-smoke=relay-down" });
