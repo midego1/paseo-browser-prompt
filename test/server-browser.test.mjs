@@ -369,7 +369,7 @@ test("the entrypoint: headless, isolated, Chromium sandbox on, only the sidecar 
   assert.match(entry, /acceptDownloads: false/);
   assert.match(entry, /const work = "\/tmp\/browser-prompt";/, "output only under the container's tmpfs");
   assert.match(entry, /stdio: \["pipe", "pipe", "inherit"\]/, "both MCP directions go through the filter");
-  assert.match(entry, /filterClientLine\(line, \{ ownerControl: guard\.held\(\), signedIn \}\)/);
+  assert.match(entry, /filterClientLine\(line, \{ ownerControl: guard\.held\(\), securing: guard\.securing\(\), signedIn \}\)/);
   assert.match(entry, /filterServerLine\(line, \{ signedIn \}\)/);
   assert.match(entry, /BP_IDLE_TIMEOUT_S/);
   assert.doesNotMatch(entry, /console\.log/, "stdout stays JSON-RPC");

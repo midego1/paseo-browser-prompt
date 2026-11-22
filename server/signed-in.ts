@@ -449,6 +449,7 @@ export function createSignedIn(options: SignedInOptions) {
           if (containers.get(names.relay) !== "running") {
             await docker(["rm", "-f", names.relay], 30_000).catch(() => undefined);
             await waitForNeko(input, await startRelay(input, await loadKeys(keysFile)));
+            if ((await runningNekoImage()) === bitwardenImage) await awaitFirstLock({ ...input, bitwarden: true });
           }
           log("restarted the signed-in browser's proxy or relay");
         } catch (error) {
@@ -482,6 +483,7 @@ export function createSignedIn(options: SignedInOptions) {
           // Only the relay holds the address and port: restart it alone, neko keeps running.
           await docker(["rm", "-f", names.relay], 30_000).catch(() => undefined);
           await waitForNeko(input, await startRelay(input, keys));
+          if (input.bitwarden) await awaitFirstLock(input);
           lastActive = now();
           return { input };
         }
@@ -490,6 +492,7 @@ export function createSignedIn(options: SignedInOptions) {
       try {
         await createStack(input);
         startError = null;
+        if (input.bitwarden) await awaitFirstLock(input);
         // Data of Bitwarden builds no longer installed (Bitwarden turned off, or a new pin): cleared
         // once Chromium runs.
         void cleanupOldBitwarden().catch(() => undefined);
@@ -788,6 +791,24 @@ export function createSignedIn(options: SignedInOptions) {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * A relay that just started holds runs until the vault is locked: lock it before the browser is
+   * handed out (Bitwarden installs itself a few seconds after Chromium starts), so a run does not
+   * begin paused. Bounded; the lock timer goes on after it.
+   */
+  async function awaitFirstLock(input: StackInput): Promise<void> {
+    for (let i = 0; i < 60; i++) {
+      const relay = await relayAnswer(input, await loadKeys(keysFile));
+      if (relay && !relay.lockPending) return;
+      if (relay?.nekoUp) {
+        if (locking) await locking.catch(() => undefined);
+        else await lockCheck();
+      }
+      await sleep(1500);
+    }
+    log("Bitwarden: the first lock is taking long; runs stay paused until it is done");
   }
 
   /** The owner's Lock now: lock (verified) and let a run that waits for it go on. */

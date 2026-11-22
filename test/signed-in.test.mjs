@@ -77,6 +77,7 @@ import {
   createCallTracker,
   createControlGuard,
   EXTENSION_URL_TEXT,
+  SECURING_TEXT,
   filterClientLine,
   namesExtensionPage,
   filterServerLine,
@@ -598,7 +599,7 @@ test("the run's MCP filter pauses every tool call while the owner holds control"
   const list = JSON.stringify({ jsonrpc: "2.0", id: 8, method: "tools/list" });
   assert.deepEqual(filterClientLine(list, { ownerControl: true }), { forward: list }, "listing tools still works");
   const entry = readFileSync(new URL("../server-browser/entrypoint.mjs", import.meta.url), "utf8");
-  assert.match(entry, /const verdict = filterClientLine\(line, \{ ownerControl: guard\.held\(\), signedIn \}\);/);
+  assert.match(entry, /const verdict = filterClientLine\(line, \{ ownerControl: guard\.held\(\), securing: guard\.securing\(\), signedIn \}\);/);
   assert.match(entry, /if \(signedIn\) calls\.started\(verdict\.forward\);/);
   assert.match(entry, /if \(kept !== null && signedIn\) kept = calls\.finish\(kept, guard\.held\(\)\);/);
   assert.match(entry, /if \(polling\) return;/, "never two polls at once");
@@ -1798,13 +1799,13 @@ test("Bitwarden relay: the run stays paused from the start and after every takeo
   };
   try {
     await relay.pollControl();
-    assert.deepEqual(await read(), { ownerControl: true, known: true, lockPending: true }, "paused until the first lock");
+    assert.deepEqual(await read(), { ownerControl: true, known: true, lockPending: true, securing: true }, "paused until the first lock");
     let st = await status();
     assert.equal(st.lockPending, true);
     assert.equal((await locked(st.lockGeneration, "x".repeat(43))).status, 401, "only with the status token");
     assert.equal(JSON.parse((await locked(st.lockGeneration - 1)).body).cleared, false, "an older release's lock does not count");
     assert.equal(JSON.parse((await locked(st.lockGeneration)).body).cleared, true);
-    assert.deepEqual(await read(), { ownerControl: false, known: true, lockPending: false });
+    assert.deepEqual(await read(), { ownerControl: false, known: true, lockPending: false, securing: false });
     // A viewer takes control, then releases it: paused again until locked.
     const created = await postTicket(relay, ticketAt(Date.now(), "lock-lock-lock-0001"));
     const cookie = String(created.headers["set-cookie"]).split(";")[0];
@@ -1822,7 +1823,7 @@ test("Bitwarden relay: the run stays paused from the start and after every takeo
     assert.equal(JSON.parse((await locked(st.lockGeneration)).body).cleared, false, "nothing to clear while the owner holds control");
     neko.state.hasHost = false;
     await relay.pollControl();
-    assert.deepEqual(await read(), { ownerControl: true, known: true, lockPending: true }, "released: paused until locked");
+    assert.deepEqual(await read(), { ownerControl: true, known: true, lockPending: true, securing: true }, "released: paused until locked");
     const released = (await status()).lockGeneration;
     // The owner takes and releases control again before the daemon confirms: that confirmation is for an old release.
     neko.state.hasHost = true;
@@ -1835,7 +1836,7 @@ test("Bitwarden relay: the run stays paused from the start and after every takeo
     // The last viewer leaves (without holding control): locked again before the run goes on.
     socket.destroy();
     await settle(() => relay.state().viewers === 0);
-    assert.deepEqual(await read(), { ownerControl: true, known: true, lockPending: true });
+    assert.deepEqual(await read(), { ownerControl: true, known: true, lockPending: true, securing: true });
   } finally {
     await relay.close();
     await neko.close();
@@ -2154,6 +2155,19 @@ test("DevTools filter: while the owner holds control nothing acts or reads; Exte
   assert.equal(filter.focusAllowed(frames, { nodeName: "BODY", children: [{ nodeName: "IFRAME", frameId: "F" }] }), true, "no focus (the body): the frame is not focused");
   assert.equal(FOCUS_WORLD, "bp-focus-guard");
   assert.equal(filter.fromBrowser({ sessionId: "S-P", method: "Runtime.executionContextCreated", params: { context: { id: 3, name: FOCUS_WORLD, origin: "https://example.com", auxData: { isDefault: false } } } }).deliver.length, 0, "the filter's own world is not the run's");
+});
+
+test("while only the vault is being locked, the run is told to wait, not to ask the owner", () => {
+  const guard = createControlGuard();
+  guard.result(guard.next(), { ownerControl: true, known: true, lockPending: true, securing: true });
+  assert.equal(guard.held(), true);
+  assert.equal(guard.securing(), true);
+  const call = JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "browser_snapshot", arguments: {} } });
+  assert.equal(JSON.parse(filterClientLine(call, { ownerControl: guard.held(), securing: guard.securing(), signedIn: true }).reply).result.content[0].text, SECURING_TEXT);
+  guard.result(guard.next(), { ownerControl: true, known: true, lockPending: true, securing: false });
+  assert.equal(guard.securing(), false, "the owner holds control");
+  assert.equal(JSON.parse(filterClientLine(call, { ownerControl: guard.held(), securing: guard.securing(), signedIn: true }).reply).result.content[0].text, OWNER_CONTROL_TEXT);
+  assert.match(SECURING_TEXT, /Do not ask the owner/);
 });
 
 test("Bitwarden fail closed: the run's guard never opens on failed polls, and the entry point takes only that flag", () => {

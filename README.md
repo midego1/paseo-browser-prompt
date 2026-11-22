@@ -217,7 +217,7 @@ connected app shares them.
 | New viewer key | – | After a second press: every earlier viewer link and open viewer session stops working. |
 | Viewer port | `5301` | The viewer's port on the launcher's bind address (this server's Tailscale IPv4, or 127.0.0.1); WebRTC uses the next port (`5302`). |
 | HTTPS address | empty | Optional `https://name[:port]` in front of the viewer (for example `tailscale serve`), used in viewer links; empty: plain http on the Tailscale address. |
-| Bitwarden | off | **Download and enable Bitwarden**, then **Confirm download**: downloads the pinned Bitwarden Password Manager release (about 34 MB, SHA-256 checked) and builds it into the signed-in image, for you while you hold control. Shows whether the running browser has it. **Turn off** removes it and its data at the next start (an idle browser restarts now); **Restart** applies a changed choice now. See [Bitwarden in the signed-in browser](#bitwarden-in-the-signed-in-browser-optional). |
+| Bitwarden | off | **Download and enable Bitwarden**, then **Confirm download**: downloads the pinned Bitwarden Password Manager release (about 34 MB, SHA-256 checked) and builds it into the signed-in image, where Chromium force-installs it, for you while you hold control. Shows whether the running browser has it, an update pending under a run, a run waiting for the lock, and the last lock (verified or why not). **Lock now** and **Restart browser** lock it on demand; **Turn off** removes it and its data (an idle browser restarts now); **Restart** applies a changed choice now. See [Bitwarden in the signed-in browser](#bitwarden-in-the-signed-in-browser-optional). |
 
 **ChatGPT launcher**
 
@@ -922,36 +922,44 @@ never gets it.** You accept that while you use it, an unlocked vault lives in a 
 Paseo server (see [SECURITY.md](SECURITY.md#bitwarden-in-the-signed-in-browser)).
 
 - **Turn it on:** Settings › Signed-in Server browser › **Download and enable Bitwarden**, then
-  **Confirm download**. The daemon builds `browser-prompt-signed-in:…-bw<version>-<hash>` on top of
-  the signed-in image from [`signed-in-bitwarden/`](signed-in-bitwarden/): it downloads the release
-  pinned in `bitwarden.json` (version, URL, size, SHA-256) from Bitwarden's GitHub releases, refuses
-  anything else, and puts it read-only in the image. The files are those of the Chrome Web Store
-  build of the same version (only the store's `update_url` differs), and the store's public key gives
-  it its usual id `nngceckbapebfimnlniiiahkandclblb`. Chromium loads it unpacked from the image, so
-  it never updates itself; a plugin release moves the pin and asks you to download again. An idle
-  browser picks it up at its next start (or press **Restart**); a running run keeps its browser.
-- **Only Bitwarden:** every other extension is disabled (`--disable-extensions-except`), extension
-  types and install sources are locked, and the Chrome Web Store is blocked. Extension pages are not
+  **Confirm download** (the daemon refuses a download you have not confirmed). It builds
+  `browser-prompt-signed-in:…-bw<version>-<hash>` on top of the signed-in image from
+  [`signed-in-bitwarden/`](signed-in-bitwarden/): it downloads the release pinned in `bitwarden.json`
+  (version, URL, size, SHA-256) from Bitwarden's GitHub releases (the same files as the Chrome Web
+  Store build of that version), refuses anything else, packs it unchanged into a CRX with a key made
+  for that build (deleted right away; each build gets its own extension id), and Chromium
+  force-installs it by policy from a local update manifest, so it never updates itself. An idle
+  browser picks it up right away (or at its next start); under a run the settings show **Update
+  pending** and the browser switches when the run ends.
+- **Only Bitwarden:** every other extension is blocked (`ExtensionInstallBlocklist: ["*"]`, developer
+  mode off, types and install sources locked, the Chrome Web Store blocked). Extension pages are not
   blocked by URL in this variant (Bitwarden's inline menu frames use per-session dynamic ids that no
-  allowlist entry can name); the agent is kept off them by its filters. Chromium's own password
-  manager and autofill stay off.
+  allowlist entry can name); the agent is kept off them by its filters (it cannot see, open, click or
+  type into them). Chromium's own password manager and autofill stay off.
 - **Use it in a new tab** where you can: tap the mouse icon to take control, open a new tab (+), log
   in with Bitwarden there, close the tab and release control. **Every time you release control (or
-  close the viewer), the vault is locked before the run goes on:** the relay keeps the run paused,
-  the daemon presses Bitwarden's own **Lock vault** command on the desktop (a shortcut the image
-  assigns to it), and only then lets the run continue. Unlock again next time.
-- **Recommended Bitwarden settings** (Bitwarden has no policy the plugin could force them with; its
-  managed settings cover only server URLs): Account security › Vault timeout **1 minute** (or
-  shorter) with action **Lock**, **Unlock with PIN off**, no biometrics; Autofill › **Autofill on
-  page load off** (its default). Log in with your master password and two-step login.
-- **Turn it off:** **Turn Bitwarden off** removes the extension and its data (vault cache, settings,
-  storage) from the profile at the browser's next start; an idle browser restarts now.
-  **Log out of everything** also removes it with the whole profile.
+  close the viewer), Bitwarden is locked before the run goes on:** the relay keeps the run paused
+  while the daemon calls Bitwarden's own lock through Chromium's DevTools and checks that no account
+  is unlocked (then a reload of the extension, then a browser restart if needed). Only a verified lock
+  lets the run continue; otherwise the card and the settings say why and offer **Lock Bitwarden
+  now** and **Restart browser**. Unlock again next time.
+- **Recommended Bitwarden settings, first thing after logging in** (Bitwarden has no policy the
+  plugin could force them with; its managed settings cover only server URLs): Account security ›
+  Vault timeout **1 minute** (or shorter) with action **Lock**, never **Never** (that stores the key
+  on the server's disk and Bitwarden unlocks itself; runs then stay paused); **Unlock with PIN off**,
+  no biometrics; Autofill › **Autofill on page load off** (its default) and card and identity
+  suggestions in the inline menu off. Log in with your master password and two-step login.
+- **A new pin** (a plugin update with a newer Bitwarden) is a new build with a new id: the old
+  extension and its local data are removed, you download the new one and log in again.
+- **Turn it off:** **Turn Bitwarden off** uninstalls the extension and removes its data (vault cache,
+  settings, storage) from the profile; an idle browser restarts now. **Log out of everything** also
+  removes it with the whole profile.
 
-**What to test with your account** (the smoke test has no Bitwarden account): log in to Bitwarden in
-the viewer, check that the inline menu and the toolbar popup fill a login, that a passkey can be
-created and used on a demo such as https://webauthn.io with Bitwarden as the provider, and that after
-you release control Bitwarden shows as locked.
+**What to test with your account** (the smoke test has no Bitwarden account; it checks the lock
+mechanism against the real extension with nobody logged in): log in to Bitwarden in the viewer, check
+that the inline menu and the toolbar popup fill a login, that a passkey can be created and used on a
+demo such as https://webauthn.io with Bitwarden as the provider, and that after you release control
+Bitwarden shows as locked and the settings say "last lock verified".
 
 **HTTPS (optional).** Clipboard access and Secure cookies need HTTPS on phones. If you put the viewer
 behind `tailscale serve` (for example `tailscale serve --bg --https=8443 http://<tailscale-ip>:5301`),
@@ -969,11 +977,14 @@ builds missing images (without the settings' consent step, only in this script),
 127.0.0.1 only, runs an agent over CDP, a phone-emulated viewer that takes over, the same in WebKit
 (iPad, iPhone, desktop Safari; `SMOKE_WEBKIT=0` skips), the relay and proxy refusals and a cookie
 across a restart, and removes everything but the images. With Bitwarden (on unless
-`SMOKE_BITWARDEN=0`; also downloaded without the consent step, only there) it checks the pin,
-policies and command line, that Bitwarden loads and intercepts `navigator.credentials` (on
-webauthn.io), that the agent cannot see, attach to, open or click any extension target or frame
-(also a real Bitwarden frame in its own tab), that the lock shortcut is Bitwarden's command, and that
-releasing control (also from WebKit) locks the vault before the run goes on.
+`SMOKE_BITWARDEN=0`; also downloaded without the consent step, only there) it checks the pin, the
+force-install and the policies, that Bitwarden runs and its content script is on webauthn.io, that
+the agent cannot see, attach to, open, click or type into any extension target or frame (also a real
+Bitwarden frame in its own tab), the verified lock (Bitwarden comes back after its own lock and after
+a reload; a page holding fullscreen and the keyboard does not matter), that releasing control (also
+from WebKit) locks the vault before the run goes on, a relay that goes away during a run (fail
+closed, locked anyway), a new pin under a run (update pending, applied when the run ends; the old
+build's data removed) and turning Bitwarden off (uninstalled, data removed).
 
 ## Self-update (opt-in)
 

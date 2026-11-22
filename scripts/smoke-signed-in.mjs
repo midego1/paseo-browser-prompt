@@ -644,7 +644,8 @@ async function bitwardenChecks({ agent, neko, helper, pageByMarker }) {
     !policy.URLBlocklist.includes("chrome-extension://*") && ["chrome://*", "devtools://*", "view-source:*", "file://*", "data:*"].every((u) => policy.URLBlocklist.includes(u)),
   );
   const args = exec("sh", "-c", 'tr "\\0" "\\n" < /proc/$(pgrep -o -f "^/usr/lib/chromium/chromium --show")/cmdline');
-  check("Chromium: no extension from the command line", !/--load-extension|--disable-extensions-except/.test(args));
+  // (neko's Chromium wrapper adds an empty --load-extension=.)
+  check("Chromium: no extension from the command line", !/^--load-extension=\S|^--disable-extensions-except/m.test(args), args.split("\n").filter((a) => /extension/.test(a)).join(" "));
 
   // Privileged view (the harness, not the agent): Bitwarden is installed by policy and runs (the
   // install takes a few seconds after Chromium starts).
@@ -653,7 +654,9 @@ async function bitwardenChecks({ agent, neko, helper, pageByMarker }) {
     if (i) await sleep(2000);
     loaded = helper(`const cdp = await browser.newBrowserCDPSession(); const { targetInfos } = await cdp.send("Target.getTargets"); return targetInfos.filter((t) => /^chrome-extension:/.test(t.url)).map((t) => t.type + " " + t.url);`) ?? [];
   }
-  const location = docker("exec", "--user", "neko", neko, "python3", "-I", "-c", `import json;print(json.load(open('/home/neko/.config/chromium/Default/Preferences')).get('extensions',{}).get('settings',{}).get('${id}',{}).get('location'))`);
+  // Chromium writes its preferences a little later.
+  const readLocation = () => docker("exec", "--user", "neko", neko, "python3", "-I", "-c", `import json;print(json.load(open('/home/neko/.config/chromium/Default/Preferences')).get('extensions',{}).get('settings',{}).get('${id}',{}).get('location'))`);
+  const location = (await until(async () => (readLocation() === "7" ? "7" : null), 60_000, 3000)) ?? readLocation();
   check("Bitwarden runs, installed by policy (location 7: from the policy's update manifest)", loaded.some((line) => line.startsWith(`service_worker ${ext}/`)) && location === "7", `location ${location}; ${loaded.join(", ")}`);
   const backgrounds = loaded.filter((line) => /^(service_worker|background_page|other) /.test(line));
   check("Chromium: no other extension runs", backgrounds.every((line) => line.includes(`${ext}/`)), backgrounds.join(", "));

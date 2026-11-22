@@ -755,7 +755,14 @@ export async function startRelay(options) {
       // While the vault waits to be locked, the run stays paused as if the owner still held control.
       res
         .writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" })
-        .end(JSON.stringify({ ownerControl: controlHeld() || lockPending, known: controlKnown || viewers === 0, ...(lockOnRelease ? { lockPending } : {}) }));
+        .end(
+          JSON.stringify({
+            ownerControl: controlHeld() || lockPending,
+            known: controlKnown || viewers === 0,
+            // Paused only because the vault is being locked (nobody holds control): the run waits, it does not ask the owner.
+            ...(lockOnRelease ? { lockPending, securing: lockPending && !controlHeld() } : {}),
+          }),
+        );
     });
     await new Promise((resolve, reject) => {
       control.once("error", reject);

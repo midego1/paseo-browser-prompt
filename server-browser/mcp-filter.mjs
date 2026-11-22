@@ -94,18 +94,22 @@ function parseObject(line) {
 export const OWNER_CONTROL_TEXT =
   "The owner has taken over the signed-in browser and holds control right now (or the takeover just ended and the browser is being secured for a few seconds), so browser tools are paused (no reading and no actions). Do not retry in a loop: ask the owner with AskUserQuestion to answer \"done\" when they are finished and have released control (tap the mouse icon again or close the viewer), then take a new snapshot and continue.";
 
+/** What a tool call gets while the vault is being locked after a takeover or a start (nobody holds control). */
+export const SECURING_TEXT =
+  "The signed-in browser is being secured right now (its password manager is being locked after a takeover or a start); this takes a few seconds. Wait about 5 seconds and try the same call again. Do not ask the owner about it unless it still fails after a minute.";
+
 /**
  * A message from the agent: `{ forward }` to pass it on, `{ reply }` to answer it here, or
  * `{ drop: true }` to discard it. With `ownerControl` (signed-in runs, while the owner holds control
  * in the viewer) every tool call is answered with OWNER_CONTROL_TEXT instead of reaching the browser.
  */
-export function filterClientLine(line, { ownerControl = false, signedIn = false } = {}) {
+export function filterClientLine(line, { ownerControl = false, securing = false, signedIn = false } = {}) {
   const message = parseObject(line);
   if (!message) return { drop: true };
   if (ownerControl && message.method === "tools/call") {
     if (message.id === undefined || message.id === null) return { drop: true };
     return {
-      reply: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: OWNER_CONTROL_TEXT }], isError: true } }),
+      reply: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: securing ? SECURING_TEXT : OWNER_CONTROL_TEXT }], isError: true } }),
     };
   }
   if (message.method === "tools/call" && !toolAllowed(message.params?.name, signedIn)) {
@@ -166,6 +170,7 @@ export function lineSplitter(onLine) {
  */
 export function createControlGuard({ now = Date.now, holdMs = 10_000, failuresToOpen = 3 } = {}) {
   let held = false;
+  let securing = false;
   let lastHeldAt = -Infinity;
   let failures = 0;
   let issued = 0;
@@ -180,17 +185,21 @@ export function createControlGuard({ now = Date.now, holdMs = 10_000, failuresTo
       // The relay decides (held only while a viewer is connected and holds control or it is unsure);
       // `known` is informational.
       held = body?.ownerControl === true;
+      securing = held && body?.securing === true;
       if (held) lastHeldAt = now();
     },
     failure(seq) {
       if (seq <= applied) return;
       applied = seq;
       failures++;
+      securing = false;
       if (now() - lastHeldAt < holdMs) held = true;
       else if (failures >= failuresToOpen) held = false;
       else if (!Number.isFinite(failuresToOpen)) held = true;
     },
     held: () => held,
+    /** Held only because the vault is being locked (nobody holds control). */
+    securing: () => securing,
   };
 }
 
