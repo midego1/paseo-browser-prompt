@@ -748,7 +748,14 @@ return frame.url();`);
   if (frameRef) {
     const click = await agent.call("browser_click", { element: "frame", target: frameRef });
     const reason = click.text.replace(/^### Error\s*/m, "").split("\n").filter((l) => l.trim()).slice(0, 3).join(" | ").slice(0, 240);
-    check("agent: clicking the Bitwarden frame is refused", click.error && /password manager|Not allowed/i.test(click.text), reason);
+    // Either the filter refuses the press, or Playwright cannot even reach the frame (it is revoked
+    // from the run): in both cases no click reaches Bitwarden. (This agent has no coordinate clicks;
+    // pointer input at the frame is checked through the filter directly above.)
+    check(
+      "agent: clicking the Bitwarden frame by its ref does nothing (refused, or the frame is out of the run's reach)",
+      click.error && (/password manager|Not allowed/i.test(click.text) || /waiting for locator\('aria-ref=/.test(click.text)),
+      reason,
+    );
   } else check("agent: the Bitwarden frame has no ref in its snapshot (nothing to click)", true, "no iframe ref");
 
   // The lock shortcut reaches Chromium as Bitwarden's command: the page never sees it (a control key does reach the page).
