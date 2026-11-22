@@ -224,6 +224,18 @@ that choice.
   The relay answers one path itself without a session: `site.webmanifest` under the viewer's random
   path, a constant manifest (name and colours only, nothing of neko's), because Safari fetches it
   without cookies.
+- The signed-in image adds one stylesheet and one script of the plugin to neko's web client
+  (`signed-in/viewer.css`, `signed-in/viewer.js`, served by neko under the viewer's path with a
+  content hash in the file name; since 0.22.3) and patches one call in neko's key handler to go
+  through the script. They change only the owner's own viewer: which element has focus on touch
+  devices, the on-screen keyboard, and Shift around capitals (never while Ctrl, Alt or Meta is
+  down, and not at all when neko's key state cannot be read). Keys still reach the browser only
+  while the owner holds control (neko drops them otherwise). The key field sets autocorrect,
+  autocapitalize, spell check and writing suggestions off, which asks iOS not to autocorrect or
+  suggest from what is typed there (passwords); that is best effort, the browser decides.
+  **Limit:** neko never reports the remote desktop's Caps Lock (it only sends the local one when a
+  mouse or trackpad enters the video), so with the remote Caps Lock on, a capital typed on the
+  on-screen keyboard comes out lowercase.
 - WebRTC: the relay forwards one TCP port to neko's ICE-TCP mux, on the same address. ICE checks and
   DTLS protect the media; the port is reachable only on your tailnet. neko has no STUN or TURN
   servers (`NEKO_WEBRTC_ICESERVERS_FRONTEND/BACKEND=[]`, also neko 3.2.0's default; its client

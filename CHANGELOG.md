@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.22.3 (unreleased)
+
+- Signed-in browser on an iPad with a hardware keyboard (Magic Keyboard): after **Request
+  controls**, typing now reaches the page. neko's client takes keys only from a hidden text field
+  over the video, and on touch devices it never focused that field: its tap handler cancels the
+  touch (so the tap did not focus it either) and it focuses on hover only without touch. Only the
+  keyboard button focused it, and that also opened the on-screen keyboard. The signed-in image now
+  loads a small script (`signed-in/viewer.js`): on touch devices a tap or click on the video, and
+  getting control, focus that field without opening the on-screen keyboard (`inputmode="none"`), so
+  keys from a hardware keyboard work right away (Shift, Backspace, Enter, Tab, arrows; Cmd
+  shortcuts arrive as Ctrl, as before). The keyboard button still opens the on-screen keyboard.
+- Typing no longer loses capitals and symbols that arrive without a Shift key press (the on-screen
+  keyboard's text, dictation): neko sent "T" without Shift and the remote desktop typed "t", so a
+  password typed on the on-screen keyboard came out wrong. A one-line hook in neko's key handler
+  (patched in the image; the build fails if neko's code does not match) holds Shift around such
+  keys unless Shift, Caps Lock (for letters), Ctrl, Alt or Meta is down already; Shift is always
+  released again. Known limit: neko never reports the remote desktop's Caps Lock (it sends the
+  local one only when a mouse or trackpad enters the video), so with the remote Caps Lock on, a
+  capital from the on-screen keyboard comes out lowercase.
+- The field sets autocorrect, autocapitalize, spell check and writing suggestions off, which asks
+  iOS not to change or suggest from what you type (best effort).
+- The viewer's stylesheet and script are served under content-hashed names
+  (`bp-viewer-<hash>.css/.js`), so a browser never uses a cached copy from an older image.
+- The image is rebuilt once (new tag); the owner downloads it again with the two-press consent.
+- Smoke test (WebKit): on the iPad a hardware keyboard types right after a tap, without the
+  keyboard button (Shift, Backspace, arrows, Enter); the keyboard button opens the on-screen
+  keyboard on the iPad and iPhone and its text keeps capitals and symbols; desktop Safari types as
+  before; still no refused request and no "Blocked" toast.
+
 ## 0.22.2 (unreleased)
 
 - Signed-in browser on an iPad (Safari): no more "Blocked by the browser-prompt relay." toast, and
