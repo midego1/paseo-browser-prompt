@@ -16,9 +16,16 @@
 #     chrome-untrusted://*, chrome-search://*, chrome-extension://*, devtools://*, view-source:,
 #     about:*, javascript:, data:, file://) except about:blank and chrome://newtab (which opens about:blank), so neither
 #     the agent nor a page can read history, settings or the list of signed-in sites there.
+#   - viewer.css: neko's web client shows its on-screen keyboard button only below 769 px, so an
+#     iPad could tap but not type; this stylesheet (linked from neko's index.html) shows it on touch
+#     screens of any width.
 FROM ghcr.io/m1k1o/neko/chromium:3.2.0@sha256:270face8b8111e639744fb7bcdbbf0deed227900bb89d58b2f8adfc12af8c41e
 
 COPY chromium.conf /etc/neko/supervisord/chromium.conf
 COPY chromium-start.sh /usr/local/bin/chromium-start.sh
 COPY policies.json /etc/chromium/policies/managed/policies.json
 RUN chmod 0755 /usr/local/bin/chromium-start.sh && chmod 0644 /etc/neko/supervisord/chromium.conf /etc/chromium/policies/managed/policies.json
+COPY viewer.css /var/www/assets/bp-viewer.css
+RUN chmod 0644 /var/www/assets/bp-viewer.css \
+  && sed -i 's#</head>#<link rel="stylesheet" href="./assets/bp-viewer.css"></head>#' /var/www/index.html \
+  && grep -q 'href="./assets/bp-viewer.css"' /var/www/index.html

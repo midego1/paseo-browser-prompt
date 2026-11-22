@@ -394,6 +394,8 @@ export function stackRelayArgs(input: StackInput, secrets: StackSecrets): string
     "--env",
     `BP_NEKO_ADMIN_PASSWORD=${secrets.nekoAdminPassword}`,
     "--env",
+    `BP_NEKO_USER_PASSWORD=${secrets.nekoUserPassword}`,
+    "--env",
     `BP_SCREEN_LANDSCAPE=${SCREEN_LANDSCAPE}`,
     "--env",
     `BP_SCREEN_PORTRAIT=${SCREEN_PORTRAIT}`,

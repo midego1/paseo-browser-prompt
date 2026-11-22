@@ -22,7 +22,7 @@ export const SERVER_BROWSER_FILE_NAMES = [
 export const SERVER_BROWSER_RUNTIME_FILE_NAMES = ["launch.mjs", "seccomp.json"];
 
 /** The signed-in Server browser image's build context (signed-in/): neko plus the plugin's overrides. */
-export const SIGNED_IN_FILE_NAMES = ["Dockerfile", "chromium-start.sh", "chromium.conf", "policies.json"];
+export const SIGNED_IN_FILE_NAMES = ["Dockerfile", "chromium-start.sh", "chromium.conf", "policies.json", "viewer.css"];
 
 const readDefault = (name) => readFileSync(new URL(`../server-browser/${name}`, import.meta.url), "utf8");
 const readSignedInDefault = (name) => readFileSync(new URL(`../signed-in/${name}`, import.meta.url), "utf8");

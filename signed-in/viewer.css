@@ -1,0 +1,10 @@
+/* browser-prompt: neko's client shows its on-screen keyboard button (and the take-control button on
+   the video) only on screens up to 768 px wide (`phone:block hidden`), so on an iPad (834 px and
+   wider) the owner could tap but never type. Touch screens of any width get them too. neko renders
+   the keyboard button only on touch devices (no fine pointer, no hover), so this changes nothing
+   with a mouse or trackpad. */
+@media (pointer: coarse) and (min-width: 769px) {
+  .phone\:block {
+    display: block;
+  }
+}

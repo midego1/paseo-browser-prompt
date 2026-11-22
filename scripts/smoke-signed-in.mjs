@@ -7,6 +7,11 @@
 //   SMOKE_CHROMIUM=/path/to/chrome \
 //   node --experimental-strip-types --no-warnings scripts/smoke-signed-in.mjs
 //
+// The Safari checks run WebKit in the Playwright image (SMOKE_WEBKIT_IMAGE, default
+// mcr.microsoft.com/playwright:v1.65.1-noble; playwright-core in SMOKE_PLAYWRIGHT_CORE must be the
+// same version) with a remote Playwright server published on 127.0.0.1:SMOKE_WEBKIT_PORT. Skip them
+// with SMOKE_WEBKIT=0.
+//
 // Page contents are read and prepared by a separate DevTools helper container (the harness), never
 // through the agent's MCP. Checks: images (build when missing), the stack starts; the agent's
 // Playwright MCP lists only the signed-in tools (no evaluate, console or network) and never sees
@@ -14,6 +19,8 @@
 // (chrome://, view-source:, about:) are refused from inside; a headless phone-emulated viewer logs
 // in through the key flow (cookie with a random name, scoped to a random path), takes control (the
 // agent's tool calls are paused meanwhile), taps and types into the agent's page, and releases it;
+// the same with WebKit as an iPad, an iPhone and desktop Safari, pressing every neko control their
+// layout shows, without one refused request or "Blocked" toast;
 // one run at a time; a cookie survives a neko restart; the relay refuses /metrics, admin APIs,
 // foreign Host and foreign-Origin WebSockets; no STUN servers; the hardening as Docker reports it;
 // and the cleanup.
@@ -128,6 +135,10 @@ function upgrade(headers, path) {
 
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 let browser = null;
+let webkitBrowser = null;
+let webkitContainer = null;
+const WEBKIT_PORT = Number(process.env.SMOKE_WEBKIT_PORT ?? String(PORT + 90));
+const WEBKIT_IMAGE = process.env.SMOKE_WEBKIT_IMAGE ?? "mcr.microsoft.com/playwright:v1.65.1-noble";
 try {
   // 1. Images (the consent bypass: only in this script).
   let status = await si.status({ build: true });
@@ -311,6 +322,98 @@ process.exit(0);`;
   r = await agent.call("browser_snapshot", {});
   check("closing the viewer without releasing control resets it: the run goes on", !r.error, r.error ? r.text.slice(0, 80) : "");
 
+  // 5b. Safari: the same key flow with WebKit (iPad as iPadOS Safari reports itself, iPhone, desktop
+  // Safari). WebKit runs in the Playwright image on the stack's outward network with a forward of
+  // 127.0.0.1:PORT and :PORT+1 to the relay, so it sees the same origin and ICE-TCP address as a
+  // real client. Every neko button a tablet or desktop layout shows (room locks, the settings tab)
+  // is pressed: none may end in a refused request or the relay's "Blocked" toast.
+  if (process.env.SMOKE_WEBKIT !== "0") {
+    const relayAddr = relayName;
+    const forward = `const net=require("net");for(const [lp,rp] of [[${PORT},8080],[${PORT + 1},${PORT + 1}]])net.createServer(c=>{const u=net.connect(rp,${JSON.stringify(relayAddr)});c.pipe(u);u.pipe(c);c.on("error",()=>u.destroy());u.on("error",()=>c.destroy());}).listen(lp,"127.0.0.1");`;
+    webkitContainer = `bp-smoke-webkit-${Math.random().toString(16).slice(2, 10)}`;
+    docker(
+      "run", "-d", "--rm", "--init", "--name", webkitContainer, "--network", neko.replace(/-neko$/, "-pub"),
+      "--publish", `127.0.0.1:${WEBKIT_PORT}:3000`, "--mount", `type=bind,source=${join(process.env.SMOKE_PLAYWRIGHT_CORE ?? "", "node_modules", "playwright-core")},target=/pw/playwright-core,readonly`,
+      "--user", "pwuser", "--security-opt", "no-new-privileges", "--env", `BP_FORWARD=${forward}`, "--entrypoint", "sh", WEBKIT_IMAGE,
+      "-c", 'node -e "$BP_FORWARD" & exec node /pw/playwright-core/cli.js run-server --port 3000 --host 0.0.0.0',
+    );
+    const { webkit, devices } = require("playwright-core");
+    for (let i = 0; i < 60 && !webkitBrowser; i++) webkitBrowser = await webkit.connect(`ws://127.0.0.1:${WEBKIT_PORT}/`).catch(() => sleep(500).then(() => null));
+    check("WebKit: browser up in the Playwright image", !!webkitBrowser, WEBKIT_IMAGE);
+    const ipadSafariUa = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
+    for (const [name, descriptor, phoneLink] of [
+      ["iPad (iPadOS Safari, desktop UA)", { ...devices["iPad Pro 11"], userAgent: ipadSafariUa }, false],
+      ["iPhone 15", devices["iPhone 15"], true],
+      ["desktop Safari", devices["Desktop Safari"], false],
+    ]) {
+      if (!webkitBrowser) break;
+      helper(`${pageByMarker("bp-smoke=takeover")} await page.bringToFront(); await page.evaluate(() => { window.clicks = 0; document.getElementById("user").value = ""; }); return 1;`);
+      const wlink = await si.viewerLink({ purpose: "takeover", portrait: phoneLink });
+      const ctx = await webkitBrowser.newContext({ ...descriptor });
+      const wpage = await ctx.newPage();
+      const wrefused = [];
+      wpage.on("response", (res) => res.status() >= 400 && wrefused.push(`${res.request().method()} ${res.status()} ${new URL(res.url()).pathname.replace(/^\/s-[0-9a-f]{32}/, "")}`));
+      const blockedToasts = () => wpage.evaluate((text) => [...document.querySelectorAll("[data-sonner-toast]")].filter((t) => t.textContent.includes(text)).length, "Blocked by the browser-prompt relay.");
+      try {
+        await wpage.goto(wlink.url);
+        await wpage.waitForURL(/\/s-[0-9a-f]{32}\/$/, { timeout: 20_000 });
+        await wpage.waitForSelector("video", { timeout: 20_000 });
+        await wpage.waitForFunction(() => { const v = document.querySelector("video"); return v && v.videoWidth > 0 && !v.paused; }, null, { timeout: 20_000 }).catch(() => {});
+        const wvideo = await wpage.evaluate(() => { const v = document.querySelector("video"); return { w: v.videoWidth, h: v.videoHeight, playing: !v.paused }; });
+        check(`WebKit ${name}: live stream`, wvideo.playing && wvideo.w > 0 && (!phoneLink || (wvideo.w === 720 && wvideo.h === 1280)), `${wvideo.w}x${wvideo.h}${phoneLink ? ", portrait" : ""}`);
+        // Every admin-looking control neko shows in this layout.
+        for (const selector of ["[data-testid=lock-control]", "[data-testid=lock-login]", "[data-testid=side-toggle]", "[role=tab]:nth-of-type(2)"]) {
+          const control = wpage.locator(selector).first();
+          if (await control.count()) await control.click({ force: true, timeout: 3000 }).catch(() => {});
+          await wpage.waitForTimeout(800);
+        }
+        for (const box of await wpage.locator("[role=tabpanel] input[type=checkbox]").all()) await box.click({ force: true, timeout: 2000 }).catch(() => {});
+        await wpage.waitForTimeout(800);
+        const sideToggle = wpage.locator("[data-testid=side-toggle]").first();
+        if (await sideToggle.count()) await sideToggle.click({ force: true }).catch(() => {});
+        // Take control with the button this layout shows.
+        const request = wpage.locator('[data-testid=control-request]:visible, button[aria-label="Request Controls"]:visible').first();
+        await request.click({ force: true, timeout: 5000 });
+        await wpage.waitForTimeout(2500);
+        r = await agent.call("browser_snapshot", {});
+        check(`WebKit ${name}: Request controls takes control (the run pauses)`, r.error && /owner has taken over/.test(r.text), r.text.slice(0, 70));
+        const vbox = await wpage.locator("video").first().boundingBox();
+        const sc = Math.min(vbox.width / wvideo.w, vbox.height / wvideo.h);
+        const wat = (fx, fy) => ({ x: vbox.x + (vbox.width - wvideo.w * sc) / 2 + wvideo.w * sc * fx, y: vbox.y + (vbox.height - wvideo.h * sc) / 2 + wvideo.h * sc * fy });
+        const touch = !!descriptor.hasTouch;
+        for (const [fx, fy] of [[0.5, 0.85], [0.5, 0.85], [0.5, 0.3]]) {
+          const p = wat(fx, fy);
+          if (touch) await wpage.touchscreen.tap(p.x, p.y);
+          else await wpage.mouse.click(p.x, p.y);
+          await wpage.waitForTimeout(600);
+        }
+        if (touch) {
+          const wkeyboard = wpage.locator("[data-testid=keyboard-toggle]");
+          check(`WebKit ${name}: keyboard toggle shown while in control`, (await wkeyboard.count()) > 0);
+          if (await wkeyboard.count()) await wkeyboard.first().tap().catch(() => {});
+          await wpage.waitForTimeout(300);
+        }
+        await wpage.keyboard.type("safari", { delay: 60 });
+        await wpage.waitForTimeout(1000);
+        const wseen = helper(`${pageByMarker("bp-smoke=takeover")} return page.evaluate(() => ({ user: document.getElementById("user").value, clicks: window.clicks || 0 }));`);
+        check(`WebKit ${name}: taps and typing reach the agent's page`, wseen?.user === "safari" && wseen?.clicks === 2, JSON.stringify(wseen));
+        check(`WebKit ${name}: no refused requests and no "Blocked" toast`, wrefused.length === 0 && (await blockedToasts()) === 0, wrefused.join(", "));
+      } catch (error) {
+        check(`WebKit ${name}: viewer`, false, error instanceof Error ? error.message.split("\n")[0] : String(error));
+      } finally {
+        await ctx.close().catch(() => {});
+      }
+      await sleep(3500);
+      r = await agent.call("browser_snapshot", {});
+      check(`WebKit ${name}: closing the viewer resets control`, !r.error, r.error ? r.text.slice(0, 80) : "");
+    }
+    // Off the stack's network before the stack stops (a stop removes it).
+    await webkitBrowser?.close().catch(() => {});
+    webkitBrowser = null;
+    docker("rm", "-f", webkitContainer);
+    webkitContainer = null;
+  }
+
   // 6. Relay refusals with a valid session (a new viewer session, the old page is closed).
   const link2 = await si.viewerLink({ purpose: "login", portrait: false });
   const ticket2 = decodeURIComponent(new URL(link2.url).hash.slice(3).split("&")[0]);
@@ -389,6 +492,14 @@ process.exit(0);`;
   check("smoke run", false, error instanceof Error ? error.stack : String(error));
 } finally {
   if (browser) await browser.close().catch(() => {});
+  if (webkitBrowser) await webkitBrowser.close().catch(() => {});
+  if (webkitContainer) {
+    try {
+      docker("rm", "-f", webkitContainer);
+    } catch {
+      // already gone
+    }
+  }
   // 8. Cleanup: everything but the images.
   await si.logout().catch((error) => console.log(`logout failed: ${error.message}`));
   const instance = await sb.instance();
