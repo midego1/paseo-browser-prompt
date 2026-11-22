@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.23.0 (unreleased)
+
+- **Bitwarden in the signed-in Server browser (optional, off by default).** Settings › Signed-in
+  Server browser › **Download and enable Bitwarden**, then **Confirm download** (the daemon refuses a
+  download that is not confirmed): the daemon builds a variant of the signed-in image with the
+  Bitwarden Password Manager release pinned in `signed-in-bitwarden/bitwarden.json` (2026.11.0 from
+  Bitwarden's GitHub releases; size and SHA-256 checked; the same files as the Chrome Web Store
+  build), packed unchanged into a CRX with a key made for that build, and Chromium force-installs it
+  by policy from a local update manifest (it never updates itself; every other extension is blocked,
+  developer mode off, the store blocked). Use it while you hold control: unlock it, fill logins from
+  the inline menu, toolbar popup or shortcut, and use it for passkeys.
+- The agent never gets it: the DevTools filter hides every `chrome-extension://` target and the frames
+  Bitwarden puts into its pages (also one that commits to an extension page after it attached),
+  refuses navigation to extension pages, clicks and taps on extension frames, keys while the focus
+  is in one (read in the filter's own isolated world), and the `Extensions` domain; while you hold
+  control it refuses everything that acts on or reads a page. The MCP filter refuses tool calls that
+  name an extension page; the agent is told never to open or use the password manager.
+- Every time you release control (or close the viewer), Bitwarden is locked before the run goes on:
+  the relay keeps the run paused until the daemon has called Bitwarden's own lock through Chromium's
+  DevTools (from a short-lived locked-down container, not the agent's filter) and verified that no
+  account is unlocked; otherwise a reload of the extension, then a browser restart. Only a verified
+  lock lets the run continue; the card and the settings show a pending or failed lock and offer
+  **Lock Bitwarden now** and **Restart browser**. With Bitwarden, the run's takeover guard fails
+  closed when the relay cannot be asked, and the daemon locks the vault anyway.
+- **Turn Bitwarden off** uninstalls it and removes its data from the profile at the browser's next
+  start. The extension is signed with this install's key (made once, kept 0600 in the plugin's state
+  directory, given to the image build only as a BuildKit secret), so its id and Bitwarden's local
+  data survive new images and pins; a new pin asks for a new confirmation (the consent names the
+  release's SHA-256). The signed-in image is rebuilt once (its start script changed).
+- A lock that cannot be verified is reported to the run ("the owner has to act"), retried after a
+  growing pause, never while you hold control, and the browser is restarted for it only with no
+  viewer connected. Unknown settings never switch the browser's image.
+- A running signed-in browser started from an older image (after a plugin update, or Bitwarden turned
+  on or off) is stopped gracefully and started again with the right image as soon as no run holds it;
+  meanwhile the settings show **Update pending**.
+- The settings show the recommended Bitwarden settings first (vault timeout 1 minute with Lock, never
+  "Never", no PIN, autofill on page load off, no card or identity suggestions), which Bitwarden offers
+  no policy for.
+- Smoke test: with Bitwarden (on unless `SMOKE_BITWARDEN=0`), the pin, force-install and policies,
+  that the agent cannot see, attach to, open, click or type into any extension target or frame (also
+  a real Bitwarden frame in its tab), the verified lock (also with a page holding fullscreen and the
+  keyboard), releasing control from WebKit (iPad, iPhone, desktop Safari) locking the vault, a relay
+  that goes away during a run, a new pin under a run, and turning Bitwarden off.
+
 ## 0.22.3 (unreleased)
 
 - Signed-in browser on an iPad with a hardware keyboard (Magic Keyboard): after **Request

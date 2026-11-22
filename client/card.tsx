@@ -8,7 +8,7 @@ import { agentTitle, CHROME_RUN_MARKER, chromeAvailable, DEFAULT_AGENT_SETTINGS,
 import { SERVER_BROWSER_STATE_MESSAGES, SERVER_RUN_MARKER, serverRunLabels } from "../shared/server-browser";
 import { prepareServerBrowserRun, serverBrowserStatus } from "../shared/server-browser-rpc";
 import { SIGNED_IN_RUN_MARKER, SIGNED_IN_STATE_MESSAGES, signedInRunLabels } from "../shared/signed-in";
-import { prepareSignedInRun, signedInStatus, signedInViewerLink } from "../shared/signed-in-rpc";
+import { prepareSignedInRun, signedInBitwarden, signedInStatus, signedInViewerLink } from "../shared/signed-in-rpc";
 import { MOST_RECENT_FALLBACK } from "../shared/report-back";
 import {
   addRunRecord,
@@ -59,6 +59,9 @@ const CHROME_HINT = "Chrome must be open with the Claude extension signed in: th
 const SERVER_HINT = "Runs in a browser on the Paseo server: no desktop app needed, but not signed in to your accounts.";
 const SIGNED_IN_HINT =
   "Runs in your signed-in browser on the Paseo server: no desktop app needed. Use Take over to watch it, or to log in or enter a 2FA code from any device (in a new tab: the agent cannot see tabs you open).";
+/** Under the Take over button while a signed-in run waits for the owner. */
+const SIGNED_IN_TAKEOVER_HELP =
+  "Tap the mouse icon to take control and log in in a new tab (+). With Bitwarden in the signed-in browser: unlock it there and fill from its toolbar icon, the field's suggestion or a passkey prompt; release control when done, and Bitwarden is locked again before the run goes on.";
 const HINTS: Record<BrowserAgent, string> = { paseo: DESKTOP_HINT, chrome: CHROME_HINT, server: SERVER_HINT, "signed-in": SIGNED_IN_HINT };
 const BROWSER_NAMES: Record<BrowserAgent, string> = {
   paseo: "in Paseo browser",
@@ -157,7 +160,11 @@ export function BrowserPromptCard({
   const signedInState = useRpc(signedInStatus);
   const prepareSignedIn = useRpc(prepareSignedInRun);
   const viewerLink = useRpc(signedInViewerLink);
+  const bitwardenAction = useRpc(signedInBitwarden);
   const [openingViewer, setOpeningViewer] = useState(false);
+  /** Bitwarden's lock state while a signed-in run waits for the owner (polled every 5 s then). */
+  const [vaultLock, setVaultLock] = useState<{ pending: boolean; failed: string | null } | null>(null);
+  const [locking, setLocking] = useState(false);
   const unlockRun = useRpc(finishRunLock);
   const startMode = settings.status === "ready" ? settings.values.startMode : DEFAULT_MODES.startMode;
   const mobileStartMode =
@@ -565,6 +572,21 @@ export function BrowserPromptCard({
     else void launchAgent(launch);
   }
 
+  /** The owner's Lock now / Restart browser for Bitwarden, when a run waits for the vault lock. */
+  async function lockVault(action: "lock" | "restart-browser") {
+    if (locking) return;
+    setLocking(true);
+    try {
+      const result = await within(bitwardenAction({ action }), 200_000);
+      if (result.ok) toast.show(result.message);
+      else toast.error(result.message);
+    } catch (error) {
+      toast.error(`Could not lock Bitwarden: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setLocking(false);
+    }
+  }
+
   /** Opens the owner's viewer of the signed-in browser (a one-time link from the daemon, never shown in chat). */
   async function takeOver() {
     if (openingViewer) return;
@@ -582,6 +604,31 @@ export function BrowserPromptCard({
       setOpeningViewer(false);
     }
   }
+
+  const waitingSignedIn = !!runAgentId && runBrowser === "signed-in" && (runState === "needs-input" || shownState === "asking");
+  useEffect(() => {
+    if (!waitingSignedIn) {
+      setVaultLock(null);
+      return;
+    }
+    let stopped = false;
+    const read = async () => {
+      try {
+        const status = await within(signedInState({}), SERVER_BROWSER_RPC_TIMEOUT_MS);
+        if (stopped) return;
+        const bw = status.bitwarden;
+        setVaultLock(bw.active || bw.lockPending ? { pending: bw.lockPending, failed: bw.lastLock && !bw.lastLock.ok ? bw.lastLock.detail : null } : null);
+      } catch {
+        // the next poll tries again
+      }
+    };
+    void read();
+    const timer = setInterval(() => void read(), 5000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [waitingSignedIn]);
 
   const runVisuals = shownState === "asking" ? { icon: "CircleAlert", color: theme.colors.statusWarning } : runVisual(runState, theme);
 
@@ -817,6 +864,27 @@ export function BrowserPromptCard({
           <Icon name="Globe" size={14} color={theme.colors.accentForeground} />
           <Text style={styles.primaryText}>{openingViewer ? "Opening…" : "Take over the browser"}</Text>
         </Pressable>
+      ) : null}
+      {runAgentId && runBrowser === "signed-in" && (runState === "needs-input" || shownState === "asking") ? (
+        <Text style={styles.hint}>{SIGNED_IN_TAKEOVER_HELP}</Text>
+      ) : null}
+      {waitingSignedIn && vaultLock?.pending ? (
+        // The run waits until Bitwarden is locked after a takeover (the daemon does it within seconds).
+        <View style={{ gap: 6 }}>
+          <Text style={styles.hint}>
+            {vaultLock.failed
+              ? `Bitwarden could not be locked yet, so the run stays paused: ${vaultLock.failed}`
+              : "Locking Bitwarden after your takeover; the run goes on once it is locked."}
+          </Text>
+          <View style={styles.actions}>
+            <Pressable accessibilityRole="button" accessibilityLabel="Lock Bitwarden now" disabled={locking} onPress={() => void lockVault("lock")} style={[styles.secondary, { opacity: locking ? 0.5 : 1 }]}>
+              <Text style={styles.secondaryText}>{locking ? "Locking…" : "Lock Bitwarden now"}</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Restart the signed-in browser and lock Bitwarden" disabled={locking} onPress={() => void lockVault("restart-browser")} style={[styles.secondary, { opacity: locking ? 0.5 : 1 }]}>
+              <Text style={styles.secondaryText}>Restart browser</Text>
+            </Pressable>
+          </View>
+        </View>
       ) : null}
       {runAgentId && runState === "needs-input" ? (
         <OwnerPromptBox

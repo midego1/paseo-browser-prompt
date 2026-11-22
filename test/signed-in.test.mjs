@@ -6,7 +6,8 @@
 // settings, and the card and settings surfaces.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
@@ -38,6 +39,11 @@ import {
   TICKET_LABEL,
 } from "../shared/server-browser.ts";
 import {
+  BITWARDEN,
+  bitwardenIdFromPin,
+  bitwardenImageTag,
+  bitwardenToolArgs,
+  parseBitwardenTool,
   bindHostAllowed,
   checkStackRun,
   DEFAULT_SIGNED_IN_PORT,
@@ -64,20 +70,25 @@ import {
   viewerOrigins,
 } from "../shared/signed-in.ts";
 import { createServerBrowser } from "../server/server-browser.ts";
-import { createSignedIn, loadKeys, relaySecret, signViewerTicket } from "../server/signed-in.ts";
-import { SIGNED_IN_FILES } from "../server/server-browser-files.ts";
+import { createSignedIn, extensionIdOfKey, loadKeys, relaySecret, signViewerTicket } from "../server/signed-in.ts";
+import { SIGNED_IN_BITWARDEN_FILES, SIGNED_IN_FILES } from "../server/server-browser-files.ts";
 import { checkPlan, launch } from "../server-browser/launch.mjs";
 import {
   createCallTracker,
   createControlGuard,
+  EXTENSION_URL_TEXT,
+  LOCK_FAILED_TEXT,
+  SECURING_TEXT,
   filterClientLine,
+  namesExtensionPage,
   filterServerLine,
   OWNER_CONTROL_TEXT,
   SIGNED_IN_ALLOWED_TOOLS,
   SIGNED_IN_REMOVED_TOOLS as FILTER_REMOVED,
   toolAllowed,
 } from "../server-browser/mcp-filter.mjs";
-import { createTargetFilter, REFUSED_METHODS } from "../server-browser/cdp-filter.mjs";
+import { createTargetFilter, FOCUS_WORLD, HELD_REFUSED, isExtensionUrl, REFUSED_METHODS } from "../server-browser/cdp-filter.mjs";
+import { isLocked, LOCK_EXPRESSION, STATUS_EXPRESSION } from "../server-browser/bitwarden-lock.mjs";
 import {
   BLOCKED_TEXT,
   classifyRequest,
@@ -589,7 +600,7 @@ test("the run's MCP filter pauses every tool call while the owner holds control"
   const list = JSON.stringify({ jsonrpc: "2.0", id: 8, method: "tools/list" });
   assert.deepEqual(filterClientLine(list, { ownerControl: true }), { forward: list }, "listing tools still works");
   const entry = readFileSync(new URL("../server-browser/entrypoint.mjs", import.meta.url), "utf8");
-  assert.match(entry, /const verdict = filterClientLine\(line, \{ ownerControl: guard\.held\(\), signedIn \}\);/);
+  assert.match(entry, /const verdict = filterClientLine\(line, \{ ownerControl: guard\.held\(\), securing: guard\.securing\(\), lockFailed: guard\.lockFailed\(\), signedIn \}\);/);
   assert.match(entry, /if \(signedIn\) calls\.started\(verdict\.forward\);/);
   assert.match(entry, /if \(kept !== null && signedIn\) kept = calls\.finish\(kept, guard\.held\(\)\);/);
   assert.match(entry, /if \(polling\) return;/, "never two polls at once");
@@ -853,11 +864,25 @@ function fakeStackDocker({ serverImage = true, nekoImage = true } = {}) {
     if (sub === "info") return ok('["name=rootless"]');
     if (sub === "image" && second === "inspect") {
       const tag = args.at(-1);
-      const kind = tag.startsWith("browser-prompt-signed-in:") ? "neko" : "server";
+      const kind = tag.startsWith("browser-prompt-signed-in:") ? (/-bw\d/.test(tag) ? "bitwarden" : "neko") : "server";
       return state.images.has(kind) ? ok("sha256:x") : { code: 1, stdout: "", stderr: "No such image" };
     }
+    if (sub === "exec") {
+      state.execs = [...(state.execs ?? []), args];
+      if (args.includes("/opt/bitwarden/browser-prompt-pin.json")) return /-bw\d/.test(state.nekoImage ?? "") ? ok(JSON.stringify({ id: state.bitwardenId ?? "k".repeat(32) })) : { code: 1, stdout: "", stderr: "No such file" };
+      if (args.at(-1) === "/home/neko/.config/chromium/.bp-bitwarden-ids") return state.idsFile === undefined ? { code: 1, stdout: "", stderr: "" } : ok(state.idsFile);
+      if (args.includes("sh") && /find \/home\/neko\/\.config\/chromium -name/.test(args.at(-1))) {
+        const id = /\*([a-p]{32})\*/.exec(args.at(-1))?.[1];
+        return ok(state.traces?.has(id) ? `/home/neko/.config/chromium/Default/x-${id}\n` : "");
+      }
+      if (args.includes("sh") && /bp-bitwarden-ids/.test(args.at(-1))) {
+        state.idsFile = /printf '%s' '([^']*)' >/.exec(args.at(-1))?.[1] ?? "";
+        return ok();
+      }
+      return ok();
+    }
     if (sub === "build") {
-      state.images.add(args.includes("browser-prompt.signed-in=image") ? "neko" : "server");
+      state.images.add(args.includes("browser-prompt.signed-in=image") ? "neko" : args.includes("browser-prompt.signed-in=bitwarden-image") ? "bitwarden" : "server");
       return ok();
     }
     if (sub === "ps") {
@@ -884,12 +909,21 @@ function fakeStackDocker({ serverImage = true, nekoImage = true } = {}) {
       state.volumes.delete(args[2]);
       return ok();
     }
+    if (sub === "run" && args.includes("/opt/browser-prompt/bitwarden-lock.mjs")) {
+      const at = args.indexOf("/opt/browser-prompt/bitwarden-lock.mjs");
+      const mode = args[at + 1];
+      state.tools = [...(state.tools ?? []), { mode, ids: args.slice(at + 2), args }];
+      const answer = (state.tool ?? (() => ({ locked: true, detail: "" })))(mode, args.slice(at + 2));
+      return ok(`${JSON.stringify({ mode, ...answer })}\n`);
+    }
     if (sub === "run") {
       state.containers.set(value(args, "--name")[0], "running");
+      if (/-neko$/.test(value(args, "--name")[0])) state.nekoImage = args.at(-1);
       const tag = value(args, "--label").find((label) => label.startsWith("browser-prompt.signed-in-config="));
       if (tag) state.relayTag = tag.split("=")[1];
       return ok("cid");
     }
+    if (sub === "inspect" && args[2] === "{{.Config.Image}}") return ok(/-neko$/.test(args[3]) && state.containers.has(args[3]) ? `${state.nekoImage}\n` : "");
     if (sub === "inspect") return args[2].includes("IPAddress") ? ok("172.30.0.2\n") : ok(state.relayTag ?? "");
     if (sub === "stop") return ok();
     if (sub === "rm") {
@@ -928,7 +962,7 @@ function makeSignedIn(docker, extra = {}) {
     keysFile: join(dir, "keys.json"),
     buildRoot: join(dir, "build"),
     bindHost: async () => "100.96.145.38",
-    config: async () => ({ port: 5301, httpsBaseUrl: "" }),
+    config: async () => ({ port: 5301, httpsBaseUrl: "", bitwarden: false }),
     relayStatus: async () => (relayUp ? { viewers: relayViewers, idleMs: relayLastViewer === null ? 0 : t - relayLastViewer, nekoUp: true, portrait: false } : null),
     sleep: async () => {},
     now: () => t,
@@ -1090,7 +1124,8 @@ test("signed-in image: pinned neko, sandbox on, DevTools on loopback only, the p
   const start = SIGNED_IN_FILES["chromium-start.sh"];
   assert.match(start, /--proxy-server="\$BP_PROXY" --proxy-bypass-list="<-loopback>"/);
   assert.match(start, /refusing to start Chromium without the proxy/);
-  assert.match(start, /rm -f \/home\/neko\/\.config\/chromium\/SingletonLock/);
+  assert.match(start, /^PROFILE=\/home\/neko\/\.config\/chromium$/m);
+  assert.match(start, /rm -f "\$PROFILE\/SingletonLock"/);
   const policies = JSON.parse(SIGNED_IN_FILES["policies.json"]);
   assert.equal(policies.DefaultCookiesSetting, 1);
   assert.equal(policies.DeveloperToolsAvailability, 1);
@@ -1380,7 +1415,7 @@ test("card and settings: Take over opens a one-time link from the daemon, and do
   assert.match(settings, /if \(armed !== "build"\) return setArmed\("build"\);/);
   assert.match(settings, /if \(armed !== "logout"\) return setArmed\("logout"\);/);
   assert.match(settings, /if \(armed !== "rotate"\) return setArmed\("rotate"\);/);
-  assert.match(settings, /useEffect\(\(\) => setArmed\(null\), \[info\?\.state\]\);/);
+  assert.match(settings, /useEffect\(\(\) => setArmed\(null\), \[info\?\.state, info\?\.bitwarden\.state\]\);/);
   assert.equal(settings.match(/status\(\{ build: true \}\)/g)?.length, 1, "one build call, after the confirmation");
 });
 
@@ -1613,3 +1648,793 @@ test("a signed-in run that waits for the owner shows a full Take over button abo
   assert.ok(button > 0 && button < question, "the button comes before the question box");
   assert.match(card, /runBrowser === "signed-in" && \(runState === "needs-input" \|\| shownState === "asking"\)/);
 });
+
+// ---------------------------------------------------------------- Bitwarden (optional, for the owner during a takeover)
+
+const BW_DIR = new URL("../signed-in-bitwarden/", import.meta.url);
+const bwFile = (name) => readFileSync(new URL(name, BW_DIR), "utf8");
+
+test("Bitwarden pin: the shared constant and bitwarden.json agree; the release is Bitwarden's GitHub zip of that version", () => {
+  const pin = JSON.parse(bwFile("bitwarden.json"));
+  assert.deepEqual(pin, { version: BITWARDEN.version, url: BITWARDEN.url, sha256: BITWARDEN.sha256, size: BITWARDEN.size });
+  assert.match(BITWARDEN.sha256, /^[0-9a-f]{64}$/);
+  assert.equal(BITWARDEN.url, `https://github.com/bitwarden/clients/releases/download/browser-v${BITWARDEN.version}/bit-dist-chrome-${BITWARDEN.version}.zip`);
+  for (const name of Object.keys(SIGNED_IN_BITWARDEN_FILES)) assert.equal(SIGNED_IN_BITWARDEN_FILES[name], bwFile(name), `${name} is embedded as is`);
+  assert.deepEqual(Object.keys(SIGNED_IN_BITWARDEN_FILES).sort(), ["Dockerfile", "bitwarden.json", "install-bitwarden.py", "policy-overlay.json"]);
+});
+
+test("Bitwarden image: the verified release is packed unchanged into a CRX with this install's key (a BuildKit secret only) and force-installed from a local manifest", () => {
+  const dockerfile = bwFile("Dockerfile");
+  assert.match(dockerfile, /^ARG BASE_IMAGE\nFROM \$\{BASE_IMAGE\}$/m);
+  assert.match(dockerfile, /^ARG BITWARDEN_ID$/m);
+  assert.match(dockerfile, /RUN --mount=type=secret,id=bitwarden-key,required=true BITWARDEN_ID="\$\{BITWARDEN_ID\}" python3 -I \/tmp\/bp-bitwarden\/install-bitwarden\.py \/tmp\/bp-bitwarden && rm -rf \/tmp\/bp-bitwarden/);
+  assert.doesNotMatch(dockerfile, /ARG .*KEY|COPY .*\.pem/i, "the key never comes in as an argument or a file");
+  const script = bwFile("install-bitwarden.py");
+  for (const check of [
+    /if not pin\["url"\]\.startswith\(prefix\)/,
+    /if not newurl\.startswith\("https:\/\/"\)/,
+    /if len\(data\) != pin\["size"\]/,
+    /if digest != pin\["sha256"\]/,
+    /if name\.startswith\("\/"\) or "\\\\" in name or "\.\." in name\.split\("\/"\)/,
+    /if manifest\.get\("version"\) != pin\["version"\] or manifest\.get\("manifest_version"\) != 3/,
+    /if "update_url" in manifest or "key" in manifest/,
+    /"--pack-extension=" \+ source, "--pack-extension-key=" \+ key_secret/,
+    /key_secret = "\/run\/secrets\/bitwarden-key"/,
+    /finally:\n        if os\.path\.exists\(key_file\):\n            os\.remove\(key_file\)/,
+    /if ext_id != expected_id:/,
+    /finally:\n    # The work directory .*\n    shutil\.rmtree\(work, ignore_errors=True\)/,
+    /if want != got:\n\s+sys\.exit\("refusing: the packed extension differs from the release"\)/,
+    /codebase='file:\/\/\/opt\/bitwarden\/bitwarden\.crx' version='%s'/,
+    /policy\["ExtensionInstallForcelist"\] = \["%s;file:\/\/\/opt\/bitwarden\/updates\.xml" % ext_id\]/,
+    /policy\["ExtensionInstallAllowlist"\] = \[ext_id\]/,
+    /os\.chmod\(os\.path\.join\(target, name\), 0o644\)/,
+  ]) {
+    assert.match(script, check);
+  }
+  assert.doesNotMatch(script, /suggested_key|manifest\["key"\]/, "the release's manifest is not changed");
+  const tag = bitwardenImageTag("browser-prompt-signed-in:neko3.2.0-0123456789ab", "f".repeat(64));
+  assert.equal(tag, `browser-prompt-signed-in:neko3.2.0-0123456789ab-bw${BITWARDEN.version}-ffffffffffff`);
+  assert.throws(() => bitwardenImageTag("evil:latest", "f".repeat(64)));
+  assert.throws(() => bitwardenImageTag("browser-prompt-signed-in:neko3.2.0-0123456789ab", "xyz"));
+  assert.equal(bitwardenIdFromPin(JSON.stringify({ id: "a".repeat(32) })), "a".repeat(32));
+  assert.equal(bitwardenIdFromPin(JSON.stringify({ id: "nope" })), null);
+  assert.equal(bitwardenIdFromPin("garbage"), null);
+});
+
+test("Bitwarden policy: every other extension blocked (blocklist *, developer mode off), extension pages unblocked for its dynamic frames, store blocked, Chromium's password manager off", () => {
+  const base = JSON.parse(SIGNED_IN_FILES["policies.json"]);
+  const overlay = JSON.parse(bwFile("policy-overlay.json"));
+  // The same steps as install-bitwarden.py.
+  const id = "k".repeat(32);
+  const policy = { ...base, ...overlay.set };
+  for (const [name, values] of Object.entries(overlay.drop)) policy[name] = policy[name].filter((v) => !values.includes(v));
+  for (const [name, values] of Object.entries(overlay.append)) policy[name] = [...(policy[name] ?? []), ...values.filter((v) => !(policy[name] ?? []).includes(v))];
+  policy.ExtensionInstallAllowlist = [id];
+  policy.ExtensionInstallForcelist = [`${id};file:///opt/bitwarden/updates.xml`];
+  assert.deepEqual(policy.ExtensionInstallBlocklist, ["*"]);
+  assert.equal(policy.ExtensionDeveloperModeSettings, 1);
+  assert.deepEqual(policy.ExtensionAllowedTypes, ["extension"]);
+  assert.deepEqual(policy.ExtensionInstallSources, []);
+  assert.equal(policy.BlockExternalExtensions, true);
+  assert.equal(policy.DeveloperToolsAvailability, 1, "DevTools on force-installed extensions: the daemon's lock check needs them (the agent never gets them)");
+  assert.equal(policy.PasswordManagerEnabled, false);
+  assert.equal(policy.AutofillAddressEnabled, false);
+  assert.equal(policy.AutofillCreditCardEnabled, false);
+  assert.ok(!policy.URLBlocklist.includes("chrome-extension://*"), "Bitwarden's inline menu frames have dynamic ids no allowlist entry can name");
+  assert.deepEqual(policy.URLAllowlist, ["about:blank", "chrome://newtab"], "no dead allowlist entry");
+  for (const store of ["chromewebstore.google.com", "chrome.google.com/webstore"]) assert.ok(policy.URLBlocklist.includes(store), store);
+  for (const blocked of base.URLBlocklist.filter((u) => u !== "chrome-extension://*")) assert.ok(policy.URLBlocklist.includes(blocked), blocked);
+});
+
+test("chromium-start.sh: records the installed Bitwarden build and removes the data of every build that is not installed now", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bp-bw-start-"));
+  const runStart = () =>
+    spawnSync(
+      "sh",
+      ["-c", `sed -e "s|^PROFILE=.*|PROFILE=$T/profile|" -e "s|^PIN=.*|PIN=$T/pin.json|" -e "s|exec /usr/bin/chromium|exec echo|" "$0" | sh -s -- --flag`, new URL("../signed-in/chromium-start.sh", import.meta.url).pathname],
+      { env: { PATH: "/usr/bin:/bin", BP_PROXY: "http://bp-si-0a1b2c3d-proxy:3128", T: dir }, encoding: "utf8" },
+    );
+  const oldId = "a".repeat(32);
+  const newId = "b".repeat(32);
+  const data = (id) => [
+    `Default/Local Extension Settings/${id}`,
+    `Default/IndexedDB/chrome-extension_${id}_0.indexeddb.leveldb`,
+    `Default/Storage/ext/${id}`,
+    `Default/Extensions/${id}`,
+    `Profile 1/Sync Extension Settings/${id}`,
+  ];
+  mkdirSync(join(dir, "profile"), { recursive: true });
+  for (const path of [...data(oldId), ...data(newId), "Default/Local Extension Settings/other"]) mkdirSync(join(dir, "profile", path), { recursive: true });
+  writeFileSync(join(dir, "profile", ".bp-bitwarden-ids"), `${oldId}\n`);
+  writeFileSync(
+    join(dir, "profile", "Default", "Preferences"),
+    JSON.stringify({
+      extensions: {
+        settings: { [oldId]: { location: 7 }, [newId]: { location: 7 }, other: { location: 5 } },
+        external_uninstalls: [oldId],
+        pinned: [`chrome-extension://${oldId}/popup`, "x"],
+        commands: { "linux:Ctrl+Shift+9": { command_name: "generate_password", extension: oldId, global: false }, "linux:Ctrl+Shift+L": { command_name: "autofill_login", extension: newId, global: false } },
+      },
+      keep: `chrome-extension://${newId}/a`,
+    }),
+  );
+  writeFileSync(join(dir, "profile", "Default", "Secure Preferences"), JSON.stringify({ protection: { macs: { extensions: { settings: { [oldId]: "m", other: "m" } } } } }));
+  // Bitwarden with a new build (a new pin): the new id is recorded, the old build's data goes.
+  writeFileSync(join(dir, "pin.json"), JSON.stringify({ version: "x", id: newId }));
+  let result = runStart();
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /--flag --proxy-server=http:\/\/bp-si-0a1b2c3d-proxy:3128 --proxy-bypass-list=<-loopback>/);
+  assert.doesNotMatch(result.stdout, /--load-extension|--disable-extensions-except/, "force-installed by policy, not loaded from the command line");
+  for (const path of data(oldId)) assert.equal(existsSync(join(dir, "profile", path)), false, `${path} removed`);
+  for (const path of data(newId)) assert.equal(existsSync(join(dir, "profile", path)), true, `${path} kept`);
+  const prefs = JSON.parse(readFileSync(join(dir, "profile", "Default", "Preferences"), "utf8"));
+  assert.deepEqual(
+    prefs,
+    {
+      extensions: {
+        settings: { [newId]: { location: 7 }, other: { location: 5 } },
+        external_uninstalls: [],
+        pinned: ["x"],
+        commands: { "linux:Ctrl+Shift+L": { command_name: "autofill_login", extension: newId, global: false } },
+      },
+      keep: `chrome-extension://${newId}/a`,
+    },
+    "the old build's preference entries (settings, uninstall records, shortcuts) are gone",
+  );
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, "profile", "Default", "Secure Preferences"), "utf8")), { protection: { macs: { extensions: { settings: { other: "m" } } } } });
+  assert.equal(readFileSync(join(dir, "profile", ".bp-bitwarden-ids"), "utf8"), `${oldId}\n${newId}\n`);
+  // Bitwarden off: every recorded build's data goes; nothing else.
+  rmSync(join(dir, "pin.json"));
+  result = runStart();
+  assert.equal(result.status, 0, result.stderr);
+  for (const path of data(newId)) assert.equal(existsSync(join(dir, "profile", path)), false, `${path} removed`);
+  assert.equal(existsSync(join(dir, "profile", "Default/Local Extension Settings/other")), true, "nothing else removed");
+  // A forged ids file cannot point the removal elsewhere.
+  writeFileSync(join(dir, "profile", ".bp-bitwarden-ids"), "../../etc\n*\n");
+  assert.equal(runStart().status, 0);
+  assert.equal(existsSync(join(dir, "profile", "Default/Local Extension Settings/other")), true);
+});
+
+test("Bitwarden tool: a short-lived, locked-down container in neko's namespace with its own DevTools connection; only checked modes and ids; locked only when verified", () => {
+  const args = bitwardenToolArgs({ stackId: "0a1b2c3d", instance: INSTANCE, serverImage: SERVER_IMAGE }, "lock", ["k".repeat(32)]);
+  assert.deepEqual(args.slice(0, 4), ["run", "--rm", "--init", "--pull"]);
+  assert.deepEqual(value(args, "--network"), ["container:bp-si-0a1b2c3d-neko"]);
+  assert.deepEqual(value(args, "--cap-drop"), ["ALL"]);
+  assert.ok(value(args, "--security-opt").includes("no-new-privileges"));
+  assert.ok(args.includes("--read-only"));
+  assert.deepEqual(value(args, "--user"), ["pwuser"]);
+  assert.deepEqual(args.slice(-4), [SERVER_IMAGE, "/opt/browser-prompt/bitwarden-lock.mjs", "lock", "k".repeat(32)]);
+  assert.ok(!args.some((a) => /^-v$|^--volume$|^--privileged$|^-p$|^--publish$/.test(a)));
+  assert.throws(() => bitwardenToolArgs({ stackId: "0a1b2c3d", instance: INSTANCE, serverImage: SERVER_IMAGE }, "evaluate", []));
+  assert.throws(() => bitwardenToolArgs({ stackId: "0a1b2c3d", instance: INSTANCE, serverImage: SERVER_IMAGE }, "lock", ["$(rm -rf /)"]));
+  assert.throws(() => bitwardenToolArgs({ stackId: "0a1b2c3d", instance: INSTANCE, serverImage: "evil:latest" }, "lock", []));
+  assert.deepEqual(parseBitwardenTool('noise\n{"mode":"lock","locked":true,"detail":""}\n'), { mode: "lock", locked: true, detail: "" });
+  assert.equal(parseBitwardenTool("not json"), null);
+  // The tool's verdict: Bitwarden answered, and no account is unlocked (2).
+  assert.equal(isLocked({ ready: true, accounts: 0, statuses: [] }), true, "no account: nothing unlocked");
+  assert.equal(isLocked({ ready: true, accounts: 2, statuses: [] }), false, "an empty list while accounts exist: not verified");
+  assert.equal(isLocked({ ready: true, statuses: [] }), false, "no account count: not verified");
+  assert.equal(isLocked({ ready: true, accounts: 2, statuses: [{ status: 1 }, { status: 0 }] }), true);
+  assert.equal(isLocked({ ready: true, accounts: 2, statuses: [{ status: 1 }, { status: 2 }] }), false, "one of several accounts unlocked");
+  assert.equal(isLocked({ ready: true, accounts: 1, statuses: [{ status: 3 }] }), false, "unknown status: not verified");
+  assert.equal(isLocked({ ready: false }), false, "no answer: not locked");
+  assert.equal(isLocked(null), false);
+  assert.match(STATUS_EXPRESSION, /authStatuses\$/);
+  assert.match(STATUS_EXPRESSION, /accountService\.accounts\$/);
+  assert.match(STATUS_EXPRESSION, /reason: "unknown shape"/);
+  assert.match(LOCK_EXPRESSION, /lockService\.lockAll\("browser-prompt"\)/);
+  const tool = readFileSync(new URL("../server-browser/bitwarden-lock.mjs", import.meta.url), "utf8");
+  assert.match(tool, /chrome\.storage\.session\.set\(\{ bpLockMarker/);
+  assert.match(tool, /chrome\.runtime\.reload\(\)/);
+  assert.match(tool, /await cdp\.send\("Browser\.close"/);
+});
+
+test("Bitwarden relay: the run stays paused from the start and after every takeover until the daemon confirms the lock for that release", async () => {
+  const neko = await fakeNeko();
+  const relay = await relayFor(neko, { controlPollMs: 60_000, log: () => {}, lockOnRelease: true });
+  const port = await relay.startControl("127.0.0.1", 0);
+  const read = async () => JSON.parse((await http(port, "GET", "/control")).body);
+  const status = async () => JSON.parse((await http(relay.port, "GET", "/bp/status", { ...HOST, Authorization: `Bearer ${STATUS}` })).body);
+  const locked = (generation, token = STATUS) =>
+    http(relay.port, "POST", "/bp/locked", { ...HOST, Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, JSON.stringify({ generation }));
+  const settle = async (check) => {
+    for (let i = 0; i < 100 && !check(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  };
+  try {
+    await relay.pollControl();
+    assert.deepEqual(await read(), { ownerControl: true, known: true, lockPending: true, securing: true, lockFailed: false }, "paused until the first lock");
+    let st = await status();
+    assert.equal(st.lockPending, true);
+    assert.equal((await locked(st.lockGeneration, "x".repeat(43))).status, 401, "only with the status token");
+    assert.equal(JSON.parse((await locked(st.lockGeneration - 1)).body).cleared, false, "an older release's lock does not count");
+    assert.equal(JSON.parse((await locked(st.lockGeneration)).body).cleared, true);
+    assert.deepEqual(await read(), { ownerControl: false, known: true, lockPending: false, securing: false, lockFailed: false });
+    // A viewer takes control, then releases it: paused again until locked.
+    const created = await postTicket(relay, ticketAt(Date.now(), "lock-lock-lock-0001"));
+    const cookie = String(created.headers["set-cookie"]).split(";")[0];
+    const socket = connect(relay.port, "127.0.0.1");
+    socket.on("error", () => {});
+    await new Promise((resolve) => socket.on("connect", resolve));
+    socket.write(
+      [`GET ${relay.prefix}/api/ws HTTP/1.1`, "Host: 127.0.0.1:5301", "Origin: http://127.0.0.1:5301", `Cookie: ${cookie}`, "Upgrade: websocket", "Connection: Upgrade", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version: 13", "", ""].join("\r\n"),
+    );
+    await new Promise((resolve) => socket.once("data", resolve));
+    neko.state.hasHost = true;
+    await relay.pollControl();
+    st = await status();
+    assert.equal(st.lockPending, false);
+    assert.equal(JSON.parse((await locked(st.lockGeneration)).body).cleared, false, "nothing to clear while the owner holds control");
+    neko.state.hasHost = false;
+    await relay.pollControl();
+    assert.deepEqual(await read(), { ownerControl: true, known: true, lockPending: true, securing: true, lockFailed: false }, "released: paused until locked");
+    const released = (await status()).lockGeneration;
+    // The owner takes and releases control again before the daemon confirms: that confirmation is for an old release.
+    neko.state.hasHost = true;
+    await relay.pollControl();
+    neko.state.hasHost = false;
+    await relay.pollControl();
+    assert.equal(JSON.parse((await locked(released)).body).cleared, false);
+    assert.equal(JSON.parse((await locked((await status()).lockGeneration)).body).cleared, true);
+    assert.equal((await read()).ownerControl, false);
+    // The last viewer leaves (without holding control): locked again before the run goes on.
+    socket.destroy();
+    await settle(() => relay.state().viewers === 0);
+    assert.deepEqual(await read(), { ownerControl: true, known: true, lockPending: true, securing: true, lockFailed: false });
+  } finally {
+    await relay.close();
+    await neko.close();
+  }
+  // Without Bitwarden nothing changes.
+  const neko2 = await fakeNeko();
+  const plain = await relayFor(neko2, { controlPollMs: 60_000, log: () => {} });
+  const port2 = await plain.startControl("127.0.0.1", 0);
+  try {
+    await plain.pollControl();
+    assert.deepEqual(JSON.parse((await http(port2, "GET", "/control")).body), { ownerControl: false, known: true });
+  } finally {
+    await plain.close();
+    await neko2.close();
+  }
+});
+
+test("Bitwarden relay args: lock mode only with Bitwarden, and the stack checks still hold", () => {
+  const plain = stackRelayArgs(input(), KEYS);
+  assert.ok(!value(plain, "--env").includes("BP_LOCK_ON_RELEASE=1"));
+  const withBw = stackRelayArgs(input({ bitwarden: true }), KEYS);
+  assert.ok(value(withBw, "--env").includes("BP_LOCK_ON_RELEASE=1"));
+  assert.doesNotThrow(() => checkStackRun(withBw, "relay", input({ bitwarden: true })));
+  const bwImage = bitwardenImageTag(NEKO_IMAGE, "a".repeat(64));
+  assert.doesNotThrow(() => checkStackRun(stackNekoArgs(input({ nekoImage: bwImage, bitwarden: true }), KEYS), "neko", input({ nekoImage: bwImage })));
+});
+
+test("Bitwarden daemon: nothing is downloaded without the saved consent; the variant builds on the signed-in image; the stack switches only when no run holds it (update pending meanwhile)", async () => {
+  const docker = fakeStackDocker();
+  let bitwarden = false;
+  const relay = { lockPending: false, lockGeneration: 0 };
+  const lockedCalls = [];
+  const helper = makeSignedIn(docker, {
+    config: async () => ({ port: 5301, httpsBaseUrl: "", bitwarden, bitwardenConsent: bitwarden ? BITWARDEN.sha256 : "" }),
+    relayStatus: async () => ({ viewers: 0, idleMs: 0, nekoUp: true, portrait: false, ...relay }),
+    relayLocked: async (_host, _port, _token, generation) => {
+      lockedCalls.push(generation);
+      return true;
+    },
+  });
+  const { si } = helper;
+  assert.equal((await si.status()).bitwarden.state, "off");
+  assert.equal((await si.bitwarden("download")).ok, false, "the server refuses a download the owner has not consented to (setting off)");
+  assert.ok(!docker.calls.some((args) => args[0] === "build"));
+  bitwarden = true;
+  assert.equal((await si.status()).bitwarden.state, "no-image", "chosen but not downloaded: nothing happens by itself");
+  await si.viewerLink({ purpose: "login", portrait: false });
+  assert.ok(!docker.calls.some((args) => args[0] === "build"), "a start never downloads Bitwarden");
+  const nekoRun = () => docker.calls.filter((args) => args[0] === "run" && /-neko$/.test(value(args, "--name")[0] ?? "")).at(-1);
+  assert.doesNotMatch(nekoRun().at(-1), /-bw/, "without the variant image the plain browser runs");
+  assert.equal((await si.bitwarden("download")).ok, true);
+  for (let i = 0; i < 100 && (await si.status()).bitwarden.state === "building"; i++) await new Promise((r) => setTimeout(r, 5));
+  const build = docker.calls.find((args) => args[0] === "build" && args.includes("browser-prompt.signed-in=bitwarden-image"));
+  assert.ok(build, "built");
+  assert.equal(value(build, "--build-arg")[0], `BASE_IMAGE=${si.image}`);
+  assert.equal(value(build, "-t")[0], si.bitwardenImage());
+  let status = await si.status();
+  assert.equal(status.bitwarden.state, "ready");
+  assert.equal(status.bitwarden.updatePending, true, "the running browser is the plain one");
+  // A run holds the browser: neko keeps running (update pending); when the run ends, the idle check switches it.
+  docker.state.agents.push({ id: "abcdef000001", agent: "run-a" });
+  docker.calls.length = 0;
+  await si.viewerLink({ purpose: "login", portrait: false });
+  assert.ok(!docker.calls.some((args) => args[0] === "run" && /-neko$/.test(value(args, "--name")[0] ?? "")), "not under a run");
+  assert.ok(!docker.calls.some((args) => args[0] === "stop"), "no stop under a run");
+  status = await si.status();
+  assert.equal(status.bitwarden.updatePending, true);
+  assert.equal(status.busy, true);
+  assert.match((await si.bitwarden("apply")).message, /Update pending/);
+  assert.equal(await si.idleCheck(), false);
+  assert.ok(!docker.calls.some((args) => args[0] === "stop"), "the idle check waits for the run too");
+  docker.state.agents = [];
+  docker.calls.length = 0;
+  await si.idleCheck();
+  assert.ok(docker.calls.some((args) => args[0] === "stop" && args[2] === "45"), "stopped gracefully (cookies written)");
+  assert.equal(nekoRun().at(-1), si.bitwardenImage(), "the run ended: neko starts again with Bitwarden");
+  const relayRun = docker.calls.filter((args) => args[0] === "run" && /-relay$/.test(value(args, "--name")[0] ?? "")).at(-1);
+  assert.ok(value(relayRun, "--env").includes("BP_LOCK_ON_RELEASE=1"));
+  status = await si.status();
+  assert.equal(status.bitwarden.active, true);
+  assert.equal(status.bitwarden.updatePending, false);
+  // A run's MCP container fails closed with Bitwarden.
+  const mcp = await si.mcpServer("run-b");
+  const plan = JSON.parse(Buffer.from(mcp.server.args[1], "base64").toString("utf8"));
+  assert.ok(value(plan.agent.run, "--env").includes("BP_CONTROL_FAIL_CLOSED=1"));
+  // Turned off: an idle browser restarts without it.
+  bitwarden = false;
+  docker.state.agents = [];
+  assert.match((await si.bitwarden("apply")).message, /Update pending/, "run-b was just admitted");
+  helper.advance(60 * 60_000);
+  assert.equal((await si.bitwarden("apply")).ok, true);
+  await si.viewerLink({ purpose: "login", portrait: false });
+  assert.doesNotMatch(nekoRun().at(-1), /-bw/);
+});
+
+test("Bitwarden lock: only when the relay asks and nobody holds control; verified (lock, then reload), retried, a browser restart only without a viewer; the relay hears the generation read before the lock", async () => {
+  const docker = fakeStackDocker();
+  const relay = { lockPending: false, lockGeneration: 0, viewers: 0, ownerControl: false };
+  let relayUp = true;
+  const lockedCalls = [];
+  const failedCalls = [];
+  const helper = makeSignedIn(docker, {
+    config: async () => ({ port: 5301, httpsBaseUrl: "", bitwarden: true, bitwardenConsent: BITWARDEN.sha256 }),
+    relayStatus: async () => (relayUp ? { idleMs: 0, nekoUp: true, portrait: false, ...relay } : null),
+    relayLocked: async (_host, _port, _token, generation) => {
+      lockedCalls.push(generation);
+      return true;
+    },
+    relayLockFailed: async (_host, _port, _token, generation) => {
+      failedCalls.push(generation);
+      return true;
+    },
+  });
+  const { si } = helper;
+  // The consent press: the build makes this install's key (stable id) and the image.
+  assert.equal((await si.bitwarden("download")).ok, true);
+  for (let i = 0; i < 100 && (await si.status()).bitwarden.state === "building"; i++) await new Promise((r) => setTimeout(r, 5));
+  await si.viewerLink({ purpose: "login", portrait: false });
+  assert.match(docker.state.nekoImage, /-bw/);
+  docker.state.bitwardenId = "m".repeat(32);
+  docker.state.tools = [];
+  assert.equal(await si.lockCheck(), false, "nothing pending: nothing done");
+  assert.equal(docker.state.tools.length, 0);
+  // The owner holds control: no lock yet (their release starts the round).
+  relay.lockPending = true;
+  relay.lockGeneration = 7;
+  relay.ownerControl = true;
+  assert.equal(await si.lockCheck(), false);
+  assert.equal(docker.state.tools.length, 0, "never while the owner holds control");
+  relay.ownerControl = false;
+  // Pending: Bitwarden's own lock, verified, then the relay hears about that release.
+  assert.equal(await si.lockCheck(), true);
+  assert.deepEqual(docker.state.tools.map((t) => `${t.mode} ${t.ids.join(",")}`), [`lock ${"m".repeat(32)}`]);
+  assert.deepEqual(lockedCalls, [7]);
+  // Not verified, with a viewer connected: lock and reload 3 times, no restart; the relay is told it failed; then a growing pause.
+  docker.state.tools = [];
+  lockedCalls.length = 0;
+  relay.lockGeneration = 8;
+  relay.viewers = 1;
+  docker.state.tool = (mode) => (mode === "restart" ? { restarted: true } : { locked: false, statuses: [{ status: 2 }], detail: "" });
+  assert.equal(await si.lockCheck(), false);
+  assert.deepEqual(docker.state.tools.map((t) => t.mode), ["lock", "reload", "lock", "reload", "lock", "reload"], "no restart while a viewer is connected");
+  assert.deepEqual(lockedCalls, [], "the run stays paused (fail closed)");
+  assert.deepEqual(failedCalls, [8], "and is told the owner has to act");
+  let status = await si.status();
+  assert.equal(status.bitwarden.lastLock.ok, false);
+  assert.equal(status.bitwarden.lastLock.failures, 1);
+  assert.match(status.bitwarden.lastLock.detail, /not restarted while a viewer is connected/);
+  docker.state.tools = [];
+  assert.equal(await si.lockCheck(), false);
+  assert.equal(docker.state.tools.length, 0, "backoff: not again right away");
+  helper.advance(16_000);
+  // Without a viewer the restart is tried; Bitwarden unlocks itself again: vault timeout Never.
+  relay.viewers = 0;
+  docker.state.tool = (mode) => (mode === "restart" ? { restarted: true } : { locked: false, statuses: [{ status: 2 }], detail: "" });
+  assert.equal(await si.lockCheck(), false);
+  assert.deepEqual(docker.state.tools.map((t) => t.mode), ["lock", "reload", "lock", "reload", "lock", "reload", "restart", "status"]);
+  status = await si.status();
+  assert.equal(status.bitwarden.lastLock.failures, 2);
+  assert.match(status.bitwarden.lastLock.detail, /vault timeout is probably set to Never/);
+  docker.state.tools = [];
+  helper.advance(20_000);
+  assert.equal(await si.lockCheck(), false, "the second pause is longer (30 s)");
+  assert.equal(docker.state.tools.length, 0);
+  // A new release is tried right away; the restart helps: locked, the relay is told.
+  relay.lockGeneration = 9;
+  docker.state.tool = (mode) => (mode === "status" ? { locked: true, statuses: [{ status: 1 }] } : mode === "restart" ? { restarted: true } : { locked: false, detail: "no service worker" });
+  assert.equal(await si.lockCheck(), true);
+  assert.deepEqual(lockedCalls, [9]);
+  assert.equal((await si.status()).bitwarden.lastLock.failures, 0);
+  // The owner's Lock now: the generation is read before the lock; a takeover that begins and ends
+  // during the lock makes a new one, which this confirmation does not clear.
+  lockedCalls.length = 0;
+  relay.lockGeneration = 10;
+  docker.state.tool = () => {
+    relay.lockGeneration = 11;
+    return { locked: true };
+  };
+  assert.equal((await si.bitwarden("lock")).ok, true);
+  assert.deepEqual(lockedCalls, [10], "the generation read before the lock");
+  docker.state.tool = () => ({ locked: true });
+  docker.state.tools = [];
+  assert.equal((await si.bitwarden("restart-browser")).ok, true);
+  assert.deepEqual(docker.state.tools.map((t) => t.mode), ["restart", "lock"]);
+  // The relay does not answer while a run uses the Bitwarden browser: the vault is locked anyway (and the run's guard stays paused).
+  relayUp = false;
+  docker.state.agents.push({ id: "abcdef000002", agent: "run-c" });
+  docker.state.tools = [];
+  assert.equal(await si.lockCheck(), false);
+  assert.deepEqual(docker.state.tools.map((t) => t.mode), ["lock"]);
+  docker.state.tools = [];
+  assert.equal(await si.lockCheck(), false);
+  assert.equal(docker.state.tools.length, 0, "at most every 15 seconds");
+});
+
+test("Bitwarden key: made once per install (0600), never in the image, passed to the build only as a secret; the id and the image tag follow it", async () => {
+  const docker = fakeStackDocker();
+  const helper = makeSignedIn(docker, { config: async () => ({ port: 5301, httpsBaseUrl: "", bitwarden: true, bitwardenConsent: BITWARDEN.sha256 }) });
+  const { si, dir } = helper;
+  assert.equal(si.bitwardenImage(), null, "no key before a confirmed download");
+  assert.equal(existsSync(join(dir, "bitwarden-key.pem")), false);
+  assert.equal((await si.bitwarden("download")).ok, true);
+  for (let i = 0; i < 100 && (await si.status()).bitwarden.state === "building"; i++) await new Promise((r) => setTimeout(r, 5));
+  const keyFile = join(dir, "bitwarden-key.pem");
+  assert.equal(statSync(keyFile).mode & 0o777, 0o600);
+  const pem = readFileSync(keyFile, "utf8");
+  assert.match(pem, /^-----BEGIN PRIVATE KEY-----/);
+  const id = extensionIdOfKey(pem);
+  assert.match(id, /^[a-p]{32}$/);
+  assert.equal(si.bitwardenId(), id);
+  const build = docker.calls.find((args) => args[0] === "build" && args.includes("browser-prompt.signed-in=bitwarden-image"));
+  assert.deepEqual(value(build, "--secret"), [`id=bitwarden-key,src=${keyFile}`]);
+  assert.ok(value(build, "--build-arg").includes(`BITWARDEN_ID=${id}`));
+  assert.ok(!build.some((arg) => arg.includes("PRIVATE KEY")), "the key itself is never an argument");
+  // Another daemon with the same state keeps the id (and the tag); another key gives another tag.
+  const same = createSignedIn({ serverBrowser: createServerBrowser({ run: docker.run, instanceId: INSTANCE }), run: docker.run, keysFile: join(dir, "keys.json"), bindHost: async () => null, config: async () => ({ port: 5301, httpsBaseUrl: "" }), log: () => {} });
+  assert.equal(same.bitwardenId(), id);
+  assert.equal(same.bitwardenImage(), si.bitwardenImage());
+  assert.equal(makeSignedIn(docker).si.bitwardenId(), null, "another install (state directory) has no key");
+  // A consent for another pin is no consent.
+  const stale = makeSignedIn(docker, { config: async () => ({ port: 5301, httpsBaseUrl: "", bitwarden: true, bitwardenConsent: "0".repeat(64) }) });
+  assert.equal((await stale.si.bitwarden("download")).ok, false);
+});
+
+test("Bitwarden: unknown settings never switch the browser's image, and a fresh start waits for known settings", async () => {
+  const docker = fakeStackDocker();
+  let config = { port: 5301, httpsBaseUrl: "", bitwarden: false };
+  const { si } = makeSignedIn(docker, { config: async () => config });
+  await si.viewerLink({ purpose: "login", portrait: false });
+  const started = docker.state.nekoImage;
+  config = { port: 5301, httpsBaseUrl: "", bitwarden: undefined };
+  docker.calls.length = 0;
+  assert.equal((await si.viewerLink({ purpose: "login", portrait: false })).ok, true);
+  assert.ok(!docker.calls.some((args) => args[0] === "stop" || (args[0] === "run" && /-neko$/.test(value(args, "--name")[0] ?? ""))), "kept as it runs");
+  assert.equal(docker.state.nekoImage, started);
+  assert.equal((await si.status()).bitwarden.updatePending, false);
+  await si.stop();
+  const fresh = await si.viewerLink({ purpose: "login", portrait: false });
+  assert.equal(fresh.ok, false, "no start on unknown settings");
+  assert.match(fresh.detail, /settings could not be read/);
+});
+
+test("Bitwarden cleanup: the storage of builds no longer installed is cleared through DevTools once Chromium runs", async () => {
+  const docker = fakeStackDocker();
+  const { si } = makeSignedIn(docker, { config: async () => ({ port: 5301, httpsBaseUrl: "", bitwarden: false }) });
+  await si.viewerLink({ purpose: "login", portrait: false });
+  const oldA = "a".repeat(32);
+  const oldB = "b".repeat(32);
+  docker.state.idsFile = `${oldA}\n${oldB}\n../etc\n`;
+  docker.state.tools = [];
+  docker.state.tool = (mode, ids) => (mode === "cleanup" ? { cleared: ids } : { locked: true });
+  // oldB still has a trace (a preference stub Chromium brought back): it stays recorded for the next start.
+  docker.state.traces = new Set([oldB]);
+  assert.deepEqual(await si.cleanupOldBitwarden(), [oldA, oldB]);
+  assert.deepEqual(docker.state.tools.map((t) => `${t.mode} ${t.ids.join(",")}`), [`cleanup ${oldA},${oldB}`]);
+  assert.equal(docker.state.idsFile, `${oldB}\n`, "oldA is forgotten (no trace left), oldB kept");
+  docker.state.traces = new Set();
+  assert.deepEqual(await si.cleanupOldBitwarden(), [oldB]);
+  assert.equal(docker.state.idsFile, "", "forgotten once no trace is left");
+  // Storage that cannot be cleared: retried, then left recorded for the next start.
+  docker.state.idsFile = `${oldA}\n`;
+  docker.state.tool = () => ({ cleared: [] });
+  docker.state.tools = [];
+  assert.deepEqual(await si.cleanupOldBitwarden(), []);
+  assert.equal(docker.state.tools.length, 5, "five tries");
+  assert.equal(docker.state.idsFile, `${oldA}\n`);
+});
+
+test("DevTools filter: extension targets are hidden everywhere, the run cannot open extension pages, and clicks on extension frames are checked", () => {
+  const filter = createTargetFilter();
+  const attached = (info, sessionId) => ({ method: "Target.attachedToTarget", ...(sessionId ? { sessionId } : {}), params: { sessionId: `S-${info.targetId}`, targetInfo: info, waitingForDebugger: false } });
+  const delivered = (verdict) => verdict.deliver.length > 0;
+  const ext = `chrome-extension://${BITWARDEN.id}`;
+  assert.equal(isExtensionUrl(`${ext}/popup/index.html`), true);
+  assert.equal(isExtensionUrl(" CHROME-EXTENSION://x/"), true);
+  assert.equal(isExtensionUrl("https://example.com/chrome-extension://"), false);
+  // Background service worker, popup, offscreen document: hidden like every target the run did not create.
+  assert.equal(delivered(filter.fromBrowser(attached({ targetId: "BW-SW", type: "service_worker", url: `${ext}/background.js` }))), false);
+  assert.equal(delivered(filter.fromBrowser(attached({ targetId: "BW-POPUP", type: "page", url: `${ext}/popup/index.html` }))), false);
+  assert.equal(delivered(filter.fromBrowser(attached({ targetId: "BW-OFF", type: "other", url: `${ext}/offscreen-document/index.html` }))), false);
+  for (const method of ["Target.attachToTarget", "Target.activateTarget", "Target.closeTarget", "Target.getTargetInfo"]) assert.ok(filter.fromClient({ id: 1, method, params: { targetId: "BW-SW" } }).reply, method);
+  // The run's page.
+  filter.fromClient({ id: 2, method: "Target.createTarget", params: { url: "about:blank" } });
+  filter.fromBrowser(attached({ targetId: "AGENT", type: "page", url: "about:blank" }));
+  filter.fromBrowser({ id: 2, result: { targetId: "AGENT" } });
+  assert.equal(filter.isVisible("AGENT"), true);
+  // A popup of the run's page that is an extension page (window.open, or the extension opening a window): hidden.
+  assert.equal(delivered(filter.fromBrowser(attached({ targetId: "BW-WIN", type: "page", openerId: "AGENT", url: `${ext}/popup/index.html#/fido2` }))), false);
+  // The inline menu: an extension frame inside the run's page (a dynamic id). Hidden, and remembered.
+  const frame = filter.fromBrowser(attached({ targetId: "BW-MENU", type: "iframe", url: "chrome-extension://9f0e1d2c-dynamic/overlay/menu-list.html" }, "S-AGENT"));
+  assert.equal(delivered(frame), false);
+  assert.deepEqual(frame.toBrowser.map((m) => m.method), ["Target.detachFromTarget"]);
+  assert.deepEqual([...filter.extensionFrames()], ["BW-MENU"]);
+  assert.equal(delivered(filter.fromBrowser({ method: "Target.targetInfoChanged", params: { targetInfo: { targetId: "BW-MENU", type: "iframe", url: `${ext}/x` } } })), false);
+  // Navigation to extension pages.
+  for (const url of [`${ext}/popup/index.html`, "chrome-extension://abc/x.html", " chrome-extension://abc/"]) {
+    assert.match(filter.fromClient({ id: 3, sessionId: "S-AGENT", method: "Page.navigate", params: { url } }).reply.error.message, /password manager/);
+    assert.ok(filter.fromClient({ id: 4, method: "Target.createTarget", params: { url } }).reply);
+  }
+  assert.ok(filter.fromClient({ id: 5, sessionId: "S-AGENT", method: "Page.navigate", params: { url: "https://example.com" } }).forward);
+  // Pointer input on a page that holds an extension frame: checked against what is at that point.
+  const press = { id: 6, sessionId: "S-AGENT", method: "Input.dispatchMouseEvent", params: { type: "mousePressed", x: 10, y: 20, button: "left", clickCount: 1 } };
+  const verdict = filter.fromClient(press);
+  assert.ok(verdict.hitTest);
+  assert.deepEqual(verdict.hitTest.points, [{ x: 10, y: 20 }]);
+  assert.equal(filter.hitAllowed(verdict.hitTest.frames, [{ nodeName: "IFRAME", frameId: "BW-MENU" }]), false, "the inline menu's frame");
+  assert.equal(filter.hitAllowed(verdict.hitTest.frames, [null]), false, "unknown: refused");
+  assert.equal(filter.hitAllowed(verdict.hitTest.frames, [{ nodeName: "BUTTON" }]), true);
+  assert.match(JSON.stringify(filter.refusal(press)), /password manager/);
+  assert.ok(filter.fromClient({ ...press, params: { ...press.params, type: "mouseMoved" } }).forward, "moving the mouse is not checked");
+  assert.ok(filter.fromClient({ id: 7, sessionId: "S-AGENT", method: "Input.dispatchTouchEvent", params: { type: "touchStart", touchPoints: [{ x: 1, y: 2 }] } }).hitTest);
+  assert.ok(filter.fromClient({ id: 8, sessionId: "S-AGENT", method: "Input.dispatchMouseEvent", params: { type: "mousePressed", x: "a", y: 1 } }).reply, "no point: refused");
+  // A cross-origin frame of the page that holds the extension frame: a click on it is checked too.
+  filter.fromBrowser(attached({ targetId: "XO", type: "iframe", url: "https://login.example" }, "S-AGENT"));
+  filter.fromBrowser(attached({ targetId: "BW-MENU2", type: "iframe", url: "chrome-extension://dyn2/overlay/menu.html" }, "S-XO"));
+  const nested = filter.fromClient(press).hitTest;
+  assert.equal(filter.hitAllowed(nested.frames, [{ nodeName: "IFRAME", frameId: "XO" }]), false);
+  // The extension frame goes away: clicks are free again.
+  filter.fromBrowser({ method: "Target.targetDestroyed", params: { targetId: "BW-MENU" } });
+  filter.fromBrowser({ method: "Target.targetDestroyed", params: { targetId: "BW-MENU2" } });
+  assert.ok(filter.fromClient(press).forward);
+  // The run's own page turns into an extension page: it is taken away from the run.
+  const revoked = filter.fromBrowser({ method: "Target.targetInfoChanged", params: { targetInfo: { targetId: "AGENT", type: "page", url: `${ext}/popup/index.html` } } });
+  assert.deepEqual(revoked.deliver.map((m) => m.method), ["Target.detachedFromTarget", "Target.targetDestroyed"]);
+  assert.deepEqual(revoked.toBrowser.map((m) => m.method), ["Target.detachFromTarget"]);
+  assert.equal(filter.isVisible("AGENT"), false);
+  assert.ok(filter.fromClient({ id: 9, sessionId: "S-AGENT", method: "Runtime.evaluate", params: {} }).reply);
+});
+
+test("MCP filter: no tool call may open an extension page (also percent-encoded), in every Server browser run", () => {
+  for (const signedIn of [true, false]) {
+    for (const [name, args] of [
+      ["browser_navigate", { url: `chrome-extension://${BITWARDEN.id}/popup/index.html` }],
+      ["browser_navigate", { url: "chrome-%65xtension://abc/" }],
+      ["browser_tabs", { action: "new", url: "Chrome-Extension://abc/" }],
+    ]) {
+      const verdict = filterClientLine(JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name, arguments: args } }), { signedIn });
+      assert.ok(verdict.reply, `${name} ${args.url}`);
+      assert.equal(JSON.parse(verdict.reply).result.content[0].text, EXTENSION_URL_TEXT);
+    }
+    assert.ok(filterClientLine(JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "browser_navigate", arguments: { url: "https://example.com" } } }), { signedIn }).forward);
+  }
+  assert.equal(namesExtensionPage({ text: "x" }), false);
+});
+
+test("Bitwarden prompt, card and settings: the agent never uses the password manager; the download needs two presses; lock state, Lock now and the recommended settings are shown", () => {
+  assert.match(SIGNED_IN_SAFETY_PREAMBLE, /Password manager: this browser may hold the owner's password manager \(Bitwarden\)\. It is the owner's alone: never open, click, read or use it/);
+  assert.match(SIGNED_IN_SAFETY_PREAMBLE, /never ask the owner for anything stored in it/);
+  const settings = readFileSync(new URL("../client/signed-in-settings.tsx", import.meta.url), "utf8");
+  assert.match(settings, /if \(armed !== "bitwarden"\) return setArmed\("bitwarden"\);/);
+  assert.equal(settings.match(/bitwarden\(\{ action: "download" \}\)/g)?.length, 1, "one download call, after the confirmation");
+  assert.ok(settings.indexOf('setArmed("bitwarden")') < settings.indexOf('bitwarden({ action: "download" })'));
+  assert.ok(settings.indexOf("bitwarden: true }, config.revision") < settings.indexOf('bitwarden({ action: "download" })'), "the consent is saved before the download is asked for");
+  assert.match(settings, /never “Never” \(that stores the key on the server's disk/);
+  assert.match(settings, /turn off card and identity suggestions in the inline menu/);
+  assert.match(settings, /Autofill on page load off/);
+  assert.match(settings, /A plugin update that pins a newer Bitwarden asks you to confirm and download it again; it keeps its extension id/);
+  assert.match(settings, /bitwarden\(\{ action: "lock" \}\)/);
+  assert.match(settings, /bitwarden\(\{ action: "restart-browser" \}\)/);
+  assert.match(settings, /Update pending: the browser switches when the run ends/);
+  assert.match(settings, /a run waits until Bitwarden is locked/);
+  const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
+  assert.match(card, /Bitwarden is locked again before the run goes on/);
+  assert.match(card, /lockVault\("lock"\)/);
+  assert.match(card, /lockVault\("restart-browser"\)/);
+  assert.match(card, /waitingSignedIn && vaultLock\?\.pending/);
+  assert.doesNotMatch(card, /action: "download"/, "the card never downloads");
+});
+
+test("DevTools filter: while the owner holds control nothing acts or reads; Extensions.* is refused; extension URLs are normalized; keys are checked where an extension frame is focused", () => {
+  let held = false;
+  const filter = createTargetFilter({ held: () => held });
+  filter.fromClient({ id: 1, method: "Target.createTarget", params: { url: "about:blank" } });
+  filter.fromBrowser({ method: "Target.attachedToTarget", params: { sessionId: "S-P", targetInfo: { targetId: "P", type: "page", url: "about:blank" }, waitingForDebugger: false } });
+  filter.fromBrowser({ id: 1, result: { targetId: "P" } });
+  // G: the Extensions domain (load, uninstall, storage of extensions) is never the run's.
+  for (const method of ["Extensions.loadUnpacked", "Extensions.uninstall", "Extensions.getStorageItems", "Extensions.setStorageItems"]) assert.ok(filter.fromClient({ id: 2, method, params: {} }).reply, method);
+  // D: held.
+  held = true;
+  for (const method of ["Input.dispatchKeyEvent", "Input.insertText", "Input.dispatchMouseEvent", "Page.navigate", "Page.reload", "Runtime.evaluate", "Runtime.callFunctionOn", "Page.captureScreenshot", "DOM.setFileInputFiles", "Storage.getCookies", "Network.getCookies"]) {
+    const verdict = filter.fromClient({ id: 3, sessionId: "S-P", method, params: {} });
+    assert.ok(verdict.reply, `${method} while held`);
+  }
+  assert.ok(filter.fromClient({ id: 4, method: "Target.createTarget", params: { url: "about:blank" } }).reply, "no new tab while held");
+  for (const method of ["Runtime.runIfWaitingForDebugger", "Page.enable", "Runtime.enable", "Target.setAutoAttach", "DOM.enable", "Page.addScriptToEvaluateOnNewDocument"]) {
+    assert.ok(filter.fromClient({ id: 5, sessionId: "S-P", method, params: {} }).forward, `${method} (session setup) passes while held`);
+  }
+  assert.ok(HELD_REFUSED.test("Input.dispatchTouchEvent"));
+  held = false;
+  assert.ok(filter.fromClient({ id: 6, sessionId: "S-P", method: "Runtime.evaluate", params: {} }).forward, "released: as before");
+  // F: normalized like the MCP filter.
+  for (const url of ["%63hrome-extension://x/", "chrome-\nextension://x/", " \tCHROME-EXTENSION://x", "chrome-%2565xtension://x"]) {
+    assert.equal(isExtensionUrl(url), true, JSON.stringify(url));
+    assert.ok(filter.fromClient({ id: 7, sessionId: "S-P", method: "Page.navigate", params: { url } }).reply, `navigate ${JSON.stringify(url)}`);
+  }
+  assert.equal(isExtensionUrl("https://example.com/?u=chrome-extension://x"), false);
+  // B: keys on a page without an extension frame pass unchecked; with one, the focus is checked.
+  assert.ok(filter.fromClient({ id: 8, sessionId: "S-P", method: "Input.dispatchKeyEvent", params: { type: "keyDown", key: "ArrowDown" } }).forward);
+  filter.fromBrowser({ method: "Target.attachedToTarget", sessionId: "S-P", params: { sessionId: "S-F", targetInfo: { targetId: "F", type: "iframe", url: "chrome-extension://dyn/overlay/menu-list.html" }, waitingForDebugger: false } });
+  for (const method of ["Input.dispatchKeyEvent", "Input.insertText", "Input.imeSetComposition"]) {
+    const verdict = filter.fromClient({ id: 9, sessionId: "S-P", method, params: { type: "keyDown", key: "Enter", text: "x" } });
+    assert.ok(verdict.focusTest, method);
+    assert.equal(verdict.focusTest.frameId, "P");
+  }
+  const frames = filter.fromClient({ id: 10, sessionId: "S-P", method: "Input.dispatchKeyEvent", params: { type: "keyDown", key: "Tab" } }).focusTest.frames;
+  assert.equal(filter.focusAllowed(frames, { nodeName: "IFRAME", frameId: "F" }), false, "the inline menu itself");
+  assert.equal(filter.focusAllowed(frames, { nodeName: "BIT-INLINE-MENU", shadowRoots: [{ nodeName: "#document-fragment", children: [{ nodeName: "IFRAME", frameId: "F" }] }] }), false, "a host whose (closed) shadow root holds it");
+  assert.equal(filter.focusAllowed(frames, null), false, "unknown: refused");
+  assert.equal(filter.focusAllowed(frames, { nodeName: "INPUT" }), true, "a field of the page");
+  assert.equal(filter.focusAllowed(frames, { nodeName: "BODY", children: [{ nodeName: "IFRAME", frameId: "F" }] }), true, "no focus (the body): the frame is not focused");
+  assert.equal(FOCUS_WORLD, "bp-focus-guard");
+  assert.equal(filter.fromBrowser({ sessionId: "S-P", method: "Runtime.executionContextCreated", params: { context: { id: 3, name: FOCUS_WORLD, origin: "https://example.com", auxData: { isDefault: false } } } }).deliver.length, 0, "the filter's own world is not the run's");
+});
+
+test("while only the vault is being locked, the run is told to wait, not to ask the owner", () => {
+  const guard = createControlGuard();
+  guard.result(guard.next(), { ownerControl: true, known: true, lockPending: true, securing: true, lockFailed: false });
+  assert.equal(guard.held(), true);
+  assert.equal(guard.securing(), true);
+  const call = JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "browser_snapshot", arguments: {} } });
+  assert.equal(JSON.parse(filterClientLine(call, { ownerControl: guard.held(), securing: guard.securing(), signedIn: true }).reply).result.content[0].text, SECURING_TEXT);
+  guard.result(guard.next(), { ownerControl: true, known: true, lockPending: true, securing: false });
+  assert.equal(guard.securing(), false, "the owner holds control");
+  assert.equal(JSON.parse(filterClientLine(call, { ownerControl: guard.held(), securing: guard.securing(), signedIn: true }).reply).result.content[0].text, OWNER_CONTROL_TEXT);
+  assert.match(SECURING_TEXT, /Do not ask the owner/);
+});
+
+test("Bitwarden fail closed: the run's guard never opens on failed polls, and the entry point takes only that flag", () => {
+  const guard = createControlGuard({ now: () => 1_000_000, failuresToOpen: Number.POSITIVE_INFINITY });
+  guard.failure(guard.next());
+  assert.equal(guard.held(), true, "the relay could not be asked: paused");
+  for (let i = 0; i < 50; i++) guard.failure(guard.next());
+  assert.equal(guard.held(), true);
+  guard.result(guard.next(), { ownerControl: false });
+  assert.equal(guard.held(), false, "the relay answers: it decides");
+  const entry = readFileSync(new URL("../server-browser/entrypoint.mjs", import.meta.url), "utf8");
+  assert.match(entry, /const guard = createControlGuard\(failClosed \? \{ failuresToOpen: Number\.POSITIVE_INFINITY \} : \{\}\);/);
+  assert.match(entry, /BP_CONTROL_FAIL_CLOSED may only be 1 or empty/);
+  const plain = signedInPlan("/usr/bin/docker", { stackId: "0a1b2c3d", instance: INSTANCE, serverImage: SERVER_IMAGE, agentId: "a1", nonce: "n1", blockedIps: [] });
+  assert.ok(!value(plain.agent.run, "--env").includes("BP_CONTROL_FAIL_CLOSED=1"));
+  const closed = signedInPlan("/usr/bin/docker", { stackId: "0a1b2c3d", instance: INSTANCE, serverImage: SERVER_IMAGE, agentId: "a1", nonce: "n1", blockedIps: [], failClosed: true });
+  assert.ok(value(closed.agent.run, "--env").includes("BP_CONTROL_FAIL_CLOSED=1"));
+  assert.doesNotThrow(() => checkPlan(closed));
+});
+
+test("DevTools filter: a frame that attaches before its URL is known and then commits to an extension page is taken away before the run sees its content, and its clicks are checked", () => {
+  const filter = createTargetFilter();
+  filter.fromClient({ id: 1, method: "Target.createTarget", params: { url: "about:blank" } });
+  filter.fromBrowser({ method: "Target.attachedToTarget", params: { sessionId: "S-P", targetInfo: { targetId: "P", type: "page", url: "about:blank" }, waitingForDebugger: false } });
+  filter.fromBrowser({ id: 1, result: { targetId: "P" } });
+  // Bitwarden's inline menu: the OOPIF attaches with an empty URL (the run's Playwright gets it).
+  const attach = filter.fromBrowser({ method: "Target.attachedToTarget", sessionId: "S-P", params: { sessionId: "S-F", targetInfo: { targetId: "F", type: "iframe", url: "" }, waitingForDebugger: true } });
+  assert.equal(attach.deliver.length, 1);
+  // Its own session then shows the extension page: never delivered, the frame is revoked first.
+  for (const message of [
+    { sessionId: "S-F", method: "Page.frameNavigated", params: { frame: { id: "F", parentId: "X", url: "chrome-extension://nngceckbapebfimnlniiiahkandclblb/overlay/menu.html" } } },
+  ]) {
+    const verdict = filter.fromBrowser(message);
+    assert.deepEqual(verdict.deliver.map((m) => m.method), ["Target.detachedFromTarget", "Target.targetDestroyed"]);
+    assert.deepEqual(verdict.toBrowser.map((m) => m.method), ["Target.detachFromTarget"]);
+  }
+  assert.equal(filter.fromBrowser({ sessionId: "S-F", method: "Runtime.executionContextCreated", params: { context: { origin: "chrome-extension://x" } } }).deliver.length, 0);
+  assert.ok(filter.fromClient({ id: 2, sessionId: "S-F", method: "Runtime.evaluate", params: {} }).reply, "the run's session on it is gone");
+  assert.deepEqual([...filter.extensionFrames()], ["F"], "remembered for the click check");
+  const verdict = filter.fromClient({ id: 3, sessionId: "S-P", method: "Input.dispatchMouseEvent", params: { type: "mousePressed", x: 5, y: 5 } });
+  assert.equal(filter.hitAllowed(verdict.hitTest.frames, [{ nodeName: "IFRAME", frameId: "F" }]), false);
+  // The same through an execution context (origin) on a fresh frame.
+  filter.fromBrowser({ method: "Target.attachedToTarget", sessionId: "S-P", params: { sessionId: "S-G", targetInfo: { targetId: "G", type: "iframe", url: "" }, waitingForDebugger: false } });
+  const ctx = filter.fromBrowser({ sessionId: "S-G", method: "Runtime.executionContextCreated", params: { context: { origin: "chrome-extension://9f0e-dyn", auxData: { frameId: "G", isDefault: true } } } });
+  assert.deepEqual(ctx.deliver.map((m) => m.method), ["Target.detachedFromTarget", "Target.targetDestroyed"]);
+  // Bitwarden's content-script world in the run's page: not delivered, and the page stays the run's.
+  const world = filter.fromBrowser({ sessionId: "S-P", method: "Runtime.executionContextCreated", params: { context: { id: 9, origin: "chrome-extension://nngceckbapebfimnlniiiahkandclblb", name: "Bitwarden Password Manager", auxData: { frameId: "P", isDefault: false, type: "isolated" } } } });
+  assert.equal(world.deliver.length, 0);
+  assert.equal(filter.isVisible("P"), true);
+  // A normal page's own events pass.
+  assert.equal(filter.fromBrowser({ sessionId: "S-P", method: "Page.frameNavigated", params: { frame: { id: "P", url: "https://example.com/" } } }).deliver.length, 1);
+});
+
+test("Bitwarden relay: a lock the daemon could not do is reported for that release, and the run is told the owner has to act", async () => {
+  const neko = await fakeNeko();
+  const relay = await relayFor(neko, { controlPollMs: 60_000, log: () => {}, lockOnRelease: true });
+  const port = await relay.startControl("127.0.0.1", 0);
+  const read = async () => JSON.parse((await http(port, "GET", "/control")).body);
+  const post = (path, generation, token = STATUS) => http(relay.port, "POST", path, { ...HOST, Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, JSON.stringify({ generation }));
+  try {
+    await relay.pollControl();
+    assert.equal((await post("/bp/lock-failed", 1, "x".repeat(43))).status, 401);
+    assert.equal(JSON.parse((await post("/bp/lock-failed", 0)).body).lockFailed, false, "another release: nothing");
+    assert.equal(JSON.parse((await post("/bp/lock-failed", 1)).body).lockFailed, true);
+    assert.deepEqual(await read(), { ownerControl: true, known: true, lockPending: true, securing: false, lockFailed: true });
+    const guard = createControlGuard();
+    guard.result(guard.next(), await read());
+    assert.equal(guard.lockFailed(), true);
+    const call = JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "browser_snapshot", arguments: {} } });
+    assert.equal(JSON.parse(filterClientLine(call, { ownerControl: guard.held(), securing: guard.securing(), lockFailed: guard.lockFailed(), signedIn: true }).reply).result.content[0].text, LOCK_FAILED_TEXT);
+    assert.match(LOCK_FAILED_TEXT, /Lock Bitwarden now or Restart browser/);
+    // Locked after all: the failure is gone with it.
+    assert.equal(JSON.parse((await post("/bp/locked", 1)).body).cleared, true);
+    assert.deepEqual(await read(), { ownerControl: false, known: true, lockPending: false, securing: false, lockFailed: false });
+  } finally {
+    await relay.close();
+    await neko.close();
+  }
+});
+
+test("DevTools filter: a focus walk that runs out is refused, and checked input can be refused when a takeover began meanwhile", () => {
+  let held = false;
+  const filter = createTargetFilter({ held: () => held });
+  const frames = new Set(["F"]);
+  let deep = { nodeName: "DIV", children: [] };
+  const root = { nodeName: "BIT-HOST", shadowRoots: [deep] };
+  for (let i = 0; i < 6000; i++) {
+    const next = { nodeName: "DIV", children: [] };
+    deep.children.push(next);
+    deep = next;
+  }
+  assert.equal(filter.focusAllowed(frames, root), false, "not walked to the end: refused");
+  assert.equal(filter.isHeld(), false);
+  held = true;
+  assert.equal(filter.isHeld(), true);
+  assert.match(JSON.stringify(filter.heldRefusal({ id: 4, sessionId: "S", method: "Input.dispatchKeyEvent" })), /owner holds control/);
+  const source = readFileSync(new URL("../server-browser/cdp-filter.mjs", import.meta.url), "utf8");
+  assert.equal(source.match(/if \(filter\.isHeld\(\)\) \{/g)?.length, 2, "both the click and the key check look again right before sending");
+  assert.match(source, /const key = `\$\{message\.sessionId\}\|\$\{frameId\}`;/, "one focus world per frame, reused");
+});
+
+test("chromium-start.sh: the old store id counts as stale where it left traces, shared databases go only once per stale build, content-setting keys are cleaned", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bp-bw-start2-"));
+  const legacy = "nngceckbapebfimnlniiiahkandclblb";
+  const current = "c".repeat(32);
+  const runStart = () =>
+    spawnSync("sh", ["-c", `sed -e "s|^PROFILE=.*|PROFILE=$T/profile|" -e "s|^PIN=.*|PIN=$T/pin.json|" -e "s|exec /usr/bin/chromium|exec echo|" "$0" | sh`, new URL("../signed-in/chromium-start.sh", import.meta.url).pathname], {
+      env: { PATH: "/usr/bin:/bin", BP_PROXY: "http://bp-si-0a1b2c3d-proxy:3128", T: dir },
+      encoding: "utf8",
+    });
+  writeFileSync(join(dir, "pin.json"), JSON.stringify({ id: current }));
+  mkdirSync(join(dir, "profile", "Default", "Local Extension Settings", legacy), { recursive: true });
+  mkdirSync(join(dir, "profile", "Default", "Extension State"), { recursive: true });
+  writeFileSync(
+    join(dir, "profile", "Default", "Preferences"),
+    JSON.stringify({ profile: { content_settings: { exceptions: { clipboard: { [`chrome-extension://${legacy},*`]: { setting: 1 }, "https://example.com,*": { setting: 1 } } } } } }),
+  );
+  assert.equal(runStart().status, 0);
+  assert.equal(readFileSync(join(dir, "profile", ".bp-bitwarden-ids"), "utf8"), `${current}\n${legacy}\n`, "the old store id is recorded as stale");
+  assert.equal(existsSync(join(dir, "profile", "Default", "Local Extension Settings", legacy)), false);
+  assert.equal(existsSync(join(dir, "profile", "Default", "Extension State")), false, "shared databases: first start after it became stale");
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, "profile", "Default", "Preferences"), "utf8")).profile.content_settings.exceptions.clipboard, { "https://example.com,*": { setting: 1 } });
+  mkdirSync(join(dir, "profile", "Default", "Extension State"), { recursive: true });
+  assert.equal(runStart().status, 0);
+  assert.equal(existsSync(join(dir, "profile", "Default", "Extension State")), true, "not again on later starts");
+  // A profile without traces of the old id does not get it recorded.
+  const clean = mkdtempSync(join(tmpdir(), "bp-bw-start3-"));
+  mkdirSync(join(clean, "profile", "Default"), { recursive: true });
+  writeFileSync(join(clean, "pin.json"), JSON.stringify({ id: current }));
+  spawnSync("sh", ["-c", `sed -e "s|^PROFILE=.*|PROFILE=$T/profile|" -e "s|^PIN=.*|PIN=$T/pin.json|" -e "s|exec /usr/bin/chromium|exec echo|" "$0" | sh`, new URL("../signed-in/chromium-start.sh", import.meta.url).pathname], { env: { PATH: "/usr/bin:/bin", BP_PROXY: "http://bp-si-0a1b2c3d-proxy:3128", T: clean }, encoding: "utf8" });
+  assert.equal(readFileSync(join(clean, "profile", ".bp-bitwarden-ids"), "utf8"), `${current}\n`);
+});
+

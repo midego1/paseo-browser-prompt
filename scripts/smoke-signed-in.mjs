@@ -26,8 +26,19 @@
 // one run at a time; a cookie survives a neko restart; the relay refuses /metrics, admin APIs,
 // foreign Host and foreign-Origin WebSockets; no STUN servers; the hardening as Docker reports it;
 // and the cleanup.
+//
+// Bitwarden (on unless SMOKE_BITWARDEN=0; every check above then runs with it installed): the pinned
+// release is downloaded (the consent bypass, again only here) and built into the image; the pin,
+// read-only files, policies (only extension, store blocked, Chromium's password manager off) and the
+// command line; it loads and its content script is on https pages and intercepts
+// navigator.credentials (webauthn.io); the agent never sees, attaches to or opens any extension
+// target or chrome-extension:// page (through its MCP and through the same DevTools filter used
+// directly); a real Bitwarden frame inside the agent's tab stays unreadable and unclickable for it;
+// the lock shortcut reaches Chromium as a command (the page never sees it); the relay keeps the run
+// paused until the vault is locked, also after a takeover from WebKit (Safari's engine, in a
+// container on the stack's outward network).
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { request } from "node:http";
 import { createRequire } from "node:module";
 import { connect } from "node:net";
@@ -41,10 +52,16 @@ const { createServerBrowser } = await import("../server/server-browser.ts");
 const { createSignedIn } = await import("../server/signed-in.ts");
 const instanceId = `smoke-${Math.random().toString(16).slice(2, 10)}`;
 const sb = createServerBrowser({ instanceId, runtimeRoot: join(state, "rt"), buildRoot: join(state, "build") });
+const BITWARDEN_ON = process.env.SMOKE_BITWARDEN !== "0";
+/** The owner's Bitwarden choice (the settings' switch), changed by the lifecycle checks at the end. */
+let bitwardenChoice = BITWARDEN_ON;
+const { BITWARDEN } = await import("../shared/signed-in.ts");
+const { SIGNED_IN_BITWARDEN_FILES } = await import("../server/server-browser-files.ts");
+let locks = 0;
 const si = createSignedIn({
   serverBrowser: sb,
   bindHost: async () => "127.0.0.1",
-  config: async () => ({ port: PORT, httpsBaseUrl: "" }),
+  config: async () => ({ port: PORT, httpsBaseUrl: "", bitwarden: bitwardenChoice, bitwardenConsent: bitwardenChoice ? BITWARDEN.sha256 : "" }),
   keysFile: join(state, "keys.json"),
   buildRoot: join(state, "build"),
 });
@@ -137,6 +154,8 @@ function upgrade(headers, path) {
 
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 let browser = null;
+// The daemon's lock check (startIdleChecks runs it in the plugin): presses Bitwarden's Lock when the relay asks.
+const lockTimer = setInterval(() => void si.lockCheck().then((done) => done && locks++), 1000);
 let webkitBrowser = null;
 let webkitContainer = null;
 const WEBKIT_PORT = Number(process.env.SMOKE_WEBKIT_PORT ?? String(PORT + 90));
@@ -149,6 +168,17 @@ try {
     status = await si.status();
   }
   check("images ready", status.state === "ready" || status.state === "running", `${status.serverImage}, ${status.image}`);
+  if (BITWARDEN_ON) {
+    // The consent bypass for Bitwarden's download: only in this script.
+    const started = Date.now();
+    const answer = await si.bitwarden("download");
+    status = await si.status();
+    while (status.bitwarden.state === "building") {
+      await sleep(3000);
+      status = await si.status();
+    }
+    check("Bitwarden: pinned release downloaded, verified and built into the image", answer.ok && status.bitwarden.state === "ready", `${si.bitwardenImage()}, ${Date.now() - started} ms${status.bitwarden.detail ? `, ${status.bitwarden.detail}` : ""}`);
+  }
 
   // 2. Start.
   const started = Date.now();
@@ -193,8 +223,8 @@ process.stdout.write(JSON.stringify(out ?? null));
 process.exit(0);`;
     const out = execFileSync(
       "docker",
-      ["run", "--rm", "-i", "--network", `container:${neko}`, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/tmp", "--user", "pwuser", "--entrypoint", "node", status.serverImage, "--input-type=module", "-"],
-      { input: script, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: 60_000 },
+      ["run", "--rm", "-i", "--init", "--network", `container:${neko}`, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/tmp", "--user", "pwuser", "--entrypoint", "node", status.serverImage, "--input-type=module", "-"],
+      { input: script, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: 150_000 },
     );
     return JSON.parse(out || "null");
   };
@@ -257,6 +287,11 @@ process.exit(0);`;
   }
   r = await agent.call("browser_navigate", { url: "https://example.com" });
   check("normal https still works after the internal-page checks", !r.error && /Example Domain/.test(r.text));
+  if (BITWARDEN_ON) {
+    await bitwardenChecks({ agent, neko, helper, pageByMarker }).catch((error) =>
+      check("Bitwarden checks", false, error instanceof Error ? `${error.message.split("\n")[0]} ${String(error.stderr ?? "").slice(-300)}` : String(error)),
+    );
+  }
   r = await agent.call("browser_tabs", { action: "new", url: "https://example.com/?bp-smoke=takeover" });
   helper(`${pageByMarker("bp-smoke=takeover")} await page.bringToFront(); await page.evaluate(() => { document.body.innerHTML = '<input id=user autocomplete=off style="position:fixed;left:0;top:0;width:100vw;height:45vh;font-size:40px"><button id=btn style="position:fixed;left:0;top:55vh;width:100vw;height:45vh;font-size:40px" onclick="window.clicks=(window.clicks||0)+1">tap</button>'; }); return 1;`);
   const busy = await si.prepare({ sourceId: "smoke", cardId: "card" });
@@ -320,8 +355,9 @@ process.exit(0);`;
   check("takeover: the phone's taps and typing reach the agent's page", seen?.user === "alice" && seen?.clicks === 2, JSON.stringify(seen));
   check("viewer: no refused requests from the neko client", refused.length === 0, refused.join(", "));
   await page.close();
+  // The relay resets control (and with Bitwarden, the daemon locks the vault first, a few seconds).
   await sleep(3500);
-  r = await agent.call("browser_snapshot", {});
+  r = BITWARDEN_ON ? (await until(async () => { const snap = await agent.call("browser_snapshot", {}); return snap.error ? null : snap; }, 40_000, 2000)) ?? (await agent.call("browser_snapshot", {})) : await agent.call("browser_snapshot", {});
   check("closing the viewer without releasing control resets it: the run goes on", !r.error, r.error ? r.text.slice(0, 80) : "");
 
   // 5b. Safari: the same key flow with WebKit (iPad as iPadOS Safari reports itself, iPhone, desktop
@@ -437,14 +473,33 @@ process.exit(0);`;
         const wseen = remote();
         check(`WebKit ${name}: taps and typing reach the agent's page${touch ? " (on-screen keyboard text keeps capitals and symbols)" : ""}`, wseen?.user === expected && wseen?.clicks === 2, JSON.stringify(wseen));
         check(`WebKit ${name}: no refused requests and no "Blocked" toast`, wrefused.length === 0 && (await blockedToasts()) === 0, wrefused.join(", "));
+        if (BITWARDEN_ON) {
+          // Release control with the viewer's own button: the vault is locked before the run goes on.
+          const before = (await si.status()).bitwarden.lastLock?.at ?? 0;
+          const release = wpage.locator('[data-testid=control-release]:visible, button[aria-label="Release Controls"]:visible, [data-testid=control-request]:visible, button[aria-label="Request Controls"]:visible').first();
+          const pressed = await release.click({ force: true, timeout: 5000 }).then(() => true, (e) => e.message.split("\n")[0]);
+          let resumed = null;
+          for (let i = 0; i < 40 && !resumed; i++) {
+            await sleep(1000);
+            const snap = await agent.call("browser_snapshot", {});
+            if (!snap.error) resumed = { at: i + 1, locked: ((await si.status()).bitwarden.lastLock?.at ?? 0) > before };
+          }
+          check(`WebKit ${name}: releasing control locks Bitwarden (verified), then the run goes on`, pressed === true && resumed?.locked === true, JSON.stringify({ pressed, resumed }));
+        }
       } catch (error) {
         check(`WebKit ${name}: viewer`, false, error instanceof Error ? error.message.split("\n")[0] : String(error));
       } finally {
         await ctx.close().catch(() => {});
       }
+      const lockedBeforeClose = (await si.status()).bitwarden.lastLock?.at ?? 0;
       await sleep(3500);
-      r = await agent.call("browser_snapshot", {});
+      // With Bitwarden the run goes on once the vault is locked (a verified lock takes a few seconds).
+      r = BITWARDEN_ON ? await until(async () => { const snap = await agent.call("browser_snapshot", {}); return snap.error ? null : snap; }, 40_000, 2000) ?? (await agent.call("browser_snapshot", {})) : await agent.call("browser_snapshot", {});
       check(`WebKit ${name}: closing the viewer resets control`, !r.error, r.error ? r.text.slice(0, 80) : "");
+      if (BITWARDEN_ON) {
+        const after = (await si.status()).bitwarden.lastLock;
+        check(`WebKit ${name}: closing the viewer locks Bitwarden too (verified)`, (after?.at ?? 0) > lockedBeforeClose && after?.ok === true, JSON.stringify(after));
+      }
     }
     // Off the stack's network before the stack stops (a stop removes it).
     await webkitBrowser?.close().catch(() => {});
@@ -527,9 +582,11 @@ process.exit(0);`;
   );
   const viaNewProxy = helper(`const p = await context.newPage(); const res = await p.goto("https://example.com/?bp-smoke=after-repair"); const ok = res?.ok(); await p.close(); return ok;`);
   check("the browser reaches the web through the new proxy (by name)", viaNewProxy === true);
+  if (BITWARDEN_ON) await bitwardenLifecycle({ neko, relayName, helper });
 } catch (error) {
   check("smoke run", false, error instanceof Error ? error.stack : String(error));
 } finally {
+  clearInterval(lockTimer);
   if (browser) await browser.close().catch(() => {});
   if (webkitBrowser) await webkitBrowser.close().catch(() => {});
   if (webkitContainer) {
@@ -555,3 +612,398 @@ process.exit(0);`;
   console.log(`\n${results.length - failed.length}/${results.length} passed${failed.length ? `; failed: ${failed.map((f) => f.name).join("; ")}` : ""}`);
   process.exit(failed.length ? 1 : 0);
 }
+
+/**
+ * Bitwarden checks (step 4b): the pinned install, the policies, what the agent can and cannot reach
+ * (through its MCP, and through the same DevTools filter used directly next to a privileged
+ * connection that plays the extension), a real Bitwarden frame inside the agent's tab, passkey
+ * interception on webauthn.io, and the lock shortcut.
+ */
+async function bitwardenChecks({ agent, neko, helper, pageByMarker }) {
+  const exec = (...args) => docker("exec", neko, ...args);
+
+  // The pinned build, as the browser has it: force-installed by policy from the read-only image.
+  const pin = JSON.parse(exec("cat", "/opt/bitwarden/browser-prompt-pin.json"));
+  const id = pin.id;
+  const ext = `chrome-extension://${id}`;
+  check(
+    "Bitwarden: the image holds the pinned version (SHA-256 checked), packed with this install's key (the id derived from it)",
+    pin.version === BITWARDEN.version && pin.sha256 === BITWARDEN.sha256 && id === si.bitwardenId(),
+    `${pin.version}, ${pin.sha256.slice(0, 16)}…, id ${id}`,
+  );
+  const leaked = docker("run", "--rm", "--entrypoint", "sh", si.bitwardenImage(), "-c", "grep -rl 'PRIVATE KEY' /opt /etc /tmp /run 2>/dev/null | head -3; ls /run/secrets 2>/dev/null; true");
+  const history = docker("history", "--no-trunc", "--format", "{{.CreatedBy}}", si.bitwardenImage());
+  check("Bitwarden: the signing key is in no file and no layer of the image (a BuildKit secret only)", leaked === "" && !/PRIVATE KEY/.test(history), leaked);
+  const files = exec("sh", "-c", "ls /opt/bitwarden | sort | tr '\\n' ' '");
+  check("Bitwarden: /opt/bitwarden holds only the CRX, the local update manifest and the pin (no private key)", files.trim() === "bitwarden.crx browser-prompt-pin.json updates.xml", files);
+  const writable = docker("exec", "--user", "neko", neko, "sh", "-c", 'for f in /opt/bitwarden /opt/bitwarden/bitwarden.crx /opt/bitwarden/updates.xml /etc/chromium/policies/managed/policies.json; do test -w "$f" && echo "$f"; done; true');
+  check("Bitwarden: its CRX, update manifest and the policy are read-only for the browser user", writable === "", writable);
+  const policy = JSON.parse(exec("cat", "/etc/chromium/policies/managed/policies.json"));
+  check("policy: Chromium's own password manager and autofill are off", policy.PasswordManagerEnabled === false && policy.AutofillAddressEnabled === false && policy.AutofillCreditCardEnabled === false);
+  check(
+    "policy: only Bitwarden (force-installed from file://, blocklist *, developer mode off, types and sources locked, store blocked)",
+    JSON.stringify(policy.ExtensionInstallForcelist) === JSON.stringify([`${id};file:///opt/bitwarden/updates.xml`]) &&
+      JSON.stringify(policy.ExtensionInstallBlocklist) === '["*"]' &&
+      policy.ExtensionDeveloperModeSettings === 1 &&
+      JSON.stringify(policy.ExtensionAllowedTypes) === '["extension"]' &&
+      policy.ExtensionInstallSources.length === 0 &&
+      policy.BlockExternalExtensions === true &&
+      policy.URLBlocklist.includes("chromewebstore.google.com"),
+  );
+  check(
+    "policy: extension pages are not blocked by URL (Bitwarden's dynamic frame ids), every other internal page still is",
+    !policy.URLBlocklist.includes("chrome-extension://*") && ["chrome://*", "devtools://*", "view-source:*", "file://*", "data:*"].every((u) => policy.URLBlocklist.includes(u)),
+  );
+  const args = exec("sh", "-c", 'tr "\\0" "\\n" < /proc/$(pgrep -o -f "^/usr/lib/chromium/chromium --show")/cmdline');
+  // (neko's Chromium wrapper adds an empty --load-extension=.)
+  check("Chromium: no extension from the command line", !/^--load-extension=\S|^--disable-extensions-except/m.test(args), args.split("\n").filter((a) => /extension/.test(a)).join(" "));
+
+  // Privileged view (the harness, not the agent): Bitwarden is installed by policy and runs (the
+  // install takes a few seconds after Chromium starts).
+  let loaded = [];
+  for (let i = 0; i < 30 && !loaded.some((line) => line.startsWith(`service_worker ${ext}/`)); i++) {
+    if (i) await sleep(2000);
+    loaded = helper(`const cdp = await browser.newBrowserCDPSession(); const { targetInfos } = await cdp.send("Target.getTargets"); return targetInfos.filter((t) => /^chrome-extension:/.test(t.url)).map((t) => t.type + " " + t.url);`) ?? [];
+  }
+  // Chromium writes its preferences a little later.
+  const readLocation = () => docker("exec", "--user", "neko", neko, "python3", "-I", "-c", `import json;print(json.load(open('/home/neko/.config/chromium/Default/Preferences')).get('extensions',{}).get('settings',{}).get('${id}',{}).get('location'))`);
+  const location = (await until(async () => (readLocation() === "7" ? "7" : null), 60_000, 3000)) ?? readLocation();
+  check("Bitwarden runs, installed by policy (location 7: from the policy's update manifest)", loaded.some((line) => line.startsWith(`service_worker ${ext}/`)) && location === "7", `location ${location}; ${loaded.join(", ")}`);
+  const backgrounds = loaded.filter((line) => /^(service_worker|background_page|other) /.test(line));
+  check("Chromium: no other extension runs", backgrounds.every((line) => line.includes(`${ext}/`)), backgrounds.join(", "));
+
+  // A: the daemon's verified lock (Bitwarden's own lock, checked through DevTools). With no account
+  // logged in the state to verify is "no account unlocked"; Bitwarden still reloads itself after the
+  // lock, and it must come back (a command-line extension would not).
+  const before = Date.now();
+  const lock1 = await si.lockNow();
+  const tool = (mode) => JSON.parse(execFileSync("docker", ["run", "--rm", "--init", "--network", `container:${neko}`, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only", "--user", "pwuser", "--entrypoint", "node", sb.image, "/opt/browser-prompt/bitwarden-lock.mjs", mode, id], { encoding: "utf8", timeout: 150_000 }).trim().split("\n").at(-1));
+  const afterLock = tool("status");
+  check("lock: Bitwarden's own lock, verified through DevTools (no account unlocked), and Bitwarden is back afterwards", lock1.ok && afterLock.locked === true, `${Date.now() - before} ms; ${JSON.stringify(afterLock)}`);
+  const reload = tool("reload");
+  check("lock: the reload fallback clears chrome.storage.session (a marker is gone) and Bitwarden comes back", reload.locked === true && reload.cleared === true, JSON.stringify(reload));
+  // A hostile page holds fullscreen and the keyboard: the lock does not care (no desktop keys involved).
+  helper(`const p = await context.newPage(); await p.goto("https://example.com/?bp-smoke=hostile"); const s = await context.newCDPSession(p); await s.send("Runtime.evaluate", { expression: "document.documentElement.requestFullscreen().catch(() => {}); navigator.keyboard && navigator.keyboard.lock().catch(() => {}); 1", userGesture: true, awaitPromise: false }); return 1;`);
+  const lock2 = await si.lockNow();
+  check("lock: works with a page holding fullscreen and the keyboard", lock2.ok, lock2.detail);
+  helper(`${pageByMarker("bp-smoke=hostile")} await page.close(); return 1;`);
+  const owner = await si.bitwarden("lock");
+  check("lock: the owner's Lock now (settings and card) is verified too", owner.ok, owner.message);
+  const statusNow = await si.status();
+  check("status: the last lock is shown as verified and nothing is pending", statusNow.bitwarden.lastLock?.ok === true && statusNow.bitwarden.lockPending === false && statusNow.bitwarden.active === true, JSON.stringify(statusNow.bitwarden));
+
+  // The agent through its MCP: no extension target, no extension page, no store.
+  let r = await agent.call("browser_tabs", { action: "list" });
+  check("agent: no extension page among its tabs", !/chrome-extension:/i.test(r.text));
+  for (const url of [`${ext}/popup/index.html`, `${ext}/popup/index.html#/vault`, "chrome-extension://abcdefghijklmnopabcdefghijklmnop/x.html", "chrome-%65xtension://x/"]) {
+    r = await agent.call("browser_navigate", { url });
+    check(`agent refused ${url.slice(0, 60)}`, r.error && /extension pages \(chrome-extension:\/\/\) are not available/i.test(r.text), r.text.split("\n")[0].slice(0, 80));
+  }
+  r = await agent.call("browser_tabs", { action: "new", url: `${ext}/popup/index.html` });
+  check("agent cannot open a tab with an extension page", r.error && /not available/.test(r.text));
+  await agent.call("browser_tabs", { action: "new" });
+  r = await agent.call("browser_navigate", { url: "https://chromewebstore.google.com/detail/nngceckbapebfimnlniiiahkandclblb" });
+  check("agent: the Chrome Web Store is blocked (no other extension can be installed)", /ERR_BLOCKED_BY_ADMINISTRATOR/.test(r.text) || /chrome-error:/.test((await agent.call("browser_snapshot", {})).text), r.text.split("\n").find((l) => /ERR_/.test(l))?.slice(0, 80));
+  await agent.call("browser_tabs", { action: "close" });
+
+  // The same DevTools filter the agent's Playwright uses, driven directly, next to a privileged
+  // connection that puts a real Bitwarden frame (its own overlay page, with a marker) into the page.
+  const filtered = helper(`
+const { startCdpFilter } = await import("/opt/browser-prompt/cdp-filter.mjs");
+const out = {};
+// A step that hangs ends the harness with what it has (and the step's name), never the smoke run.
+setTimeout(() => {
+  process.stdout.write(JSON.stringify({ ...out, stuck: out.step }));
+  process.exit(0);
+}, 110000).unref();
+out.step = "filter";
+const cdpFilter = await startCdpFilter({ upstream: "http://127.0.0.1:9222" });
+const pcdp = await browser.newBrowserCDPSession();
+const sw = (await pcdp.send("Target.getTargets")).targetInfos.find((t) => t.type === "service_worker" && t.url.startsWith(${JSON.stringify(ext)}));
+out.step = "raw";
+// Raw DevTools messages through the filter first (as a client of the agent's kind), then Playwright.
+{
+  const version = await (await fetch(cdpFilter.endpoint + "/json/version")).json();
+  const ws = new WebSocket(version.webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => { ws.addEventListener("open", resolve); ws.addEventListener("error", reject); });
+  const pending = new Map();
+  ws.addEventListener("message", (e) => { const m = JSON.parse(e.data); pending.get(m.id)?.(m); });
+  let n = 0;
+  const send = (method, params = {}) => new Promise((resolve) => { const id = ++n; pending.set(id, resolve); ws.send(JSON.stringify({ id, method, params })); setTimeout(() => resolve({ timeout: true }), 10000); });
+  out.targets = ((await send("Target.getTargets")).result?.targetInfos ?? []).filter((t) => t.url.startsWith("chrome-extension:")).map((t) => t.url);
+  out.attach = JSON.stringify((await send("Target.attachToTarget", { targetId: sw.targetId, flatten: true })).error ?? "attached");
+  out.info = JSON.stringify((await send("Target.getTargetInfo", { targetId: sw.targetId })).error ?? "info");
+  out.createExt = JSON.stringify((await send("Target.createTarget", { url: ${JSON.stringify(`${ext}/popup/index.html`)} })).error ?? "created");
+  ws.close();
+  await new Promise((r) => setTimeout(r, 500));
+}
+out.step = "connect";
+const agentBrowser = await chromium.connectOverCDP(cdpFilter.endpoint, { timeout: 20000 });
+const actx = agentBrowser.contexts()[0];
+out.serviceWorkers = actx.serviceWorkers().map((w) => w.url()).filter((u) => u.startsWith("chrome-extension:"));
+out.step = "newPage";
+const apage = await actx.newPage();
+out.step = "open extension page";
+out.open = await apage.goto(${JSON.stringify(`${ext}/popup/index.html`)}, { timeout: 10000 }).then(() => "opened " + apage.url(), (e) => e.message.split("\\n")[0].slice(0, 120));
+out.step = "goto";
+const marker = "bw-frame-" + Date.now();
+await apage.goto("https://example.com/?bp-smoke=" + marker, { timeout: 20000 });
+out.step = "inject";
+const ppage = context.pages().find((p) => p.url().includes("bp-smoke=" + marker));
+const session = await context.newCDPSession(ppage);
+const worlds = [];
+session.on("Runtime.executionContextCreated", (e) => worlds.push(e.context));
+await session.send("Runtime.enable");
+await new Promise((r) => setTimeout(r, 1000));
+out.worlds = worlds.filter((c) => c.auxData?.type === "isolated").map((c) => c.name);
+const world = worlds.find((c) => c.auxData?.type === "isolated" && /bitwarden/i.test(c.name));
+const made = world
+  ? await Promise.race([
+      session.send("Runtime.evaluate", { contextId: world.id, returnByValue: true, expression: '(() => { const f = document.createElement("iframe"); f.id = "bp-bw-frame"; f.src = chrome.runtime.getURL("overlay/menu.html"); f.style.cssText = "position:fixed;left:0;top:0;width:400px;height:300px;z-index:2147483647;border:0"; document.documentElement.appendChild(f); return f.src; })()' }),
+      new Promise((r) => setTimeout(() => r({ timeout: true }), 15000)),
+    ])
+  : null;
+out.frameSrc = made?.result?.value ?? JSON.stringify(made);
+await new Promise((r) => setTimeout(r, 3000));
+const pframe = ppage.frames().find((f) => f.url().startsWith("chrome-extension:"));
+out.frameLoaded = pframe ? pframe.url() : "no extension frame: " + ppage.frames().map((f) => f.url()).join(" ");
+if (pframe) {
+  out.step = "mark";
+  await Promise.race([new Promise((r) => setTimeout(r, 10000)), pframe.evaluate(() => {
+    document.body.innerHTML = "";
+    const b = document.createElement("button");
+    b.textContent = "BW-SECRET-MARKER";
+    b.style.cssText = "position:fixed;inset:0;width:100%;height:100%";
+    b.addEventListener("click", () => (window.bpClicks = (window.bpClicks || 0) + 1));
+    document.body.append(b);
+  }).catch((e) => (out.markErr = e.message.slice(0, 120)))]);
+}
+out.step = "read";
+out.agentFrames = apage.frames().map((f) => f.url());
+out.aria = await apage.locator("body").ariaSnapshot({ timeout: 15000 }).then((t) => t, (e) => "ERR " + e.message.split("\\n")[0]);
+out.html = (await apage.content()).includes("BW-SECRET-MARKER");
+out.step = "click";
+out.clickFrame = await apage.mouse.click(100, 100).then(() => "clicked", (e) => e.message.split("\\n")[0].slice(0, 140));
+out.tapFrame = await apage.mouse.click(390, 290).then(() => "clicked", (e) => e.message.split("\\n")[0].slice(0, 140));
+out.clickPage = await apage.mouse.click(700, 600).then(() => "clicked", (e) => e.message.split("\\n")[0].slice(0, 140));
+out.step = "count";
+out.frameClicks = pframe ? await Promise.race([pframe.evaluate(() => window.bpClicks || 0).catch(() => -1), new Promise((r) => setTimeout(() => r(-2), 10000))]) : -1;
+out.step = "done";
+await apage.close().catch(() => {});
+await cdpFilter.close();
+return out;`);
+  check("filter: no Bitwarden service worker for the agent's Playwright", filtered && filtered.serviceWorkers.length === 0, JSON.stringify(filtered?.serviceWorkers));
+  check("filter: no extension target in the agent's target list", filtered && filtered.targets.length === 0, JSON.stringify(filtered?.targets));
+  check("filter: attaching to Bitwarden's service worker, or asking about it, is refused", filtered && /No such target/.test(filtered.attach) && /No such target/.test(filtered.info), `${filtered?.attach} ${filtered?.info}`);
+  check("filter: creating a tab with an extension page is refused", filtered && /password manager/.test(filtered.createExt), filtered?.createExt);
+  check("filter: the agent cannot open Bitwarden's popup page", filtered && !/^opened/.test(filtered.open), filtered?.open);
+  check("Bitwarden's content script is in https pages (its isolated world)", filtered && filtered.worlds.some((n) => /bitwarden/i.test(n)), JSON.stringify(filtered?.worlds));
+  check(
+    "Bitwarden's own overlay frame loads inside a page under the policy (dynamic extension URL)",
+    filtered && /^chrome-extension:\/\/[^/]+\/overlay\/menu\.html/.test(filtered.frameLoaded),
+    `${filtered?.frameSrc} -> ${filtered?.frameLoaded}${filtered?.markErr ? `, ${filtered.markErr}` : ""}`,
+  );
+  check("filter: the agent's page does not show the frame's contents (aria snapshot, HTML)", filtered && !/BW-SECRET-MARKER/.test(filtered.aria) && !filtered.html && !/^ERR/.test(filtered.aria), (filtered?.aria ?? "").slice(0, 120));
+  check(
+    "filter: the agent's clicks on the Bitwarden frame are refused; elsewhere they work",
+    filtered && /password manager/.test(filtered.clickFrame) && /password manager/.test(filtered.tapFrame) && filtered.clickPage === "clicked" && filtered.frameClicks === 0,
+    JSON.stringify({ frame: filtered?.clickFrame?.slice(0, 60), page: filtered?.clickPage, clicksInFrame: filtered?.frameClicks }),
+  );
+
+  // The real agent with a real Bitwarden frame in its own tab: its snapshot stays clean and fast, a click on the frame is refused.
+  r = await agent.call("browser_tabs", { action: "new", url: "https://example.com/?bp-smoke=bw-agent" });
+  const injected = helper(`${pageByMarker("bp-smoke=bw-agent")}
+const session = await context.newCDPSession(page);
+const worlds = [];
+session.on("Runtime.executionContextCreated", (e) => worlds.push(e.context));
+await session.send("Runtime.enable");
+await new Promise((r) => setTimeout(r, 1000));
+const world = worlds.find((c) => c.auxData?.type === "isolated" && /bitwarden/i.test(c.name));
+if (!world) return "no Bitwarden world";
+await session.send("Runtime.evaluate", { contextId: world.id, expression: '(() => { const f = document.createElement("iframe"); f.title = "bp-bw-frame"; f.src = chrome.runtime.getURL("overlay/menu.html"); f.style.cssText = "position:fixed;left:0;top:0;width:500px;height:400px;z-index:2147483647;border:0"; document.body.appendChild(f); })()' });
+await new Promise((r) => setTimeout(r, 3000));
+const frame = page.frames().find((f) => f.url().startsWith("chrome-extension:"));
+if (!frame) return "no frame";
+await frame.evaluate(() => { document.body.innerHTML = '<h1>BW-SECRET-MARKER</h1><input value="bw-secret-value">'; });
+return frame.url();`);
+  const started = Date.now();
+  r = await agent.call("browser_snapshot", {});
+  const took = Date.now() - started;
+  check("agent: its snapshot with a Bitwarden frame in the page does not contain the frame's contents and does not hang", !r.error && /Example Domain/.test(r.text) && !/BW-SECRET-MARKER|bw-secret-value/.test(r.text) && took < 30_000, `${injected}; ${took} ms`);
+  const frameRef = /iframe[^\n]*\[ref=([a-z0-9]+)\]/i.exec(r.text)?.[1];
+  if (frameRef) {
+    const click = await agent.call("browser_click", { element: "frame", target: frameRef });
+    const reason = click.text.replace(/^### Error\s*/m, "").split("\n").filter((l) => l.trim()).slice(0, 3).join(" | ").slice(0, 240);
+    // Either the filter refuses the press, or Playwright cannot even reach the frame (it is revoked
+    // from the run): in both cases no click reaches Bitwarden. (This agent has no coordinate clicks;
+    // pointer input at the frame is checked through the filter directly above.)
+    check(
+      "agent: clicking the Bitwarden frame by its ref does nothing (refused, or the frame is out of the run's reach)",
+      click.error && (/password manager|Not allowed/i.test(click.text) || /waiting for locator\('aria-ref=/.test(click.text)),
+      reason,
+    );
+  } else check("agent: the Bitwarden frame has no ref in its snapshot (nothing to click)", true, "no iframe ref");
+
+  // B: keys into Bitwarden's frame. The owner (privileged here) leaves the focus in the frame, as a
+  // field's inline menu would: the agent's ArrowDown, Tab and Enter are refused; with the focus in a
+  // field of the page, its keys work.
+  helper(`${pageByMarker("bp-smoke=bw-agent")} await page.bringToFront(); await page.evaluate(() => { const f = document.createElement("input"); f.id = "bp-field"; f.style.cssText = "position:fixed;left:600px;top:500px"; document.body.appendChild(f); document.querySelector('iframe[title="bp-bw-frame"]').focus(); }); return page.evaluate(() => document.activeElement && document.activeElement.tagName);`);
+  const refusedKeys = [];
+  for (const key of ["ArrowDown", "Tab", "Enter"]) {
+    const press = await agent.call("browser_press_key", { key });
+    refusedKeys.push(`${key}: ${press.error && /password manager/.test(press.text) ? "refused" : press.text.split("\n").find((l) => l.trim())?.slice(0, 60)}`);
+  }
+  check("keys: with the focus in Bitwarden's frame, the agent's ArrowDown, Tab and Enter are refused", refusedKeys.every((line) => line.endsWith("refused")), refusedKeys.join("; "));
+  helper(`${pageByMarker("bp-smoke=bw-agent")} await page.evaluate(() => document.getElementById("bp-field").focus()); return 1;`);
+  const typed = await agent.call("browser_press_key", { key: "a" });
+  const value = helper(`${pageByMarker("bp-smoke=bw-agent")} return page.evaluate(() => document.getElementById("bp-field").value);`);
+  check("keys: with the focus in a field of the page, the agent types as usual", !typed.error && value === "a", JSON.stringify({ error: typed.error, value }));
+
+  // Bitwarden's keyboard commands (autofill Ctrl+Shift+L, popup Ctrl+Shift+U/Y, generator
+  // Ctrl+Shift+9) do not fire from the agent's keys: DevTools input is not a browser shortcut. A
+  // listener in Bitwarden's service worker (privileged harness) records every command; the same keys
+  // pressed on neko's desktop (the owner's way) are the control.
+  const commandsSetup = helper(`const w = context.serviceWorkers().find((x) => x.url().startsWith(${JSON.stringify(`${ext}/`)})); if (!w) return null; return w.evaluate(() => { self.bpCommands = []; chrome.commands.onCommand.addListener((c) => self.bpCommands.push(c)); return chrome.commands.getAll().then((all) => all.filter((c) => c.shortcut).map((c) => c.name + " " + c.shortcut)); });`);
+  helper(`${pageByMarker("bp-smoke=bw-agent")} await page.bringToFront(); await page.evaluate(() => document.getElementById("bp-field").focus()); return 1;`);
+  for (const key of ["Control+Shift+L", "Control+Shift+U", "Control+Shift+Y", "Control+Shift+9"]) await agent.call("browser_press_key", { key });
+  await sleep(1500);
+  const fromAgent = helper(`const w = context.serviceWorkers().find((x) => x.url().startsWith(${JSON.stringify(`${ext}/`)})); return w ? w.evaluate(() => self.bpCommands) : null;`);
+  docker("exec", "--user", "neko", "--env", "DISPLAY=:99.0", neko, "xdotool", "key", "--clearmodifiers", "ctrl+shift+9");
+  await sleep(1500);
+  const fromDesktop = helper(`const w = context.serviceWorkers().find((x) => x.url().startsWith(${JSON.stringify(`${ext}/`)})); return w ? w.evaluate(() => self.bpCommands) : null;`);
+  check(
+    "commands: the agent's Ctrl+Shift+L/U/Y/9 fire none of Bitwarden's commands (the same key on the desktop does)",
+    Array.isArray(fromAgent) && fromAgent.length === 0,
+    `shortcuts ${JSON.stringify(commandsSetup)}; from the agent ${JSON.stringify(fromAgent)}; from the desktop (control) ${JSON.stringify(fromDesktop)}`,
+  );
+  await agent.call("browser_tabs", { action: "close" });
+
+  // Passkeys on a public demo: Bitwarden intercepts navigator.credentials there; the agent cannot see what it opens.
+  r = await agent.call("browser_tabs", { action: "new", url: "https://webauthn.io/" });
+  const reachable = !r.error && /webauthn/i.test(r.text);
+  const fido = reachable
+    ? helper(`${pageByMarker("webauthn.io")}
+const session = await context.newCDPSession(page);
+const worlds = [];
+session.on("Runtime.executionContextCreated", (e) => worlds.push(e.context));
+await session.send("Runtime.enable");
+await new Promise((r) => setTimeout(r, 1500));
+const native = await page.evaluate(() => [String(navigator.credentials.get).includes("[native code]"), String(navigator.credentials.create).includes("[native code]")]);
+return { worlds: worlds.filter((c) => c.auxData?.type === "isolated").map((c) => c.name), native };`)
+    : null;
+  // Bitwarden replaces navigator.credentials in pages only with an account logged in (its passkey
+  // scripts are registered then); this smoke test has none, so that part is reported, not required.
+  check(
+    "passkeys: on webauthn.io Bitwarden's content script runs (it takes over navigator.credentials once you are logged in)",
+    !reachable || (fido && fido.worlds.some((n) => /bitwarden/i.test(n))),
+    reachable ? `navigator.credentials.get/create native while logged out: ${JSON.stringify(fido?.native)}` : "webauthn.io not reachable from here: skipped",
+  );
+  if (reachable) {
+    const snap = (await agent.call("browser_snapshot", {})).text;
+    const box = /textbox[^\n]*\[ref=([a-z0-9]+)\]/i.exec(snap)?.[1];
+    const button = /button "Register"[^\n]*\[ref=([a-z0-9]+)\]/i.exec(snap)?.[1];
+    const before = helper(`const cdp = await browser.newBrowserCDPSession(); return (await cdp.send("Target.getTargets")).targetInfos.map((t) => t.targetId);`);
+    if (box && button) {
+      await agent.call("browser_type", { element: "username", target: box, text: `bp-smoke-${Date.now()}` });
+      await agent.call("browser_click", { element: "Register", target: button });
+      await sleep(4000);
+    }
+    const opened = helper(`const cdp = await browser.newBrowserCDPSession(); const before = new Set(${JSON.stringify(before ?? [])}); return (await cdp.send("Target.getTargets")).targetInfos.filter((t) => !before.has(t.targetId)).map((t) => t.type + " " + t.url.slice(0, 80));`);
+    const tabs = (await agent.call("browser_tabs", { action: "list" })).text;
+    check(
+      "passkeys: what a site's passkey request opens is not visible to the agent",
+      !/chrome-extension:/i.test(tabs) && (tabs.match(/^- \d+:/gm) ?? []).length <= 3,
+      `${box && button ? "registered from the agent's tab" : "no form found"}; opened (privileged view): ${JSON.stringify(opened)}`,
+    );
+    // Close whatever the request opened (privileged), so the next checks start clean.
+    helper(`const cdp = await browser.newBrowserCDPSession(); const before = new Set(${JSON.stringify(before ?? [])}); for (const t of (await cdp.send("Target.getTargets")).targetInfos) if (!before.has(t.targetId) && t.type === "page" && t.url.startsWith("chrome-extension:")) await cdp.send("Target.closeTarget", { targetId: t.targetId }).catch(() => {}); return 1;`);
+  }
+  await agent.call("browser_tabs", { action: "close" });
+
+  // The relay asked for a lock when it started; the daemon pressed it and the run went on.
+  const keysFile = JSON.parse(readFileSync(join(state, "keys.json"), "utf8"));
+  const relayStatus = JSON.parse((await http("GET", "/bp/status", { Authorization: `Bearer ${keysFile.statusToken}` })).body);
+  const lastLock = (await si.status()).bitwarden.lastLock;
+  check("lock: the daemon locked Bitwarden when the relay asked (verified), and nothing is pending", lastLock?.ok === true && relayStatus.lockPending === false, `last lock ${JSON.stringify(lastLock)}, generation ${relayStatus.lockGeneration}`);
+}
+
+/** Waits until `probe()` is truthy (every `stepMs`), at most `ms`; returns its last value. */
+async function until(probe, ms, stepMs = 1000) {
+  const end = Date.now() + ms;
+  let value = await probe();
+  while (!value && Date.now() < end) {
+    await sleep(stepMs);
+    value = await probe();
+  }
+  return value;
+}
+
+/**
+ * Bitwarden lifecycle (step 9): the relay goes away while a run uses the Bitwarden browser (fail
+ * closed, the vault is locked anyway, locked again before the run goes on); a new pin arrives while
+ * a run holds the browser (update pending, applied when the run ends) on a profile that already has
+ * Bitwarden (a new id; the old build's data goes); turning Bitwarden off (uninstalled, data gone).
+ */
+async function bitwardenLifecycle({ neko, relayName, helper }) {
+  const exec = (...args) => docker("exec", "--user", "neko", neko, ...args);
+  const profileFind = (id) => exec("sh", "-c", `find /home/neko/.config/chromium -name '*${id}*' 2>/dev/null | head -5; grep -l '${id}' /home/neko/.config/chromium/Default/Preferences /home/neko/.config/chromium/Default/'Secure Preferences' 2>/dev/null; true`).trim();
+  const swOf = (id) => (helper(`const cdp = await browser.newBrowserCDPSession(); return (await cdp.send("Target.getTargets")).targetInfos.some((t) => t.type === "service_worker" && t.url.startsWith("chrome-extension://${id}/"));`) === true);
+  const id1 = JSON.parse(docker("exec", neko, "cat", "/opt/bitwarden/browser-prompt-pin.json")).id;
+
+  // C: the relay goes away while a run uses the Bitwarden browser.
+  // The previous run's admission may still count for a moment (one run at a time).
+  const admitted = await until(async () => {
+    const answer = await si.mcpServer("smoke-agent-3");
+    return answer && "server" in answer ? answer : null;
+  }, 180_000, 5000);
+  const run = await mcpClient(admitted.server);
+  const free = async () => !(await run.call("browser_tabs", { action: "list" })).error;
+  check("a new run goes on once the vault is locked", await until(free, 40_000), "");
+  await run.call("browser_tabs", { action: "new", url: "https://example.com/?bp-smoke=relay-down" });
+  const lockedAt = (await si.status()).bitwarden.lastLock?.at ?? 0;
+  docker("rm", "-f", relayName);
+  await sleep(4000);
+  const paused = await run.call("browser_snapshot", {});
+  check("relay down with Bitwarden: the run's calls are paused (its guard fails closed)", paused.error && /owner has taken over/.test(paused.text), paused.text.slice(0, 70));
+  const forced = await until(async () => ((await si.status()).bitwarden.lastLock?.at ?? 0) > lockedAt, 40_000);
+  check("relay down with Bitwarden and a run: the daemon locks the vault anyway", !!forced, JSON.stringify((await si.status()).bitwarden.lastLock));
+  await si.viewerLink({ purpose: "login", portrait: false });
+  check("relay back: locked first, then the run goes on", await until(free, 40_000));
+
+  // L + I: a new pin (here: the same release, a changed build context, so a new build and id) while the run holds the browser.
+  const bumped = { ...SIGNED_IN_BITWARDEN_FILES, "bitwarden.json": `${SIGNED_IN_BITWARDEN_FILES["bitwarden.json"]}\n` };
+  const storageBefore = exec("sh", "-c", `ls '/home/neko/.config/chromium/Default/Local Extension Settings/${id1}' 2>/dev/null | head -3; true`);
+  const si2 = createSignedIn({ serverBrowser: sb, bindHost: async () => "127.0.0.1", config: async () => ({ port: PORT, httpsBaseUrl: "", bitwarden: bitwardenChoice, bitwardenConsent: bitwardenChoice ? BITWARDEN.sha256 : "" }), keysFile: join(state, "keys.json"), buildRoot: join(state, "build"), bitwardenFiles: bumped });
+  await si2.bitwarden("download");
+  const built = await until(async () => (await si2.status()).bitwarden.state === "ready", 300_000, 3000);
+  check("pin bump: the new build is downloaded and built", !!built, si2.bitwardenImage());
+  const started = docker("inspect", "--format", "{{.State.StartedAt}}", neko);
+  await si2.viewerLink({ purpose: "login", portrait: false });
+  const pending = await si2.status();
+  check(
+    "update pending while a run holds the browser: neko keeps running, the status says so",
+    docker("inspect", "--format", "{{.State.StartedAt}}", neko) === started && pending.bitwarden.updatePending === true && pending.busy === true,
+    JSON.stringify({ updatePending: pending.bitwarden.updatePending, busy: pending.busy }),
+  );
+  await run.close();
+  await until(async () => (await si2.status()).busy === false, 60_000, 2000);
+  await si2.idleCheck();
+  const image = docker("inspect", "--format", "{{.Config.Image}}", neko);
+  check("the run ended: neko is stopped gracefully and starts again with the new image", image === si2.bitwardenImage(), image);
+  const id2 = JSON.parse(docker("exec", neko, "cat", "/opt/bitwarden/browser-prompt-pin.json")).id;
+  check("pin bump: the new build keeps the extension id (this install's key) and runs", id2 === id1 && !!(await until(async () => swOf(id2), 60_000, 2000)), `${id1} -> ${id2}`);
+  const storage = exec("sh", "-c", `ls '/home/neko/.config/chromium/Default/Local Extension Settings/${id2}' 2>/dev/null | head -3; true`);
+  check("pin bump: Bitwarden's local data (its vault cache and settings) stays", storage !== "" && storageBefore !== "" , `before: ${storageBefore.split("\n").length} file(s), after: ${storage.split("\n").length}`);
+  const lock = await si2.lockNow();
+  check("pin bump: the lock is verified with the new build", lock.ok, lock.detail);
+
+  // H: Bitwarden turned off.
+  bitwardenChoice = false;
+  const off = await si2.bitwarden("apply");
+  await si2.viewerLink({ purpose: "login", portrait: false });
+  check("turned off: the browser starts without Bitwarden", off.ok && !/-bw/.test(docker("inspect", "--format", "{{.Config.Image}}", neko)) && !(await until(async () => swOf(id2), 8000, 2000)));
+  const cleaned2 = await until(async () => profileFind(id2) === "", 60_000, 3000);
+  check("turned off: Bitwarden and its data are gone from the profile (files, preferences, storage)", !!cleaned2, profileFind(id2));
+  bitwardenChoice = BITWARDEN_ON;
+}
+

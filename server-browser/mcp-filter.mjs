@@ -44,6 +44,36 @@ export const SIGNED_IN_ALLOWED_TOOLS = new Set([...ALLOWED_TOOLS].filter((name) 
 
 export const DENIED_TEXT = "This tool is turned off in the browser-prompt Server browser.";
 
+/** What a tool call that names a chrome-extension:// page gets (a password manager's pages are never the agent's). */
+export const EXTENSION_URL_TEXT =
+  "Browser extension pages (chrome-extension://) are not available in the browser-prompt Server browser. Never open or use the password manager: ask the owner to take over for logins and passkeys.";
+
+/** Whether any string in a tool call's arguments names an extension page (chrome-extension:, also percent-encoded). */
+export function namesExtensionPage(args) {
+  const seen = [];
+  const visit = (value, depth) => {
+    if (depth > 6) return false;
+    if (typeof value === "string") {
+      let text = value;
+      for (let i = 0; i < 3 && /%[0-9a-f]{2}/i.test(text); i++) {
+        try {
+          text = decodeURIComponent(text);
+        } catch {
+          break;
+        }
+      }
+      return /chrome-extension:/i.test(text.replace(/[\s\u0000-\u001f]+/g, ""));
+    }
+    if (!value || typeof value !== "object" || seen.includes(value)) return false;
+    seen.push(value);
+    return Object.values(value).some((item) => visit(item, depth + 1));
+  };
+  return visit(args, 0);
+}
+
+/** Tools whose arguments open a page. */
+const NAVIGATING_TOOLS = new Set(["browser_navigate", "browser_tabs"]);
+
 /** Whether a tool may be listed and called: on the (signed-in) allowlist and not on the denylist. */
 export function toolAllowed(name, signedIn = false) {
   const allowed = signedIn ? SIGNED_IN_ALLOWED_TOOLS : ALLOWED_TOOLS;
@@ -62,26 +92,40 @@ function parseObject(line) {
 
 /** What a signed-in run's tool call gets while the owner holds control of the browser (Take over). */
 export const OWNER_CONTROL_TEXT =
-  "The owner has taken over the signed-in browser and holds control right now, so browser tools are paused (no reading and no actions). Do not retry in a loop: ask the owner with AskUserQuestion to answer \"done\" when they are finished and have released control (tap the mouse icon again or close the viewer), then take a new snapshot and continue.";
+  "The owner has taken over the signed-in browser and holds control right now (or the takeover just ended and the browser is being secured for a few seconds), so browser tools are paused (no reading and no actions). Do not retry in a loop: ask the owner with AskUserQuestion to answer \"done\" when they are finished and have released control (tap the mouse icon again or close the viewer), then take a new snapshot and continue.";
+
+/** What a tool call gets while the vault is being locked after a takeover or a start (nobody holds control). */
+export const SECURING_TEXT =
+  "The signed-in browser is being secured right now (its password manager is being locked after a takeover or a start); this takes a few seconds. Wait about 5 seconds and try the same call again. Do not ask the owner about it unless it still fails after a minute.";
+
+/** What a tool call gets when the vault could not be locked after a takeover: only the owner can fix it. */
+export const LOCK_FAILED_TEXT =
+  "The signed-in browser stays paused for safety: its password manager (Bitwarden) could not be locked after the takeover. Only the owner can fix this. Ask the owner with AskUserQuestion to press Lock Bitwarden now or Restart browser on the card (or in the plugin settings), and to check Bitwarden's vault timeout (not Never), then answer \"done\". Wait for that answer and try again; do not retry in a loop.";
 
 /**
  * A message from the agent: `{ forward }` to pass it on, `{ reply }` to answer it here, or
  * `{ drop: true }` to discard it. With `ownerControl` (signed-in runs, while the owner holds control
  * in the viewer) every tool call is answered with OWNER_CONTROL_TEXT instead of reaching the browser.
  */
-export function filterClientLine(line, { ownerControl = false, signedIn = false } = {}) {
+export function filterClientLine(line, { ownerControl = false, securing = false, lockFailed = false, signedIn = false } = {}) {
   const message = parseObject(line);
   if (!message) return { drop: true };
   if (ownerControl && message.method === "tools/call") {
     if (message.id === undefined || message.id === null) return { drop: true };
     return {
-      reply: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: OWNER_CONTROL_TEXT }], isError: true } }),
+      reply: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: lockFailed ? LOCK_FAILED_TEXT : securing ? SECURING_TEXT : OWNER_CONTROL_TEXT }], isError: true } }),
     };
   }
   if (message.method === "tools/call" && !toolAllowed(message.params?.name, signedIn)) {
     if (message.id === undefined || message.id === null) return { drop: true };
     return {
       reply: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: DENIED_TEXT }], isError: true } }),
+    };
+  }
+  if (message.method === "tools/call" && NAVIGATING_TOOLS.has(message.params?.name) && namesExtensionPage(message.params?.arguments)) {
+    if (message.id === undefined || message.id === null) return { drop: true };
+    return {
+      reply: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: EXTENSION_URL_TEXT }], isError: true } }),
     };
   }
   return { forward: line };
@@ -124,10 +168,14 @@ export function lineSplitter(onLine) {
  * connected" as held, and never holds without a viewer). After
  * a failed poll the state stays held while the last held state is younger than `holdMs`, and opens
  * only after `failuresToOpen` failed polls in a row (when the relay cannot be asked at all, no viewer
- * can hold control either: the relay is the viewer's only way in).
+ * can hold control either: the relay is the viewer's only way in). With Bitwarden in the browser
+ * `failuresToOpen` is infinite: a failed poll keeps the state, and it never opens on failures alone
+ * (the relay is also what says the vault was locked after a takeover).
  */
 export function createControlGuard({ now = Date.now, holdMs = 10_000, failuresToOpen = 3 } = {}) {
   let held = false;
+  let securing = false;
+  let lockFailed = false;
   let lastHeldAt = -Infinity;
   let failures = 0;
   let issued = 0;
@@ -142,16 +190,25 @@ export function createControlGuard({ now = Date.now, holdMs = 10_000, failuresTo
       // The relay decides (held only while a viewer is connected and holds control or it is unsure);
       // `known` is informational.
       held = body?.ownerControl === true;
+      securing = held && body?.securing === true;
+      lockFailed = held && body?.lockFailed === true;
       if (held) lastHeldAt = now();
     },
     failure(seq) {
       if (seq <= applied) return;
       applied = seq;
       failures++;
+      securing = false;
+      lockFailed = false;
       if (now() - lastHeldAt < holdMs) held = true;
       else if (failures >= failuresToOpen) held = false;
+      else if (!Number.isFinite(failuresToOpen)) held = true;
     },
     held: () => held,
+    /** Held only because the vault is being locked (nobody holds control). */
+    securing: () => securing,
+    /** Held because the vault could not be locked: the owner has to act. */
+    lockFailed: () => lockFailed,
   };
 }
 

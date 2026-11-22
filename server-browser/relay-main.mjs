@@ -33,6 +33,8 @@ try {
     userPassword: take("BP_NEKO_USER_PASSWORD"),
     landscape: env.BP_SCREEN_LANDSCAPE,
     portrait: env.BP_SCREEN_PORTRAIT,
+    // Bitwarden in the browser: the run stays paused after a takeover until the daemon locked the vault.
+    lockOnRelease: env.BP_LOCK_ON_RELEASE === "1",
     log,
   });
   log(`listening on ${relay.port}${relay.rtcPort ? ` and ${relay.rtcPort} (ICE-TCP)` : ""} for ${origins.join(", ")}`);

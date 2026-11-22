@@ -117,5 +117,12 @@ export const signedInSettings = defineSettings({
     port: z.number().int().min(1024).max(65534).default(DEFAULT_SIGNED_IN_PORT),
     /** Optional https://name[:port] in front of the viewer (for example `tailscale serve`); empty: http on the bind address. */
     httpsBaseUrl: z.string().default(""),
+    /**
+     * Bitwarden in the signed-in browser, for the owner during a takeover (off by default). Set only
+     * after the settings' two-press consent; the pinned release is downloaded only then.
+     */
+    bitwarden: z.boolean().default(false),
+    /** SHA-256 of the Bitwarden release the owner confirmed downloading (a new pin needs a new confirmation). */
+    bitwardenConsent: z.string().default(""),
   }),
 });

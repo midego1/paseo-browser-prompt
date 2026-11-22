@@ -37,6 +37,13 @@ if (controlUrl && !/^http:\/\/bp-si-[0-9a-f]{8}-relay:8081\/control$/.test(contr
   log("BP_CONTROL_URL is not the signed-in relay's control address; refusing to start");
   process.exit(1);
 }
+// Bitwarden in the signed-in browser: the takeover guard never opens on failed polls (the relay is
+// what tells the run the vault was locked after a takeover).
+const failClosed = (process.env.BP_CONTROL_FAIL_CLOSED ?? "") === "1";
+if (!["", "1"].includes(process.env.BP_CONTROL_FAIL_CLOSED ?? "")) {
+  log("BP_CONTROL_FAIL_CLOSED may only be 1 or empty; refusing to start");
+  process.exit(1);
+}
 const proxyServer = (process.env.BP_PROXY ?? "").trim();
 if (!signedIn && !/^http:\/\/[0-9a-fA-F:.[\]]+:\d+$/.test(proxyServer)) {
   log("BP_PROXY is missing or not an http://<address>:<port> URL; refusing to start without the proxy");
@@ -130,7 +137,7 @@ if (signedIn && !(await waitForCdp())) {
 
 // The owner's takeover state, polled every second (never two polls at once). See createControlGuard:
 // unsure counts as held, and the state opens only after sustained failure.
-const guard = createControlGuard();
+const guard = createControlGuard(failClosed ? { failuresToOpen: Number.POSITIVE_INFINITY } : {});
 const calls = createCallTracker();
 if (signedIn && controlUrl) {
   let polling = false;
@@ -177,7 +184,7 @@ const child = spawn(process.execPath, cliArgs, {
 let lastMessage = Date.now();
 const fromAgent = lineSplitter((line) => {
   lastMessage = Date.now();
-  const verdict = filterClientLine(line, { ownerControl: guard.held(), signedIn });
+  const verdict = filterClientLine(line, { ownerControl: guard.held(), securing: guard.securing(), lockFailed: guard.lockFailed(), signedIn });
   if ("reply" in verdict) process.stdout.write(`${verdict.reply}\n`);
   else if ("forward" in verdict) {
     if (signedIn) calls.started(verdict.forward);

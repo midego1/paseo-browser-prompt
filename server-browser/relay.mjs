@@ -20,7 +20,10 @@
 //   3. WebRTC over ICE-TCP: a plain TCP forward of the mux port to neko.
 //   4. Takeover state for the run's agent: it polls neko's control state and answers GET /control
 //      on an unpublished port (8081) on the stack's networks, so the run's MCP filter refuses tool
-//      calls while the owner holds control.
+//      calls while the owner holds control. With Bitwarden in the browser (lockOnRelease), the run
+//      also stays paused after every takeover until the daemon has locked the vault: from the
+//      relay's start, after control is released or reset, and when the last viewer leaves, until
+//      the daemon confirms the lock for that release (POST /bp/locked with the status token).
 // Node's standard library only.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, request as httpRequest } from "node:http";
@@ -232,6 +235,7 @@ export async function startRelay(options) {
     listenHost = "0.0.0.0",
     rtcPort = 0,
     controlPollMs = 1000,
+    lockOnRelease = false,
     secret,
     statusToken,
     adminPassword,
@@ -263,6 +267,27 @@ export async function startRelay(options) {
   const usedNonces = new Map();
   let ownerControl = false;
   let controlKnown = false;
+  // Bitwarden: whether the vault must be locked before the run may go on, and which release that is
+  // (a confirmation for an earlier release does not clear a later one).
+  let lockPending = lockOnRelease;
+  let lockGeneration = lockOnRelease ? 1 : 0;
+  /** The daemon could not lock the vault for this release: the run is told the owner has to act. */
+  let lockFailed = false;
+  let wasHeld = false;
+  /** After a takeover ends (released, reset, or the viewer gone): the run waits for the lock. */
+  function requireLock(reason) {
+    if (!lockOnRelease) return;
+    lockGeneration++;
+    if (!lockPending) log(`vault lock needed (${reason})`);
+    lockPending = true;
+    lockFailed = false;
+  }
+  /** Notes the end of a held period (held or unsure while a viewer is connected). */
+  function noteControl() {
+    const held = controlHeld();
+    if (wasHeld && !held) requireLock("control released");
+    wasHeld = held;
+  }
   let lastPeer = "";
   let viewers = 0;
   let lastActivity = now();
@@ -493,7 +518,42 @@ export async function startRelay(options) {
         } catch {
           nekoUp = false;
         }
-        return sendJson(res, 200, { viewers, idleMs: Math.max(0, now() - lastActivity), nekoUp, portrait: screenIsPortrait, ownerControl: controlHeld(), lastPeer });
+        return sendJson(res, 200, { viewers, idleMs: Math.max(0, now() - lastActivity), nekoUp, portrait: screenIsPortrait, ownerControl: controlHeld(), lastPeer, lockPending, lockGeneration, lockFailed });
+      }
+      if (path === "/bp/locked" && req.method === "POST") {
+        // The daemon locked the vault (Bitwarden's own Lock command) for release `generation`.
+        const auth = String(req.headers.authorization ?? "");
+        const expected = `Bearer ${statusToken}`;
+        if (auth.length !== expected.length || !timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) return sendJson(res, 401, { error: "status token" });
+        let generation = -1;
+        try {
+          generation = Number(JSON.parse((await readBody(req, 256)) || "{}").generation);
+        } catch {
+          return sendJson(res, 400, { error: "body" });
+        }
+        // Only while nobody holds control: a lock pressed while the owner works is no lock for later.
+        const cleared = lockPending && generation === lockGeneration && !controlHeld();
+        if (cleared) {
+          lockPending = false;
+          lockFailed = false;
+          log("vault locked; the run may go on");
+        }
+        return sendJson(res, 200, { lockPending, lockGeneration, cleared });
+      }
+      if (path === "/bp/lock-failed" && req.method === "POST") {
+        // The daemon could not lock the vault for release `generation`: the run stays paused and is
+        // told that the owner has to act (Lock now, Restart browser, Bitwarden's settings).
+        const auth = String(req.headers.authorization ?? "");
+        const expected = `Bearer ${statusToken}`;
+        if (auth.length !== expected.length || !timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) return sendJson(res, 401, { error: "status token" });
+        let generation = -1;
+        try {
+          generation = Number(JSON.parse((await readBody(req, 256)) || "{}").generation);
+        } catch {
+          return sendJson(res, 400, { error: "body" });
+        }
+        if (lockPending && generation === lockGeneration) lockFailed = true;
+        return sendJson(res, 200, { lockPending, lockGeneration, lockFailed });
       }
       if (!hostOk(req)) return send(res, 421, "Unknown host.", { "Content-Type": "text/plain" });
       if (path === "/bp/open" && (req.method === "GET" || req.method === "HEAD")) {
@@ -593,6 +653,9 @@ export async function startRelay(options) {
         viewers = Math.max(0, viewers - 1);
         touch();
         if (viewers === 0) {
+          // Whatever the owner did in that viewer, the vault is locked before the run goes on.
+          requireLock("the last viewer left");
+          wasHeld = false;
           scheduleLandscape();
           // A closed viewer must not leave control held (the run would stay paused).
           void resetControl();
@@ -670,6 +733,7 @@ export async function startRelay(options) {
         if (viewers === 0) ownerControl = false;
       }
     }
+    noteControl();
     // Control still held with no viewer (a reset that failed): try again.
     if (viewers === 0 && ownerControl) await resetControl();
   }
@@ -688,6 +752,7 @@ export async function startRelay(options) {
       if (result.status === 401) serviceToken = null;
       if (result.status < 200 || result.status >= 300) throw new Error(`reset ${result.status}`);
       ownerControl = false;
+      noteControl();
       log("no viewer left: control reset");
     } catch {
       // the next poll shows the state
@@ -706,7 +771,17 @@ export async function startRelay(options) {
     poller.unref?.();
     control = createServer((req, res) => {
       if (req.method !== "GET" || req.url !== "/control") return res.writeHead(404).end();
-      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" }).end(JSON.stringify({ ownerControl: controlHeld(), known: controlKnown || viewers === 0 }));
+      // While the vault waits to be locked, the run stays paused as if the owner still held control.
+      res
+        .writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" })
+        .end(
+          JSON.stringify({
+            ownerControl: controlHeld() || lockPending,
+            known: controlKnown || viewers === 0,
+            // Paused only because the vault is being locked (nobody holds control): the run waits, it does not ask the owner.
+            ...(lockOnRelease ? { lockPending, securing: lockPending && !controlHeld() && !lockFailed, lockFailed: lockPending && lockFailed && !controlHeld() } : {}),
+          }),
+        );
     });
     await new Promise((resolve, reject) => {
       control.once("error", reject);
@@ -723,7 +798,7 @@ export async function startRelay(options) {
     prefix,
     cookieName,
     pollControl,
-    state: () => ({ viewers, sessions: sessions.size, idleMs: now() - lastActivity, portrait: screenIsPortrait, ownerControl: controlHeld() }),
+    state: () => ({ viewers, sessions: sessions.size, idleMs: now() - lastActivity, portrait: screenIsPortrait, ownerControl: controlHeld(), lockPending, lockGeneration }),
     close: () =>
       new Promise((resolve) => {
         if (landscapeTimer) clearTimeout(landscapeTimer);

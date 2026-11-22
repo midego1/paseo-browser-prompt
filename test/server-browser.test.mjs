@@ -325,7 +325,7 @@ test("the build context is pinned: base image digest, exact Playwright MCP versi
   assert.match(BASE_IMAGE, /^mcr\.microsoft\.com\/playwright:v1\.65\.1-noble@sha256:[0-9a-f]{64}$/);
   assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts/);
   assert.match(dockerfile, /^USER pwuser$/m);
-  assert.match(dockerfile, /COPY proxy\.mjs proxy-main\.mjs mcp-filter\.mjs cdp-filter\.mjs entrypoint\.mjs relay\.mjs relay-main\.mjs \.\//);
+  assert.match(dockerfile, /COPY proxy\.mjs proxy-main\.mjs mcp-filter\.mjs cdp-filter\.mjs entrypoint\.mjs relay\.mjs relay-main\.mjs bitwarden-lock\.mjs \.\//);
   const pkg = JSON.parse(readFileSync(new URL("../server-browser/package.json", import.meta.url), "utf8"));
   assert.equal(pkg.dependencies["@playwright/mcp"], PLAYWRIGHT_MCP_VERSION, "exact version, no range");
   assert.deepEqual(pkg.overrides, { playwright: PLAYWRIGHT_VERSION, "playwright-core": PLAYWRIGHT_VERSION }, "the browser the image ships");
@@ -369,7 +369,7 @@ test("the entrypoint: headless, isolated, Chromium sandbox on, only the sidecar 
   assert.match(entry, /acceptDownloads: false/);
   assert.match(entry, /const work = "\/tmp\/browser-prompt";/, "output only under the container's tmpfs");
   assert.match(entry, /stdio: \["pipe", "pipe", "inherit"\]/, "both MCP directions go through the filter");
-  assert.match(entry, /filterClientLine\(line, \{ ownerControl: guard\.held\(\), signedIn \}\)/);
+  assert.match(entry, /filterClientLine\(line, \{ ownerControl: guard\.held\(\), securing: guard\.securing\(\), lockFailed: guard\.lockFailed\(\), signedIn \}\)/);
   assert.match(entry, /filterServerLine\(line, \{ signedIn \}\)/);
   assert.match(entry, /BP_IDLE_TIMEOUT_S/);
   assert.doesNotMatch(entry, /console\.log/, "stdout stays JSON-RPC");
