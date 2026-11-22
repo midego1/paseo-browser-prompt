@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.22.3 (unreleased)
+
+- Signed-in browser on an iPad with a hardware keyboard (Magic Keyboard): after **Request
+  controls**, typing now reaches the page. neko's client takes keys only from a hidden text field
+  over the video, and on touch devices it never focused that field: its tap handler cancels the
+  touch (so the tap did not focus it either) and it focuses on hover only without touch. Only the
+  keyboard button focused it, and that also opened the on-screen keyboard. The signed-in image now
+  loads a small script (`signed-in/viewer.js`): on touch devices a tap or click on the video, and
+  getting control, focus that field without opening the on-screen keyboard (`inputmode="none"`), so
+  keys from a hardware keyboard work right away (Shift, Backspace, Enter, Tab, arrows; Cmd
+  shortcuts arrive as Ctrl, as before). The keyboard button still opens the on-screen keyboard.
+- Typing no longer loses capitals and symbols that arrive without a Shift key press (the on-screen
+  keyboard's text, dictation): neko sent "T" without Shift and the remote desktop typed "t", so a
+  password typed on the on-screen keyboard came out wrong. A one-line hook in neko's key handler
+  (patched in the image; the build fails if neko's code does not match) holds Shift around such
+  keys unless Shift or Caps Lock is down already.
+- The field has autocorrect, autocapitalize, spell check and writing suggestions off, so iOS does
+  not change what you type.
+- The image is rebuilt once (new tag); the owner downloads it again with the two-press consent.
+- Smoke test (WebKit): on the iPad a hardware keyboard types right after a tap, without the
+  keyboard button (Shift, Backspace, arrows, Enter); the keyboard button opens the on-screen
+  keyboard on the iPad and iPhone and its text keeps capitals and symbols; desktop Safari types as
+  before; still no refused request and no "Blocked" toast.
+
 ## 0.22.2 (unreleased)
 
 - Signed-in browser on an iPad (Safari): no more "Blocked by the browser-prompt relay." toast, and

@@ -1114,9 +1114,184 @@ test("signed-in image: pinned neko, sandbox on, DevTools on loopback only, the p
   const css = SIGNED_IN_FILES["viewer.css"];
   assert.match(css, /@media \(pointer: coarse\) and \(min-width: 769px\) \{\s*\.phone\\:block \{\s*display: block;/);
   assert.match(SIGNED_IN_FILES.Dockerfile, /^COPY viewer\.css \/var\/www\/assets\/bp-viewer\.css$/m);
-  assert.ok(SIGNED_IN_FILES.Dockerfile.includes(`sed -i 's#</head>#<link rel="stylesheet" href="./assets/bp-viewer.css"></head>#' /var/www/index.html`));
+  assert.ok(SIGNED_IN_FILES.Dockerfile.includes(`sed -i 's#</head>#<link rel="stylesheet" href="./assets/bp-viewer.css"><script src="./assets/bp-viewer.js"></script></head>#' /var/www/index.html`));
   assert.equal(classifyRequest("GET", "/assets/bp-viewer.css"), "static");
   for (const name of Object.keys(SIGNED_IN_FILES)) assert.equal(SIGNED_IN_FILES[name], readFileSync(new URL(`../signed-in/${name}`, import.meta.url), "utf8"), name);
+});
+
+/** Runs signed-in/viewer.js against a minimal fake DOM; returns the fakes. */
+function loadViewerScript({ touch }) {
+  const listeners = {};
+  const calls = [];
+  let observer = null;
+  const textarea = {
+    dataset: {},
+    attrs: {},
+    inputMode: "",
+    spellcheck: true,
+    listeners: {},
+    setAttribute(name, value) {
+      this.attrs[name] = value;
+    },
+    addEventListener(type, fn) {
+      this.listeners[type] = fn;
+    },
+    focus() {
+      calls.push(`focus:${this.inputMode}`);
+      document.activeElement = this;
+    },
+    blur() {
+      calls.push("blur");
+      document.activeElement = document.body;
+      this.listeners.blur?.();
+    },
+  };
+  const toggle = { closest: (selector) => (selector === "[data-testid=keyboard-toggle]" ? toggle : null) };
+  let toggleShown = false;
+  const document = {
+    body: { matches: () => false, isContentEditable: false },
+    activeElement: null,
+    documentElement: {},
+    querySelector: (selector) => (selector === "canvas + textarea" ? textarea : selector === "[data-testid=keyboard-toggle]" && toggleShown ? toggle : null),
+  };
+  document.activeElement = document.body;
+  class Element {}
+  Object.setPrototypeOf(toggle, Element.prototype);
+  const window = {
+    addEventListener(type, fn, capture) {
+      assert.equal(capture, true, `${type} listens in the capture phase`);
+      (listeners[type] ??= []).push(fn);
+    },
+  };
+  const sandbox = {
+    window,
+    document,
+    Element,
+    navigator: { maxTouchPoints: touch ? 5 : 0 },
+    MutationObserver: class {
+      constructor(fn) {
+        observer = fn;
+      }
+      observe() {}
+    },
+  };
+  if (touch) window.ontouchstart = null;
+  const code = readFileSync(new URL("../signed-in/viewer.js", import.meta.url), "utf8");
+  new Function(...Object.keys(sandbox), code)(...Object.values(sandbox));
+  const fire = (type, event) => (listeners[type] ?? []).forEach((fn) => fn(event));
+  return { window, document, textarea, calls, fire, mutate: () => observer(), showToggle: (shown) => (toggleShown = shown), toggle };
+}
+
+test("viewer.js: a tap focuses neko's key textarea without the on-screen keyboard (iPad hardware keyboard)", () => {
+  const v = loadViewerScript({ touch: true });
+  v.mutate();
+  assert.equal(v.textarea.attrs.autocorrect, "off");
+  assert.equal(v.textarea.attrs.autocapitalize, "off");
+  assert.equal(v.textarea.attrs.autocomplete, "off");
+  assert.equal(v.textarea.attrs.writingsuggestions, "false");
+  assert.equal(v.textarea.spellcheck, false);
+  assert.equal(v.textarea.inputMode, "none");
+  // A tap elsewhere does nothing; a tap on the video focuses it once.
+  v.fire("touchend", { target: {} });
+  assert.deepEqual(v.calls, []);
+  v.fire("touchend", { target: v.textarea });
+  v.fire("pointerup", { target: v.textarea });
+  assert.deepEqual(v.calls, ["focus:none"]);
+  // Control arrives (neko shows its keyboard button): focused without a tap, unless the chat has focus.
+  v.textarea.blur();
+  v.calls.length = 0;
+  v.showToggle(true);
+  v.mutate();
+  assert.deepEqual(v.calls, ["focus:none"]);
+  v.showToggle(false);
+  v.mutate();
+  v.document.activeElement = { matches: (selector) => selector.includes("textarea"), isContentEditable: false };
+  v.calls.length = 0;
+  v.showToggle(true);
+  v.mutate();
+  assert.deepEqual(v.calls, [], "the chat keeps its focus");
+});
+
+test("viewer.js: neko's keyboard button still opens the on-screen keyboard", () => {
+  const v = loadViewerScript({ touch: true });
+  v.mutate();
+  v.fire("touchend", { target: v.textarea });
+  v.calls.length = 0;
+  // Pressed while the textarea is focused silently: re-focus with inputmode="text" (neko's click focuses).
+  v.fire("pointerdown", { target: v.toggle });
+  assert.deepEqual(v.calls, ["blur"]);
+  assert.equal(v.textarea.inputMode, "text");
+  v.textarea.focus();
+  // A second press closes it (neko blurs): no change by the script, and the next tap is silent again.
+  v.calls.length = 0;
+  v.fire("pointerdown", { target: v.toggle });
+  v.fire("touchstart", { target: v.toggle });
+  assert.deepEqual(v.calls, []);
+  v.textarea.blur();
+  assert.equal(v.textarea.inputMode, "none");
+});
+
+test("viewer.js: without touch it never moves focus (desktop Safari keeps neko's own hover focus)", () => {
+  const v = loadViewerScript({ touch: false });
+  v.mutate();
+  assert.equal(v.textarea.attrs.autocorrect, "off");
+  assert.equal(v.textarea.inputMode, "");
+  v.fire("touchend", { target: v.textarea });
+  v.fire("pointerup", { target: v.textarea });
+  v.showToggle(true);
+  v.mutate();
+  assert.deepEqual(v.calls, []);
+});
+
+test("viewer.js: capitals and shifted symbols get Shift when the browser sent none", () => {
+  const v = loadViewerScript({ touch: true });
+  const sent = [];
+  const pressed = {};
+  const overlay = { client: { input: { key: (keysym, down) => sent.push(`${keysym.toString(16)}${down ? "+" : "-"}`) } }, keyboard: { pressed } };
+  const press = (keysym) => {
+    sent.length = 0;
+    v.window.bpKeyDown(overlay, keysym);
+    return sent.join(" ");
+  };
+  assert.equal(press(0x54), "ffe1+ 54+ ffe1-", "T");
+  assert.equal(press(0x21), "ffe1+ 21+ ffe1-", "!");
+  assert.equal(press(0x40), "ffe1+ 40+ ffe1-", "@");
+  assert.equal(press(0x74), "74+", "t");
+  assert.equal(press(0x31), "31+", "1");
+  assert.equal(press(0xff08), "ff08+", "BackSpace");
+  assert.equal(press(0xff0d), "ff0d+", "Return");
+  assert.equal(press(0xffe1), "ffe1+", "Shift itself");
+  pressed[0xffe1] = true;
+  assert.equal(press(0x54), "54+", "Shift held on the hardware keyboard");
+  delete pressed[0xffe1];
+  pressed[0xffe2] = true;
+  assert.equal(press(0x3f), "3f+", "right Shift held");
+  delete pressed[0xffe2];
+  v.fire("keydown", { getModifierState: (key) => key === "CapsLock" });
+  assert.equal(press(0x54), "54+", "Caps Lock on: letters as they are");
+  assert.equal(press(0x21), "ffe1+ 21+ ffe1-", "Caps Lock does not shift symbols");
+  v.fire("keyup", { getModifierState: () => false });
+  assert.equal(press(0x54), "ffe1+ 54+ ffe1-");
+});
+
+test("signed-in image: viewer.js is linked and neko's onKeyDown calls bpKeyDown", () => {
+  const dockerfile = SIGNED_IN_FILES.Dockerfile;
+  assert.match(dockerfile, /^COPY viewer\.js \/var\/www\/assets\/bp-viewer\.js$/m);
+  assert.equal(classifyRequest("GET", "/assets/bp-viewer.js"), "static");
+  // The image's sed, run on neko 3.2.0's onKeyDown (as minified in its bundle).
+  const sed = dockerfile.match(/sed -i '(s\/this\\\.client[^']+)' "\$bundle"/);
+  assert.ok(sed, "the bundle patch");
+  const original =
+    "onKeyDown(e){return this.active?this.ctrlDown&&e===$.v?(this.noKeyUp.add(e),!0):(ze(e)&&(this.ctrlDown=e),this.client.input.key(e,!0),ze(e)):(this.noKeyUp.add(e),!0)}onKeyUp(e){this.noKeyUp.delete(e)||(ze(e)&&(this.ctrlDown=0),this.client.input.key(e,!1))}";
+  const result = spawnSync("sed", [sed[1]], { input: original, encoding: "utf8" });
+  assert.equal(
+    result.stdout,
+    "onKeyDown(e){return this.active?this.ctrlDown&&e===$.v?(this.noKeyUp.add(e),!0):(ze(e)&&(this.ctrlDown=e),(window.bpKeyDown?window.bpKeyDown(this,e):this.client.input.key(e,!0)),ze(e)):(this.noKeyUp.add(e),!0)}onKeyUp(e){this.noKeyUp.delete(e)||(ze(e)&&(this.ctrlDown=0),this.client.input.key(e,!1))}",
+  );
+  // The build fails unless the anchor is found exactly once and the hook is in.
+  assert.ok(dockerfile.includes(`[ "$(grep -o 'this\\.client\\.input\\.key(e,!0),ze(e))' "$bundle" | wc -l)" = 1 ]`));
+  assert.ok(dockerfile.includes(`grep -q 'window.bpKeyDown(this,e)' "$bundle"`));
+  assert.ok(dockerfile.includes(`grep -q 'src="./assets/bp-viewer.js"' /var/www/index.html`));
 });
 
 test("chromium-start.sh refuses to start Chromium without a valid proxy", () => {
