@@ -30,6 +30,7 @@ try {
     secret: take("BP_VIEWER_SECRET"),
     statusToken: take("BP_STATUS_TOKEN"),
     adminPassword: take("BP_NEKO_ADMIN_PASSWORD"),
+    userPassword: take("BP_NEKO_USER_PASSWORD"),
     landscape: env.BP_SCREEN_LANDSCAPE,
     portrait: env.BP_SCREEN_PORTRAIT,
     log,

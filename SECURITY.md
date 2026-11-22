@@ -209,7 +209,11 @@ that choice.
   still try to set cookies for it. Give the viewer a host name no
   other web service uses: put it behind `tailscale serve` on its own name or port and enter that
   `https://…` address as the **HTTPS address**.
-- The relay logs in to neko as an admin for you; neko's token never reaches your browser (the relay
+- The relay logs in to neko for you as a regular member (watch and take control, no admin rights;
+  since 0.22.2), so neko's client neither shows nor calls its admin actions (room locks and
+  settings, broadcast, kicking members), and neko itself refuses them for that login. Only the
+  relay's own service login (screen size for phones, control state and reset) is an admin, and its
+  token never leaves the relay. neko's token never reaches your browser (the relay
   adds it to each request it forwards and drops neko's cookies). It forwards only neko's web client
   files, its WebSocket and the routes to watch and take control (whoami, control take/release/give,
   screen size, keyboard map); member and session management, login, uploads, file transfer,
@@ -217,6 +221,9 @@ that choice.
   query strings are never forwarded, encoded or `..` paths are refused, and neko's cookies and CORS
   (`Access-Control-*`) headers are dropped from its answers. Every request must carry the viewer's
   Host (against DNS rebinding); the WebSocket and every write need the viewer's Origin.
+  The relay answers one path itself without a session: `site.webmanifest` under the viewer's random
+  path, a constant manifest (name and colours only, nothing of neko's), because Safari fetches it
+  without cookies.
 - WebRTC: the relay forwards one TCP port to neko's ICE-TCP mux, on the same address. ICE checks and
   DTLS protect the media; the port is reachable only on your tailnet. neko has no STUN or TURN
   servers (`NEKO_WEBRTC_ICESERVERS_FRONTEND/BACKEND=[]`, also neko 3.2.0's default; its client
