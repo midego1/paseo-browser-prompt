@@ -16,7 +16,17 @@ export const signedInStatus = defineRpc({
     image: z.string(),
     serverImage: z.string(),
     /** Bitwarden in the signed-in browser: off, or why it is not there yet; `active` when the running browser has it. */
-    bitwarden: z.object({ state: z.enum(BITWARDEN_STATES), version: z.string(), active: z.boolean(), detail: z.string() }),
+    bitwarden: z.object({
+      state: z.enum(BITWARDEN_STATES),
+      version: z.string(),
+      active: z.boolean(),
+      detail: z.string(),
+      /** A run waits until the vault is locked after a takeover. */
+      lockPending: z.boolean(),
+      lastLock: z.object({ at: z.number(), ok: z.boolean(), detail: z.string() }).nullable(),
+      /** The running browser has another image than the current choice needs; it switches once no run holds it. */
+      updatePending: z.boolean(),
+    }),
     running: z.boolean(),
     viewers: z.number(),
     busy: z.boolean(),
@@ -54,11 +64,13 @@ export const signedInControl = defineRpc({
 
 /**
  * Bitwarden in the signed-in browser. `download` only from the settings' second press (the owner's
- * explicit consent): builds the image variant with the pinned Bitwarden release. `apply` restarts an
- * idle browser so a changed choice takes effect now (never under a run).
+ * explicit consent, refused unless it is saved): builds the image variant with the pinned Bitwarden
+ * release. `apply` restarts an idle browser so a changed choice takes effect now (never under a
+ * run). `lock` locks the vault now (verified) and lets a run that waits for it go on;
+ * `restart-browser` restarts Chromium (logins kept), then locks.
  */
 export const signedInBitwarden = defineRpc({
   name: "signed-in.bitwarden",
-  input: z.object({ action: z.enum(["download", "apply"]) }),
+  input: z.object({ action: z.enum(["download", "apply", "lock", "restart-browser"]) }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });

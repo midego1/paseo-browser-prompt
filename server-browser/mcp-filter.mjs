@@ -160,7 +160,9 @@ export function lineSplitter(onLine) {
  * connected" as held, and never holds without a viewer). After
  * a failed poll the state stays held while the last held state is younger than `holdMs`, and opens
  * only after `failuresToOpen` failed polls in a row (when the relay cannot be asked at all, no viewer
- * can hold control either: the relay is the viewer's only way in).
+ * can hold control either: the relay is the viewer's only way in). With Bitwarden in the browser
+ * `failuresToOpen` is infinite: a failed poll keeps the state, and it never opens on failures alone
+ * (the relay is also what says the vault was locked after a takeover).
  */
 export function createControlGuard({ now = Date.now, holdMs = 10_000, failuresToOpen = 3 } = {}) {
   let held = false;
@@ -186,6 +188,7 @@ export function createControlGuard({ now = Date.now, holdMs = 10_000, failuresTo
       failures++;
       if (now() - lastHeldAt < holdMs) held = true;
       else if (failures >= failuresToOpen) held = false;
+      else if (!Number.isFinite(failuresToOpen)) held = true;
     },
     held: () => held,
   };

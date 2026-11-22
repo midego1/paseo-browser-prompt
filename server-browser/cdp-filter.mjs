@@ -38,10 +38,35 @@ export const TARGET_METHODS = new Set([
   "Browser.getWindowForTarget",
 ]);
 const TARGET_EVENTS = new Set(["Target.targetCreated", "Target.targetInfoChanged", "Target.targetDestroyed", "Target.targetCrashed"]);
-/** Pages of an extension (Bitwarden's popup, inline menu, background): never the run's. */
+/**
+ * Pages of an extension (Bitwarden's popup, inline menu, background): never the run's. Whitespace
+ * and control characters are ignored and percent-encoding is undone (three rounds), as in the MCP
+ * filter.
+ */
 export function isExtensionUrl(url) {
-  return typeof url === "string" && /^\s*chrome-extension:/i.test(url);
+  if (typeof url !== "string") return false;
+  let text = url;
+  for (let i = 0; i < 3 && /%[0-9a-f]{2}/i.test(text); i++) {
+    try {
+      text = decodeURIComponent(text);
+    } catch {
+      break;
+    }
+  }
+  return /^chrome-extension:/i.test(text.replace(/[\s\u0000-\u001f\u007f]+/g, ""));
 }
+/** Keyboard input: refused while the focus is in (or holds) an extension frame. */
+const KEY_METHODS = new Set(["Input.dispatchKeyEvent", "Input.insertText", "Input.imeSetComposition"]);
+/** Name of the filter's own isolated world, where it reads the focus (page scripts cannot change what it sees). */
+export const FOCUS_WORLD = "bp-focus-guard";
+/**
+ * Commands refused while the owner holds control (or the vault waits to be locked): anything that
+ * acts on or reads a page, so a call that was on its way when the takeover began cannot act during
+ * it. Session setup (enable, auto-attach, init scripts, resuming new frames) still passes.
+ */
+export const HELD_REFUSED =
+  /^(Input\.|DOM\.(?!enable$|disable$)|DOMSnapshot\.|DOMStorage\.|IndexedDB\.|CacheStorage\.|Storage\.|Accessibility\.|Fetch\.|Page\.(navigate|reload|navigateToHistoryEntry|captureScreenshot|captureSnapshot|printToPDF|setDocumentContent|close|bringToFront|handleJavaScriptDialog|startScreencast|getResourceContent|searchInResource)$|Target\.(createTarget|closeTarget|activateTarget)$|Runtime\.(evaluate|callFunctionOn|compileScript|runScript|queryObjects|globalLexicalScopeNames|getProperties)$|Network\.(getCookies|getAllCookies|setCookie|setCookies|deleteCookies|clearBrowserCookies|getResponseBody|getRequestPostData|replayXHR|loadNetworkResource)$|Emulation\.setTouchEmulationEnabled$)/;
+export const HELD_TEXT = "The owner holds control of the signed-in browser (or it is being secured after a takeover): not allowed now.";
 /** Input that clicks or taps at a point: refused where the point is an extension frame. */
 const POINTER_METHODS = new Set(["Input.dispatchMouseEvent", "Input.dispatchTouchEvent", "Input.synthesizeTapGesture", "Input.dispatchDragEvent", "Input.emulateTouchFromMouseEvent"]);
 export const EXTENSION_TEXT = "Not allowed in the signed-in browser: that is the password manager's (a browser extension's) page or frame.";
@@ -136,6 +161,8 @@ export function createTargetFilter({ held = () => false } = {}) {
     // An extension's content-script world in one of the run's pages (Bitwarden's, in every https
     // page): the run's Playwright never uses foreign worlds, so it never learns of them.
     if (message.method === "Runtime.executionContextCreated" && message.params?.context?.auxData?.isDefault !== true && isExtensionUrl(message.params?.context?.origin)) return out;
+    // The filter's own focus-reading world is not the run's.
+    if (message.method === "Runtime.executionContextCreated" && message.params?.context?.name === FOCUS_WORLD) return out;
     if (message.sessionId && visibleSessions.has(message.sessionId) && revealsExtension(message)) {
       // The session's own target (or its root frame, whose id is the target's) became an extension
       // page: revoke it. Anything else that names one is just not delivered.
@@ -268,9 +295,29 @@ export function createTargetFilter({ held = () => false } = {}) {
       return nodes.every((node) => node && typeof node === "object" && !(typeof node.frameId === "string" && frames.has(node.frameId)));
     },
     refusal: (message) => error(message.id, EXTENSION_TEXT, message.sessionId),
+    /**
+     * After a focus check: `focused` is DOM.describeNode of document.activeElement (depth -1, shadow
+     * roots pierced), or null when it could not be read. Refused when the focus is an extension frame
+     * or holds one (an element whose shadow tree has one), or is unknown; the document body (no
+     * focus) and ordinary elements are fine.
+     */
+    focusAllowed(frames, focused) {
+      if (!focused || typeof focused !== "object") return false;
+      if (focused.nodeName === "BODY" || focused.nodeName === "HTML" || focused.nodeName === "#document") return true;
+      const stack = [focused];
+      for (let guard = 0; stack.length > 0 && guard < 5000; guard++) {
+        const node = stack.pop();
+        if (typeof node?.frameId === "string" && frames.has(node.frameId) && (node.nodeName === "IFRAME" || node.nodeName === "FRAME" || node === focused)) return false;
+        for (const key of ["children", "shadowRoots"]) if (Array.isArray(node?.[key])) stack.push(...node[key]);
+        if (node?.contentDocument) stack.push(node.contentDocument);
+      }
+      return true;
+    },
     fromClient(message) {
       if (!message || typeof message !== "object" || typeof message.method !== "string") return { reply: error(message?.id ?? 0, "Malformed message.") };
-      if (REFUSED_METHODS.has(message.method)) return { reply: error(message.id, "Not allowed in the signed-in browser.", message.sessionId) };
+      if (REFUSED_METHODS.has(message.method) || message.method.startsWith("Extensions.")) return { reply: error(message.id, "Not allowed in the signed-in browser.", message.sessionId) };
+      // While the owner holds control (or the vault waits to be locked), nothing acts or reads.
+      if (held() && HELD_REFUSED.test(message.method)) return { reply: error(message.id, HELD_TEXT, message.sessionId) };
       if (message.sessionId && !visibleSessions.has(message.sessionId)) return { reply: error(message.id, "No such session.", message.sessionId) };
       const params = message.params ?? {};
       if (TARGET_METHODS.has(message.method) && typeof params.targetId === "string" && !visible.has(params.targetId)) {
@@ -293,6 +340,16 @@ export function createTargetFilter({ held = () => false } = {}) {
         if (points.length > 0 && frames.size > 0) {
           if (points.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) return { reply: error(message.id, EXTENSION_TEXT, message.sessionId) };
           return { hitTest: { message, points, frames } };
+        }
+      }
+      if (KEY_METHODS.has(message.method) && message.sessionId) {
+        const frames = guardedFrames(message.sessionId);
+        const frameId = sessionInfo.get(message.sessionId)?.targetId;
+        // Only pages that hold an extension frame need the check (the I/O layer reads the focus in an
+        // isolated world, then calls focusAllowed). No frame to read it in: refused.
+        if (frames.size > 0) {
+          if (!frameId) return { reply: error(message.id, EXTENSION_TEXT, message.sessionId) };
+          return { focusTest: { message, frames, frameId } };
         }
       }
       if (message.method === "Target.createTarget") creating.add(message.id);
@@ -414,6 +471,7 @@ export async function startCdpFilter({ upstream, held = () => false, log = () =>
         const verdict = filter.fromClient(message);
         if (verdict.reply) client.send(JSON.stringify(verdict.reply));
         else if (verdict.hitTest) void hitTest(verdict.hitTest);
+        else if (verdict.focusTest) void focusTest(verdict.focusTest);
         else toBrowser(verdict.forward);
       });
       /** Answers of the filter's own commands (hit tests), by id. */
@@ -446,6 +504,30 @@ export async function startCdpFilter({ upstream, held = () => false, log = () =>
           if (filter.hitAllowed(frames, nodes)) toBrowser(message);
           else if (client.readyState === 1) {
             log("refused a click or tap on an extension frame");
+            client.send(JSON.stringify(filter.refusal(message)));
+          }
+        });
+        pointerQueues.set(message.sessionId, done.catch(() => undefined));
+      };
+      // Keys: where is the focus? Read in the filter's own isolated world (page scripts cannot fake
+      // document.activeElement there), described with shadow roots pierced. In the same queue as
+      // pointer input, so input stays in order.
+      const focusTest = ({ message, frames, frameId }) => {
+        const before = pointerQueues.get(message.sessionId) ?? Promise.resolve();
+        const done = before.then(async () => {
+          let focused = null;
+          const world = await ask(message.sessionId, "Page.createIsolatedWorld", { frameId, worldName: FOCUS_WORLD });
+          const active = world?.executionContextId
+            ? await ask(message.sessionId, "Runtime.evaluate", { contextId: world.executionContextId, expression: "document.activeElement || document.body", returnByValue: false })
+            : null;
+          const objectId = active?.result?.objectId;
+          if (objectId) {
+            focused = (await ask(message.sessionId, "DOM.describeNode", { objectId, depth: -1, pierce: true }))?.node ?? null;
+            await ask(message.sessionId, "Runtime.releaseObject", { objectId });
+          }
+          if (filter.focusAllowed(frames, focused)) toBrowser(message);
+          else if (client.readyState === 1) {
+            log("refused keyboard input into an extension frame");
             client.send(JSON.stringify(filter.refusal(message)));
           }
         });

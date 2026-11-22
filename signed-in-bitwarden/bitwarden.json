@@ -2,8 +2,5 @@
   "version": "2026.11.0",
   "url": "https://github.com/bitwarden/clients/releases/download/browser-v2026.11.0/bit-dist-chrome-2026.11.0.zip",
   "sha256": "07cf19b8f79e649005fdeee67c85d3cf31c735449a01a37a5b9f0287732605a5",
-  "size": 33808971,
-  "id": "nngceckbapebfimnlniiiahkandclblb",
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmqKbvreshyXRuN2gikeR1idqR6KL0Di89JZcMyD4bjJRZVmQO7aznSGSALIHzSAUGYocUYBNDOP5QAhImxXyQ1qG8+goXs93v9GzrNJETdVuCEhqBggC4/DFabryJZDiKvZ2Jl0DM7MsWdoybZPwrj70V3aJ/nVNOMkf868scNTMliwitCqqjT5baTANsG0DkZWQExD4lSXzSZHH9MEO8q0iZ7RRlNuGRBAkZgNV8FwZRsPKm/rwQ9dy3VpgLcmLp5GiMt+kAEncqKAkuRYnhVXXBsKqIyYTMjHSLkLnpfFySyOPLBdS617i/PGNiP/MT6Xy6z//v5NozUgaAZ4gJQIDAQAB",
-  "lockShortcut": "Ctrl+Shift+7"
+  "size": 33808971
 }

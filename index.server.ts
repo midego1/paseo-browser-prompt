@@ -117,7 +117,7 @@ export default function contribute(server: PluginServerContext) {
         state: "unsupported" as const,
         image: signedIn.image,
         serverImage: serverBrowser.image,
-        bitwarden: { state: "off" as const, version: BITWARDEN.version, active: false, detail: "" },
+        bitwarden: { state: "off" as const, version: BITWARDEN.version, active: false, detail: "", lockPending: false, lastLock: null, updatePending: false },
         running: false,
         viewers: 0,
         busy: false,

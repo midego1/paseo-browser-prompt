@@ -38,7 +38,10 @@ const BITWARDEN_LABELS: Record<BitwardenState, string> = {
 
 /** Recommended Bitwarden settings: the extension has no managed policy for them, so the owner sets them once. */
 export const BITWARDEN_RECOMMENDED =
-  "Set these in Bitwarden in the signed-in browser once (Bitwarden has no policy the plugin could force them with): Settings › Account security: Vault timeout 1 minute (or shorter) with action Lock, Unlock with PIN off, no biometrics; Settings › Autofill: Autofill on page load off (Bitwarden's default; leave it off). Log in with your master password plus two-step login.";
+  "First, in Bitwarden in the signed-in browser (Bitwarden has no policy the plugin could force these with): Settings › Account security: Vault timeout 1 minute (or shorter) with action Lock, never “Never” (that stores the key on the server's disk and Bitwarden unlocks itself, so the plugin can never lock it and runs stay paused); Unlock with PIN off; no biometrics. Settings › Autofill: Autofill on page load off (Bitwarden's default), and turn off card and identity suggestions in the inline menu. Log in with your master password plus two-step login.";
+/** A new pin (plugin update) or turning Bitwarden off removes what it kept in the browser. */
+export const BITWARDEN_PIN_NOTE =
+  "A plugin update that pins a newer Bitwarden builds a new extension (its own id): the old one and its local data (vault cache, settings) are removed from the signed-in browser, and you download it again and log in again. The same happens when you turn Bitwarden off.";
 
 /**
  * Signed-in Server browser: status, the explicit two-press image download, Log in to sites (the
@@ -181,12 +184,21 @@ export function SignedInSettings({ theme }: Pick<PluginSurfaceProps, "theme">) {
           label="Bitwarden"
           hint={
             info
-              ? `${BITWARDEN_LABELS[info.bitwarden.state]}${info.bitwarden.detail ? ` (${info.bitwarden.detail})` : ""}${info.running ? (info.bitwarden.active ? " · in the running browser" : " · not in the running browser") : ""}`
+              ? [
+                  `${BITWARDEN_LABELS[info.bitwarden.state]}${info.bitwarden.detail ? ` (${info.bitwarden.detail})` : ""}`,
+                  info.running ? (info.bitwarden.active ? "in the running browser" : "not in the running browser") : "",
+                  info.bitwarden.updatePending ? (info.busy ? "Update pending: the browser switches when the run ends" : "Update pending: the browser switches at its next check") : "",
+                  info.bitwarden.lockPending ? "a run waits until Bitwarden is locked" : "",
+                  info.bitwarden.lastLock ? (info.bitwarden.lastLock.ok ? "last lock verified" : `last lock failed: ${info.bitwarden.lastLock.detail}`) : "",
+                ]
+                  .filter(Boolean)
+                  .join(" · ")
               : undefined
           }
         />
+        {values?.bitwarden ? <Text style={{ ...muted, color: theme.colors.foreground }}>{BITWARDEN_RECOMMENDED}</Text> : null}
         <Text style={muted}>
-          {`Optional: the Bitwarden Password Manager extension in the signed-in browser, for you while you hold control (Take over or Log in to sites): unlock it there, fill logins from its icon or a field's suggestion, and use it for passkeys. The agent never gets it: its pages and frames are hidden from the run, the run cannot open or click them, and every time you release control the plugin locks the vault before the run goes on. An unlocked vault does live in that browser on the server while you use it. Download and enable fetches Bitwarden ${BITWARDEN.version} (about 34 MB) from Bitwarden's GitHub releases, checks its SHA-256 and builds it into the browser image; it never updates by itself. Turning it off removes it and its data from the browser at the next start.`}
+          {`Optional: the Bitwarden Password Manager extension in the signed-in browser, for you while you hold control (Take over or Log in to sites): unlock it there, fill logins from its icon or a field's suggestion, and use it for passkeys. The agent never gets it: its pages and frames are hidden from the run, the run cannot open, click or type into them, and every time you release control the plugin locks the vault (Bitwarden's own lock, checked through the browser) before the run goes on. An unlocked vault does live in that browser on the server while you use it. Download and enable fetches Bitwarden ${BITWARDEN.version} (about 34 MB) from Bitwarden's GitHub releases, checks its SHA-256 and builds it into the browser image, where Chromium installs it by policy; it never updates by itself. Turning it off removes it and its data from the browser at the next start.`}
         </Text>
         <SettingsAction
           label={values?.bitwarden ? "Download Bitwarden again" : "Download and enable Bitwarden"}
@@ -231,7 +243,21 @@ export function SignedInSettings({ theme }: Pick<PluginSurfaceProps, "theme">) {
           disabled={working || !info?.running || info.bitwarden.active === (values?.bitwarden === true && info.bitwarden.state === "ready")}
           onPress={() => void act(async () => (await bitwarden({ action: "apply" })).message)}
         />
-        {values?.bitwarden ? <Text style={muted}>{BITWARDEN_RECOMMENDED}</Text> : null}
+        <SettingsAction
+          label="Lock Bitwarden now"
+          hint="Locks every Bitwarden account in the signed-in browser and checks that it is locked; a run that waits for the lock goes on."
+          actionLabel="Lock now"
+          disabled={working || !info?.running || !info.bitwarden.active}
+          onPress={() => void act(async () => (await bitwarden({ action: "lock" })).message)}
+        />
+        <SettingsAction
+          label="Restart the signed-in browser"
+          hint="Restarts Chromium there (your logins are kept; every unlocked key in memory is gone), then locks Bitwarden. Use it when Lock now fails."
+          actionLabel="Restart browser"
+          disabled={working || !info?.running}
+          onPress={() => void act(async () => (await bitwarden({ action: "restart-browser" })).message)}
+        />
+        {values?.bitwarden ? <Text style={muted}>{BITWARDEN_PIN_NOTE}</Text> : null}
         {message ? <Text style={muted}>{message}</Text> : null}
         <SettingsInput
           label="Viewer port"

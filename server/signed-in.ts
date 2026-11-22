@@ -6,7 +6,11 @@ import { CONTAINER_LABEL, INSTANCE_LABEL, STARTING_WINDOW_MS, createTicketStore,
 import {
   BITWARDEN,
   bitwardenImageTag,
-  bitwardenLockArgs,
+  BITWARDEN_LOCK_ATTEMPTS,
+  bitwardenIdFromPin,
+  bitwardenToolArgs,
+  parseBitwardenTool,
+  type BitwardenToolMode,
   bindHostAllowed,
   checkStackRun,
   IDLE_STOP_MS,
@@ -193,6 +197,12 @@ export interface SignedInOptions {
 
 export interface BitwardenStatus {
   state: BitwardenState;
+  /** The run waits until the daemon has locked the vault after a takeover. */
+  lockPending: boolean;
+  /** The last lock the daemon did: verified or not, and why not. */
+  lastLock: { at: number; ok: boolean; detail: string } | null;
+  /** The running browser has another image than the current choice needs (it switches once no run holds it). */
+  updatePending: boolean;
   /** The pinned Bitwarden version (what a download installs). */
   version: string;
   /** The running browser has it. */
@@ -240,8 +250,8 @@ export function createSignedIn(options: SignedInOptions) {
   let lastActive = now();
   let building: Promise<void> | null = null;
   let buildError: string | null = null;
-  /** A stack with Bitwarden was started or seen running since the last stop (lock checks go on even if the choice changed since). */
-  let bitwardenSeen = false;
+  /** The last vault lock the daemon did (for the settings and the card). */
+  let lastLock: { at: number; ok: boolean; detail: string } | null = null;
   let bitwardenBuilding: Promise<void> | null = null;
   let bitwardenBuildError: string | null = null;
   let startError: string | null = null;
@@ -426,7 +436,6 @@ export function createSignedIn(options: SignedInOptions) {
       const bindHost = await options.bindHost();
       if (!bindHost || !bindHostAllowed(bindHost)) throw Object.assign(new Error("no Tailscale address for the viewer"), { state: "no-address" as const });
       let input = await stackInput(bindHost);
-      if (input.bitwarden) bitwardenSeen = true;
       const names = stackNames(input.stackId);
       let containers = await stackContainers();
       // neko runs but its proxy or relay stopped (their 7-day lifetime, a crash): start only those;
@@ -459,7 +468,6 @@ export function createSignedIn(options: SignedInOptions) {
           } else {
             // Keep what runs, and a relay that matches it (with Bitwarden, it keeps locking the vault).
             input = { ...input, nekoImage: running, bitwarden: running === bitwardenImage };
-            if (input.bitwarden) bitwardenSeen = true;
           }
         }
       }
@@ -482,6 +490,9 @@ export function createSignedIn(options: SignedInOptions) {
       try {
         await createStack(input);
         startError = null;
+        // Data of Bitwarden builds no longer installed (Bitwarden turned off, or a new pin): cleared
+        // once Chromium runs.
+        void cleanupOldBitwarden().catch(() => undefined);
       } catch (error) {
         startError = error instanceof Error ? error.message : String(error);
         log(`the signed-in browser could not start: ${startError}`);
@@ -547,14 +558,15 @@ export function createSignedIn(options: SignedInOptions) {
       });
   }
 
-  async function bitwardenStatus(config: SignedInConfig, baseBuilt: boolean, running: boolean): Promise<BitwardenStatus> {
-    const out = (state: BitwardenState, detail = "", active = false): BitwardenStatus => ({ state, version: BITWARDEN.version, active, detail });
+  async function bitwardenStatus(config: SignedInConfig, baseBuilt: boolean, running: boolean, lockPending: boolean): Promise<BitwardenStatus> {
     let active = false;
+    let updatePending = false;
     if (running) {
-      const names = stackNames(await stackId());
-      active = (await docker(["inspect", "--format", "{{.Config.Image}}", names.neko], 15_000).catch(() => ({ stdout: "" }))).stdout.trim() === bitwardenImage;
-      if (active) bitwardenSeen = true;
+      const current = await runningNekoImage();
+      active = current === bitwardenImage;
+      updatePending = current !== "" && current !== (await nekoImageFor(config));
     }
+    const out = (state: BitwardenState, detail = "", isActive = false): BitwardenStatus => ({ state, version: BITWARDEN.version, active: isActive, detail, lockPending, lastLock, updatePending });
     if (config.bitwarden !== true) return out("off", "", active);
     if (bitwardenBuilding) return out("building", "", active);
     if (await imageExists(bitwardenImage)) return out("ready", "", active);
@@ -581,7 +593,7 @@ export function createSignedIn(options: SignedInOptions) {
     const config = await options.config();
     const origin = bindHost && bindHostAllowed(bindHost) ? viewerOrigins(bindHost, config.port, config.httpsBaseUrl).at(-1)! : null;
     const common = { image, serverImage: sb.image, bindHost, viewerOrigin: origin };
-    const bwOff = { state: (config.bitwarden === true ? "needs-browser" : "off") as BitwardenState, version: BITWARDEN.version, active: false, detail: "" };
+    const bwOff: BitwardenStatus = { state: config.bitwarden === true ? "needs-browser" : "off", version: BITWARDEN.version, active: false, detail: "", lockPending: false, lastLock, updatePending: false };
     const off = (state: SignedInState, detail = "") => ({ state, ...common, bitwarden: bwOff, running: false, viewers: 0, busy: false, detail });
     if (base.state === "docker-missing" || base.state === "docker-unavailable" || base.state === "unsupported") return off(base.state, base.detail);
     let own = await imageExists(image);
@@ -597,12 +609,15 @@ export function createSignedIn(options: SignedInOptions) {
     if (startingStack) return off("starting");
     const running = await isRunning();
     let viewers = 0;
+    let lockPending = false;
     if (running) {
       const keys = await loadKeys(keysFile);
-      viewers = (await relayStatus(bindHost!, stackPorts(config.port).http, keys.statusToken))?.viewers ?? 0;
+      const relay = await relayStatus(bindHost!, stackPorts(config.port).http, keys.statusToken);
+      viewers = relay?.viewers ?? 0;
+      lockPending = relay?.lockPending === true;
     }
     const busy = (await holders().catch(() => 0)) > 0;
-    const bitwarden = await bitwardenStatus(config, true, running);
+    const bitwarden = await bitwardenStatus(config, true, running, lockPending);
     if (!running && startError) return { ...off("failed", startError), bitwarden };
     return { state: running ? "running" : "ready", ...common, bitwarden, running, viewers, busy, detail: "" };
   }
@@ -634,7 +649,6 @@ export function createSignedIn(options: SignedInOptions) {
       // Those runs no longer hold the browser, also the ones admitted but not up yet.
       starting.clear();
       await removeStack({ stackId: id }, !wipe);
-      bitwardenSeen = false;
       if (wipe) {
         const result = await docker(["volume", "rm", stackNames(id).volume], 60_000);
         if (result.code !== 0 && !/no such volume/i.test(result.stderr)) throw new Error(`removing the profile: ${shortError(result.stderr)}`);
@@ -657,6 +671,15 @@ export function createSignedIn(options: SignedInOptions) {
     }
     const agentRunning = (await holders().catch(() => 1)) > 0;
     const config = await options.config();
+    // The running browser has an older image or the other Bitwarden choice (a plugin update, Bitwarden
+    // turned on or off while a run held it): start it again with the right one once no run holds it.
+    if (!agentRunning) {
+      const current = await runningNekoImage();
+      if (current && current !== (await nekoImageFor(config))) {
+        await ensureStarted().catch(() => undefined);
+        return false;
+      }
+    }
     const bindHost = await options.bindHost().catch(() => null);
     const keys = await loadKeys(keysFile);
     const relay = bindHost ? await relayStatus(bindHost, stackPorts(config.port).http, keys.statusToken) : null;
@@ -669,38 +692,139 @@ export function createSignedIn(options: SignedInOptions) {
     return true;
   }
 
+  /** The image the running neko was started from ("" when it does not run). */
+  async function runningNekoImage(): Promise<string> {
+    const names = stackNames(await stackId());
+    const result = await docker(["inspect", "--format", "{{.Config.Image}}", names.neko], 15_000).catch(() => ({ code: 1, stdout: "" }));
+    return result.code === 0 ? result.stdout.trim() : "";
+  }
+
+  /** The id of the Bitwarden build in the running neko (made per image build), or null. */
+  async function installedBitwardenId(): Promise<string | null> {
+    const names = stackNames(await stackId());
+    const result = await docker(["exec", names.neko, "cat", "/opt/bitwarden/browser-prompt-pin.json"], 15_000).catch(() => ({ code: 1, stdout: "" }));
+    return result.code === 0 ? bitwardenIdFromPin(result.stdout) : null;
+  }
+
+  /** Runs the Bitwarden tool (server-browser/bitwarden-lock.mjs) in neko's network namespace. */
+  async function bitwardenTool(mode: BitwardenToolMode, ids: string[]) {
+    const args = bitwardenToolArgs({ stackId: await stackId(), instance: await sb.instance(), serverImage: sb.image }, mode, ids);
+    const result = await docker(args, 150_000).catch(() => null);
+    return result && result.code === 0 ? parseBitwardenTool(result.stdout) : null;
+  }
+
   /**
-   * Bitwarden: when the relay says the vault must be locked (after a takeover, or a relay start), press
-   * Bitwarden's own Lock command on neko's desktop and tell the relay, which then lets the run go on.
-   * The run stays paused until then. Without Bitwarden the relay never asks.
+   * Locks Bitwarden and verifies it through Chromium's DevTools (not the desktop, so keyboard focus,
+   * fullscreen pages, dialogs and the number of accounts do not matter): Bitwarden's own "lock all"
+   * (it then reloads itself), checked by asking it for every account's state; if that cannot be
+   * verified, a reload of the extension (clears chrome.storage.session, where the key of an unlocked
+   * session lives), checked the same way; after BITWARDEN_LOCK_ATTEMPTS rounds, a restart of Chromium
+   * (logins kept), checked again. Locked only when Bitwarden answers and no account is unlocked.
    */
-  let locking = false;
+  let locking: Promise<{ ok: boolean; detail: string }> | null = null;
+  function verifiedLock(): Promise<{ ok: boolean; detail: string }> {
+    locking ??= (async () => {
+      const id = await installedBitwardenId();
+      // No Bitwarden in the running browser: nothing to lock.
+      if (!id) return { ok: true, detail: "no Bitwarden in the running browser" };
+      let detail = "";
+      for (let attempt = 0; attempt < BITWARDEN_LOCK_ATTEMPTS; attempt++) {
+        for (const mode of ["lock", "reload"] as const) {
+          const answer = await bitwardenTool(mode, [id]);
+          if (answer?.locked) return { ok: true, detail: "" };
+          detail = answer ? answer.detail || `not locked (${mode})` : `the lock tool did not answer (${mode})`;
+          if (answer?.statuses?.some((s) => s.status === 2)) detail = "Bitwarden is still unlocked";
+        }
+      }
+      log(`Bitwarden could not be locked (${detail}); restarting Chromium`);
+      await bitwardenTool("restart", []);
+      await sleep(5000);
+      const after = await bitwardenTool("status", [id]);
+      if (after?.locked) return { ok: true, detail: "locked by restarting the browser" };
+      if (after?.statuses?.some((s) => s.status === 2)) {
+        return { ok: false, detail: "Bitwarden unlocked itself again after a browser restart: is its vault timeout set to Never? Set a timeout with action Lock." };
+      }
+      return { ok: false, detail: after ? after.detail || "not locked" : "the lock tool did not answer" };
+    })()
+      .then((result) => {
+        lastLock = { at: now(), ...result };
+        if (!result.ok) log(`Bitwarden is not locked: ${result.detail}`);
+        return result;
+      })
+      .finally(() => {
+        locking = null;
+      });
+    return locking;
+  }
+
+  /**
+   * Bitwarden: when the relay says the vault must be locked (after a takeover, or a relay start),
+   * lock it (verified) and tell the relay, which then lets the run go on; until then the run stays
+   * paused. When the relay cannot be asked while a Bitwarden browser and a run are up, the run's guard
+   * stays paused (fail closed) and the vault is locked anyway (every 15 seconds at most).
+   */
+  let relayDownLockAt = 0;
   async function lockCheck(): Promise<boolean> {
     if (locking) return false;
-    locking = true;
     try {
       const config = await options.config();
-      if (config.bitwarden !== true && !bitwardenSeen) return false;
       const bindHost = await options.bindHost().catch(() => null);
       if (!bindHost || !bindHostAllowed(bindHost)) return false;
       const keys = await loadKeys(keysFile);
       const port = stackPorts(config.port).http;
       const relay = await relayStatus(bindHost, port, keys.statusToken);
-      if (!relay?.lockPending || !relay.nekoUp) return false;
-      const generation = relay.lockGeneration ?? 0;
-      const result = await docker(bitwardenLockArgs(await stackId()), 15_000);
-      if (result.code !== 0) {
-        log(`could not lock Bitwarden: ${shortError(result.stderr || result.stdout || result.failure || "failed")}`);
-        return false;
+      if (relay) {
+        if (!relay.lockPending || !relay.nekoUp) return false;
+        const generation = relay.lockGeneration ?? 0;
+        const result = await verifiedLock();
+        return result.ok && (await relayLocked(bindHost, port, keys.statusToken, generation));
       }
-      // Give the extension a moment to lock before the run goes on.
-      await sleep(700);
-      return await relayLocked(bindHost, port, keys.statusToken, generation);
+      if (now() - relayDownLockAt < 15_000) return false;
+      relayDownLockAt = now();
+      if ((await runningNekoImage()) !== bitwardenImage || (await holders().catch(() => 1)) === 0) return false;
+      log("the relay does not answer while a run uses Bitwarden's browser: locking the vault");
+      await verifiedLock();
+      return false;
     } catch {
       return false;
-    } finally {
-      locking = false;
     }
+  }
+
+  /** The owner's Lock now: lock (verified) and let a run that waits for it go on. */
+  async function lockNow(): Promise<{ ok: boolean; detail: string }> {
+    const result = await verifiedLock();
+    if (!result.ok) return result;
+    const config = await options.config();
+    const bindHost = await options.bindHost().catch(() => null);
+    if (bindHost && bindHostAllowed(bindHost)) {
+      const keys = await loadKeys(keysFile);
+      const port = stackPorts(config.port).http;
+      const relay = await relayStatus(bindHost, port, keys.statusToken);
+      if (relay?.lockPending) await relayLocked(bindHost, port, keys.statusToken, relay.lockGeneration ?? 0);
+    }
+    return result;
+  }
+
+  /** Clears what Bitwarden builds no longer installed left in the profile (their extension origins' storage). */
+  async function cleanupOldBitwarden(): Promise<string[]> {
+    const names = stackNames(await stackId());
+    const file = "/home/neko/.config/chromium/.bp-bitwarden-ids";
+    const listed = await docker(["exec", "--user", "neko", names.neko, "cat", file], 15_000).catch(() => ({ code: 1, stdout: "" }));
+    if (listed.code !== 0) return [];
+    const current = await installedBitwardenId();
+    const old = [...new Set(listed.stdout.split("\n").map((line) => line.trim()).filter((line) => /^[a-p]{32}$/.test(line) && line !== current))];
+    if (old.length === 0) return [];
+    // Chromium may still be starting: a few tries.
+    for (let i = 0; i < 5; i++) {
+      const answer = await bitwardenTool("cleanup", old);
+      if (answer?.cleared && answer.cleared.length === old.length) {
+        await docker(["exec", "--user", "neko", names.neko, "sh", "-c", `printf '%s' '${current ? `${current}\n` : ""}' > ${file}`], 15_000).catch(() => undefined);
+        log(`removed the data of ${old.length} earlier Bitwarden build(s) from the profile`);
+        return old;
+      }
+      await sleep(3000);
+    }
+    return [];
   }
 
   let idleTimer: ReturnType<typeof setInterval> | null = null;
@@ -712,6 +836,8 @@ export function createSignedIn(options: SignedInOptions) {
     ensureStarted,
     idleCheck,
     lockCheck,
+    lockNow,
+    cleanupOldBitwarden,
     bitwardenImage,
     startIdleChecks() {
       if (idleTimer) return;
@@ -727,17 +853,29 @@ export function createSignedIn(options: SignedInOptions) {
       lockTimer = null;
     },
     /**
-     * Bitwarden in the signed-in browser. `download` (only from the settings' two-press consent)
-     * builds the variant with the pinned release; `apply` restarts an idle browser so a changed
-     * choice takes effect now (otherwise at its next start). Never while a run holds the browser.
+     * Bitwarden in the signed-in browser. `download` (only from the settings' two-press consent, and
+     * only once that consent is saved) builds the variant with the pinned release; `apply` restarts an
+     * idle browser so a changed choice takes effect now (otherwise when no run holds it); `lock`
+     * locks the vault now (verified) and lets a run that waits for it go on; `restart-browser`
+     * restarts Chromium (logins kept, every in-memory key gone), then locks.
      */
-    async bitwarden(action: "download" | "apply"): Promise<{ ok: boolean; message: string }> {
+    async bitwarden(action: "download" | "apply" | "lock" | "restart-browser"): Promise<{ ok: boolean; message: string }> {
       if (action === "download") {
+        if ((await options.config()).bitwarden !== true) return { ok: false, message: "Turn Bitwarden on in the settings first (Download and enable, then Confirm)." };
         if (!(await imageExists(image))) return { ok: false, message: "Set up the signed-in browser first (Download and build)." };
         startBitwardenBuild();
         return { ok: true, message: `Downloading Bitwarden ${BITWARDEN.version} and building the browser image with it (a minute or two).` };
       }
-      if ((await holders().catch(() => 1)) > 0) return { ok: false, message: "A run is using the signed-in browser; the change applies when it next starts." };
+      if (action === "lock" || action === "restart-browser") {
+        if (!(await isRunning())) return { ok: true, message: "The signed-in browser is not running: nothing is unlocked." };
+        if (action === "restart-browser") await bitwardenTool("restart", []);
+        if (action === "restart-browser") await sleep(5000);
+        const result = await lockNow();
+        return result.ok
+          ? { ok: true, message: action === "lock" ? "Bitwarden is locked (verified). A run that waited for it goes on." : "Restarted the browser; Bitwarden is locked (verified). Your logins are kept." }
+          : { ok: false, message: `Bitwarden could not be locked: ${result.detail}` };
+      }
+      if ((await holders().catch(() => 1)) > 0) return { ok: false, message: "Update pending: a run is using the signed-in browser; it switches when the run ends." };
       if (!(await isRunning())) return { ok: true, message: "The change applies when the signed-in browser next starts." };
       await stopStack(false);
       return { ok: true, message: "Stopped the signed-in browser; it starts with the new choice when next needed. Your logins are kept." };
@@ -778,7 +916,10 @@ export function createSignedIn(options: SignedInOptions) {
       if (claimed) return { refused: claimed };
       const runtime = await sb.runtime();
       const nonce = random().slice(0, 12);
-      const plan = signedInPlan(path, { stackId: await stackId(), instance: await sb.instance(), serverImage: sb.image, agentId, nonce, blockedIps: sb.blockedIps() });
+      // With Bitwarden (running, or chosen and built) the run's takeover guard fails closed.
+      const config = await options.config();
+      const failClosed = (await runningNekoImage()) === bitwardenImage || (config.bitwarden === true && (await imageExists(bitwardenImage)));
+      const plan = signedInPlan(path, { stackId: await stackId(), instance: await sb.instance(), serverImage: sb.image, agentId, nonce, blockedIps: sb.blockedIps(), failClosed });
       lastActive = now();
       // A resumed run may find the browser stopped (idle): start it; the launcher waits for it.
       if (!(await isRunning())) void ensureStarted().catch(() => undefined);

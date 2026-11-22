@@ -49,18 +49,16 @@ export function signedInImageTag(contextHash: string): string {
  * The Bitwarden Password Manager release the optional Bitwarden variant of the image installs
  * (signed-in-bitwarden/bitwarden.json holds the same pin; a test keeps them equal). Downloaded from
  * Bitwarden's GitHub releases at image build time, only after the owner's two-press consent, and
- * refused unless size and SHA-256 match. Its files are the same as the Chrome Web Store build of
- * that version (only the store's update_url differs); the store's public key gives it its usual id.
- * Chromium loads it unpacked from the read-only image, so it is never updated behind the pin.
+ * refused unless size and SHA-256 match (its files are the same as the Chrome Web Store build of
+ * that version; only the store's update_url differs). The image packs it unchanged into a CRX with a
+ * key made for that build (so each build has its own extension id) and force-installs it by policy
+ * from a local update manifest, so it is never updated behind the pin.
  */
 export const BITWARDEN = {
   version: "2026.11.0",
   url: "https://github.com/bitwarden/clients/releases/download/browser-v2026.11.0/bit-dist-chrome-2026.11.0.zip",
   sha256: "07cf19b8f79e649005fdeee67c85d3cf31c735449a01a37a5b9f0287732605a5",
   size: 33_808_971,
-  id: "nngceckbapebfimnlniiiahkandclblb",
-  /** Bitwarden's own "Lock vault" command gets this shortcut; the daemon presses it on the desktop when the owner releases control. */
-  lockShortcut: "Ctrl+Shift+7",
 } as const;
 
 /** `<signed-in image tag>-bw<version>-<12 hex of the variant's build context hash>`, never `latest`. */
@@ -70,15 +68,82 @@ export function bitwardenImageTag(baseTag: string, contextHash: string): string 
   return `${baseTag}-bw${BITWARDEN.version}-${hash}`;
 }
 
+/** Lock attempts (lock, then reload) before the daemon restarts Chromium to clear every in-memory key. */
+export const BITWARDEN_LOCK_ATTEMPTS = 3;
+export const BITWARDEN_TOOL_MODES = ["status", "lock", "reload", "restart", "cleanup"] as const;
+export type BitwardenToolMode = (typeof BITWARDEN_TOOL_MODES)[number];
+const EXTENSION_ID = /^[a-p]{32}$/;
+export const BITWARDEN_TOOL_LIMITS = { memory: "256m", cpus: "0.5", pids: 64, tmpfs: "16m" } as const;
+
 /**
- * `docker exec` that presses Bitwarden's "Lock vault" shortcut on neko's desktop, as the desktop
- * user (the X display Chromium runs on). Chromium handles it as the extension's command (the page
- * never sees the key). The daemon runs it; the run's agent cannot (it has no Docker and no desktop).
+ * `docker run` for the daemon's Bitwarden tool (server-browser/bitwarden-lock.mjs): a short-lived
+ * container in neko's network namespace with its own DevTools connection to Chromium (never the
+ * agent's filter), every capability dropped, no new privileges, read-only root, an unprivileged
+ * user, limits, no log, never pulls. It locks Bitwarden and verifies the lock, restarts Chromium, or
+ * clears the storage of Bitwarden builds no longer installed. `ids`: the installed build's id
+ * (status, lock, reload) or the old ones (cleanup).
  */
-export function bitwardenLockArgs(stackId: string): string[] {
-  const keys = BITWARDEN.lockShortcut.toLowerCase();
-  if (!/^(ctrl|alt)\+shift\+[0-9a-z]$/.test(keys)) throw new Error("Unexpected lock shortcut.");
-  return ["exec", "--user", "neko", "--env", "DISPLAY=:99.0", stackNames(stackId).neko, "xdotool", "key", "--clearmodifiers", keys];
+export function bitwardenToolArgs(input: { stackId: string; instance: string; serverImage: string }, mode: BitwardenToolMode, ids: readonly string[]): string[] {
+  checkServerImage(input.serverImage);
+  if (!BITWARDEN_TOOL_MODES.includes(mode)) throw new Error("Unexpected Bitwarden tool mode.");
+  if (ids.some((id) => !EXTENSION_ID.test(id))) throw new Error("Unexpected extension id.");
+  const names = stackNames(input.stackId);
+  return [
+    "run",
+    "--rm",
+    "--init",
+    "--pull",
+    "never",
+    ...stackLabels(input, "bitwarden-tool"),
+    "--network",
+    `container:${names.neko}`,
+    "--cap-drop",
+    "ALL",
+    "--security-opt",
+    "no-new-privileges",
+    "--read-only",
+    "--tmpfs",
+    `/tmp:rw,nosuid,nodev,size=${BITWARDEN_TOOL_LIMITS.tmpfs}`,
+    "--memory",
+    BITWARDEN_TOOL_LIMITS.memory,
+    "--memory-swap",
+    BITWARDEN_TOOL_LIMITS.memory,
+    "--cpus",
+    BITWARDEN_TOOL_LIMITS.cpus,
+    "--pids-limit",
+    String(BITWARDEN_TOOL_LIMITS.pids),
+    "--user",
+    "pwuser",
+    "--log-driver",
+    "none",
+    "--entrypoint",
+    "node",
+    input.serverImage,
+    "/opt/browser-prompt/bitwarden-lock.mjs",
+    mode,
+    ...ids,
+  ];
+}
+
+/** The tool's one JSON line, or null. */
+export function parseBitwardenTool(stdout: string): { locked: boolean; detail: string; statuses?: { status: number }[] | null; cleared?: string[]; reloaded?: boolean } | null {
+  const line = stdout.trim().split("\n").at(-1) ?? "";
+  try {
+    const value = JSON.parse(line);
+    return value && typeof value === "object" ? { ...value, locked: value.locked === true, detail: typeof value.detail === "string" ? value.detail : "" } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Bitwarden's pin record in the variant image (/opt/bitwarden/browser-prompt-pin.json): the installed build's id, or null. */
+export function bitwardenIdFromPin(text: string): string | null {
+  try {
+    const id = JSON.parse(text)?.id;
+    return typeof id === "string" && EXTENSION_ID.test(id) ? id : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The Bitwarden option's state: off, or why it is not in the browser yet. */
@@ -541,6 +606,8 @@ export interface SignedInAgentInput {
   agentId: string;
   nonce: string;
   blockedIps: readonly string[];
+  /** Bitwarden in the browser: the run's takeover guard never opens when the relay cannot be asked. */
+  failClosed?: boolean;
 }
 
 /** `bp-sa-<agent id>-<nonce>`. */
@@ -616,6 +683,7 @@ export function signedInAgentArgs(input: SignedInAgentInput): string[] {
     `BP_CDP_ENDPOINT=${SIGNED_IN_CDP_ENDPOINT}`,
     "--env",
     `BP_CONTROL_URL=${controlUrl(input.stackId)}`,
+    ...(input.failClosed ? ["--env", "BP_CONTROL_FAIL_CLOSED=1"] : []),
     "--env",
     `BP_BLOCKED_IPS=${ips.join(",")}`,
     "--env",
