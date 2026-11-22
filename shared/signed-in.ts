@@ -45,6 +45,46 @@ export function signedInImageTag(contextHash: string): string {
   return `${SIGNED_IN_IMAGE_REPOSITORY}:neko${NEKO_VERSION}-${hash}`;
 }
 
+/**
+ * The Bitwarden Password Manager release the optional Bitwarden variant of the image installs
+ * (signed-in-bitwarden/bitwarden.json holds the same pin; a test keeps them equal). Downloaded from
+ * Bitwarden's GitHub releases at image build time, only after the owner's two-press consent, and
+ * refused unless size and SHA-256 match. Its files are the same as the Chrome Web Store build of
+ * that version (only the store's update_url differs); the store's public key gives it its usual id.
+ * Chromium loads it unpacked from the read-only image, so it is never updated behind the pin.
+ */
+export const BITWARDEN = {
+  version: "2026.11.0",
+  url: "https://github.com/bitwarden/clients/releases/download/browser-v2026.11.0/bit-dist-chrome-2026.11.0.zip",
+  sha256: "07cf19b8f79e649005fdeee67c85d3cf31c735449a01a37a5b9f0287732605a5",
+  size: 33_808_971,
+  id: "nngceckbapebfimnlniiiahkandclblb",
+  /** Bitwarden's own "Lock vault" command gets this shortcut; the daemon presses it on the desktop when the owner releases control. */
+  lockShortcut: "Ctrl+Shift+7",
+} as const;
+
+/** `<signed-in image tag>-bw<version>-<12 hex of the variant's build context hash>`, never `latest`. */
+export function bitwardenImageTag(baseTag: string, contextHash: string): string {
+  const hash = contextHash.toLowerCase().replace(/[^0-9a-f]/g, "").slice(0, 12);
+  if (hash.length < 12 || !baseTag.startsWith(`${SIGNED_IN_IMAGE_REPOSITORY}:`)) throw new Error("The Bitwarden image tag needs the signed-in image and a build context hash.");
+  return `${baseTag}-bw${BITWARDEN.version}-${hash}`;
+}
+
+/**
+ * `docker exec` that presses Bitwarden's "Lock vault" shortcut on neko's desktop, as the desktop
+ * user (the X display Chromium runs on). Chromium handles it as the extension's command (the page
+ * never sees the key). The daemon runs it; the run's agent cannot (it has no Docker and no desktop).
+ */
+export function bitwardenLockArgs(stackId: string): string[] {
+  const keys = BITWARDEN.lockShortcut.toLowerCase();
+  if (!/^(ctrl|alt)\+shift\+[0-9a-z]$/.test(keys)) throw new Error("Unexpected lock shortcut.");
+  return ["exec", "--user", "neko", "--env", "DISPLAY=:99.0", stackNames(stackId).neko, "xdotool", "key", "--clearmodifiers", keys];
+}
+
+/** The Bitwarden option's state: off, or why it is not in the browser yet. */
+export const BITWARDEN_STATES = ["off", "needs-browser", "no-image", "building", "build-failed", "ready"] as const;
+export type BitwardenState = (typeof BITWARDEN_STATES)[number];
+
 /** Label on every resource of the signed-in stack; its value is the role. Never swept by launcher pid. */
 export const STACK_LABEL = "browser-prompt.signed-in";
 /** CONTAINER_LABEL's value on a signed-in run's MCP container (swept like a Server browser's). */
@@ -124,6 +164,8 @@ export interface StackInput {
   port: number;
   /** Origins the viewer is opened from (http://<bind>:<port>, and the optional https base). */
   origins: readonly string[];
+  /** neko runs the Bitwarden variant: the relay then keeps the run paused after a takeover until the vault is locked. */
+  bitwarden?: boolean;
 }
 
 const IP_TEXT = /^[0-9A-Fa-f:.]{2,45}$/;
@@ -403,6 +445,7 @@ export function stackRelayArgs(input: StackInput, secrets: StackSecrets): string
     `BP_CONTROL_SUBNET=${STACK_SUBNET_PLACEHOLDER}`,
     "--env",
     `BP_MAX_LIFETIME_S=${STACK_MAX_LIFETIME_S}`,
+    ...(input.bitwarden ? ["--env", "BP_LOCK_ON_RELEASE=1"] : []),
     "--log-driver",
     "none",
     "--stop-timeout",

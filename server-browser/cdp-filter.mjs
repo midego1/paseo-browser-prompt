@@ -5,8 +5,11 @@
 // control, and the frames and workers attached under them. Everything else (the owner's tabs, tabs
 // restored after a restart, tabs the owner opens, service workers, tab targets) is hidden:
 // Playwright never attaches to it, and commands that target it are refused, as are closing the
-// browser and reading or clearing every cookie. Node's standard library plus the `ws` WebSocket
-// implementation Playwright bundles.
+// browser and reading or clearing every cookie. Extension targets (the password manager's service
+// worker, popup, offscreen document, and the frames it puts into pages, such as Bitwarden's inline
+// menu) are hidden wherever they appear, the run cannot open chrome-extension:// pages, and its
+// clicks and taps are refused where they would land on an extension frame. Node's standard library
+// plus the `ws` WebSocket implementation Playwright bundles.
 import { createServer, get as httpGet } from "node:http";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -35,7 +38,16 @@ export const TARGET_METHODS = new Set([
   "Browser.getWindowForTarget",
 ]);
 const TARGET_EVENTS = new Set(["Target.targetCreated", "Target.targetInfoChanged", "Target.targetDestroyed", "Target.targetCrashed"]);
+/** Pages of an extension (Bitwarden's popup, inline menu, background): never the run's. */
+export function isExtensionUrl(url) {
+  return typeof url === "string" && /^\s*chrome-extension:/i.test(url);
+}
+/** Input that clicks or taps at a point: refused where the point is an extension frame. */
+const POINTER_METHODS = new Set(["Input.dispatchMouseEvent", "Input.dispatchTouchEvent", "Input.synthesizeTapGesture", "Input.dispatchDragEvent", "Input.emulateTouchFromMouseEvent"]);
+export const EXTENSION_TEXT = "Not allowed in the signed-in browser: that is the password manager's (a browser extension's) page or frame.";
 const INTERNAL_ID_BASE = 2_000_000_000;
+/** Ids of the filter's own hit-test commands (above the internal ones; their answers never reach the run). */
+const HIT_TEST_ID_BASE = 2_100_000_000;
 const MAX_QUEUE = 200;
 
 /**
@@ -58,6 +70,10 @@ export function createTargetFilter({ held = () => false } = {}) {
   const windowCalls = new Set();
   /** Events about unknown top-level targets held back while a create is on its way. */
   let queue = [];
+  /** Visible sessions: session -> { targetId, parent } (parent: the session it was attached on). */
+  const sessionInfo = new Map();
+  /** Extension frames inside visible pages: frame target id -> the visible session it was attached on. */
+  const extensionFrames = new Map();
   let internal = INTERNAL_ID_BASE;
 
   /**
@@ -70,6 +86,12 @@ export function createTargetFilter({ held = () => false } = {}) {
     if (typeof id !== "string") return false;
     if (visible.has(id)) return true;
     if (hidden.has(id)) return false;
+    if (isExtensionUrl(info.url)) {
+      // Never the run's, also inside its own pages; remember it for the click check.
+      hidden.add(id);
+      if (parentSession && visibleSessions.has(parentSession)) extensionFrames.set(id, parentSession);
+      return false;
+    }
     let show = false;
     if (parentSession) show = visibleSessions.has(parentSession);
     else if (info.type === "page" && typeof info.openerId === "string") show = visible.has(info.openerId) && !held();
@@ -91,7 +113,13 @@ export function createTargetFilter({ held = () => false } = {}) {
     if (TARGET_EVENTS.has(message.method)) {
       const id = message.params?.targetInfo?.targetId ?? message.params?.targetId;
       if (message.method === "Target.targetDestroyed" || message.method === "Target.targetCrashed") {
+        extensionFrames.delete(id);
         if (visible.has(id)) out.deliver.push(message);
+        return out;
+      }
+      if (visible.has(id) && isExtensionUrl(message.params?.targetInfo?.url)) {
+        // One of the run's targets turned into an extension page: it is gone for the run.
+        revoke(id, out);
         return out;
       }
       if (isVisible(message.params?.targetInfo, message.sessionId)) out.deliver.push(message);
@@ -101,6 +129,7 @@ export function createTargetFilter({ held = () => false } = {}) {
       const { sessionId, targetInfo, waitingForDebugger } = message.params ?? {};
       if (isVisible(targetInfo, message.sessionId)) {
         visibleSessions.add(sessionId);
+        sessionInfo.set(sessionId, { targetId: targetInfo.targetId, parent: message.sessionId });
         out.deliver.push(message);
         return out;
       }
@@ -116,6 +145,7 @@ export function createTargetFilter({ held = () => false } = {}) {
         return out;
       }
       visibleSessions.delete(sessionId);
+      sessionInfo.delete(sessionId);
       out.deliver.push(message);
       return out;
     }
@@ -128,10 +158,80 @@ export function createTargetFilter({ held = () => false } = {}) {
     return out;
   }
 
+  /** Hides a visible target from now on: the run sees it detached and destroyed; Chromium detaches its sessions. */
+  function revoke(targetId, out) {
+    visible.delete(targetId);
+    hidden.add(targetId);
+    for (const [sessionId, info] of [...sessionInfo]) {
+      if (info.targetId !== targetId) continue;
+      visibleSessions.delete(sessionId);
+      sessionInfo.delete(sessionId);
+      hiddenSessions.add(sessionId);
+      out.deliver.push({ ...(info.parent ? { sessionId: info.parent } : {}), method: "Target.detachedFromTarget", params: { sessionId, targetId } });
+      out.toBrowser.push({ id: internal++, ...(info.parent ? { sessionId: info.parent } : {}), method: "Target.detachFromTarget", params: { sessionId } });
+    }
+    out.deliver.push({ method: "Target.targetDestroyed", params: { targetId } });
+  }
+
+  /** The visible sessions from `sessionId` up to its page (frames and workers are attached on their parent's session). */
+  function chain(sessionId) {
+    const out = [];
+    for (let at = sessionId, guard = 0; at && guard < 32; guard++) {
+      out.push(at);
+      at = sessionInfo.get(at)?.parent;
+    }
+    return out;
+  }
+  function rootOf(sessionId) {
+    return chain(sessionId).at(-1);
+  }
+  /** Frame target ids (OOPIFs) under the page of `sessionId` that hold an extension frame, and the extension frames themselves. */
+  function guardedFrames(sessionId) {
+    const root = rootOf(sessionId);
+    const out = new Set();
+    for (const [frameId, parent] of extensionFrames) {
+      const up = chain(parent);
+      if (up.at(-1) !== root) continue;
+      out.add(frameId);
+      for (const session of up) {
+        const info = sessionInfo.get(session);
+        if (info && info.parent) out.add(info.targetId);
+      }
+    }
+    return out;
+  }
+
   const error = (id, message, sessionId) => ({ id, ...(sessionId ? { sessionId } : {}), error: { code: -32000, message } });
+
+  /** Where a pointer command presses, taps or drags (CSS pixels of the page), or [] when it only moves. */
+  function pointsOf(message) {
+    const p = message.params ?? {};
+    switch (message.method) {
+      case "Input.dispatchMouseEvent":
+      case "Input.emulateTouchFromMouseEvent":
+        return p.type === "mouseMoved" || p.type === "mouseWheel" ? [] : [{ x: p.x, y: p.y }];
+      case "Input.dispatchTouchEvent":
+        return p.type === "touchStart" || p.type === "touchMove" || p.type === "touchEnd" ? (Array.isArray(p.touchPoints) ? p.touchPoints.map((t) => ({ x: t?.x, y: t?.y })) : []) : [];
+      case "Input.synthesizeTapGesture":
+      case "Input.dispatchDragEvent":
+        return [{ x: p.x, y: p.y }];
+      default:
+        return [];
+    }
+  }
 
   return {
     isVisible: (targetId) => visible.has(targetId),
+    extensionFrames: () => new Set(extensionFrames.keys()),
+    /**
+     * After a hit test: `nodes` are DOM.describeNode results (or null when the test failed) for the
+     * points of a pointer command. Refused when any point is an extension frame, or an iframe that
+     * holds one, or could not be checked.
+     */
+    hitAllowed(frames, nodes) {
+      return nodes.every((node) => node && typeof node === "object" && !(typeof node.frameId === "string" && frames.has(node.frameId)));
+    },
+    refusal: (message) => error(message.id, EXTENSION_TEXT, message.sessionId),
     fromClient(message) {
       if (!message || typeof message !== "object" || typeof message.method !== "string") return { reply: error(message?.id ?? 0, "Malformed message.") };
       if (REFUSED_METHODS.has(message.method)) return { reply: error(message.id, "Not allowed in the signed-in browser.", message.sessionId) };
@@ -145,6 +245,19 @@ export function createTargetFilter({ held = () => false } = {}) {
       }
       if (message.method === "Browser.setWindowBounds" || message.method === "Browser.getWindowBounds") {
         if (!windows.has(params.windowId)) return { reply: error(message.id, "No such window.", message.sessionId) };
+      }
+      if ((message.method === "Page.navigate" || message.method === "Target.createTarget") && isExtensionUrl(params.url)) {
+        return { reply: error(message.id, EXTENSION_TEXT, message.sessionId) };
+      }
+      if (POINTER_METHODS.has(message.method) && message.sessionId) {
+        const points = pointsOf(message);
+        const frames = guardedFrames(message.sessionId);
+        // Only pages that hold an extension frame need the check (the I/O layer asks Chromium what is
+        // at each point, then calls hitAllowed).
+        if (points.length > 0 && frames.size > 0) {
+          if (points.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) return { reply: error(message.id, EXTENSION_TEXT, message.sessionId) };
+          return { hitTest: { message, points, frames } };
+        }
       }
       if (message.method === "Target.createTarget") creating.add(message.id);
       if (message.method === "Browser.getWindowForTarget") windowCalls.add(message.id);
@@ -264,13 +377,55 @@ export async function startCdpFilter({ upstream, held = () => false, log = () =>
         }
         const verdict = filter.fromClient(message);
         if (verdict.reply) client.send(JSON.stringify(verdict.reply));
+        else if (verdict.hitTest) void hitTest(verdict.hitTest);
         else toBrowser(verdict.forward);
       });
+      /** Answers of the filter's own commands (hit tests), by id. */
+      const own = new Map();
+      let ownId = HIT_TEST_ID_BASE;
+      const ask = (sessionId, method, params) =>
+        new Promise((resolve) => {
+          const id = ownId++;
+          const timer = setTimeout(() => {
+            own.delete(id);
+            resolve(null);
+          }, 3000);
+          own.set(id, (answer) => {
+            clearTimeout(timer);
+            resolve(answer.error ? null : answer.result);
+          });
+          toBrowser({ id, sessionId, method, params });
+        });
+      // Pointer commands of one session stay in order: each waits for the one before it.
+      const pointerQueues = new Map();
+      const hitTest = ({ message, points, frames }) => {
+        const before = pointerQueues.get(message.sessionId) ?? Promise.resolve();
+        const done = before.then(async () => {
+          const nodes = [];
+          for (const point of points) {
+            const hit = await ask(message.sessionId, "DOM.getNodeForLocation", { x: Math.round(point.x), y: Math.round(point.y), includeUserAgentShadowDOM: true, ignorePointerEventsNone: false });
+            const described = hit && typeof hit.backendNodeId === "number" ? await ask(message.sessionId, "DOM.describeNode", { backendNodeId: hit.backendNodeId }) : null;
+            nodes.push(described?.node ?? null);
+          }
+          if (filter.hitAllowed(frames, nodes)) toBrowser(message);
+          else if (client.readyState === 1) {
+            log("refused a click or tap on an extension frame");
+            client.send(JSON.stringify(filter.refusal(message)));
+          }
+        });
+        pointerQueues.set(message.sessionId, done.catch(() => undefined));
+      };
       browser.on("message", (data) => {
         let message;
         try {
           message = JSON.parse(String(data));
         } catch {
+          return;
+        }
+        if (typeof message.id === "number" && own.has(message.id)) {
+          const answer = own.get(message.id);
+          own.delete(message.id);
+          answer(message);
           return;
         }
         const verdict = filter.fromBrowser(message);

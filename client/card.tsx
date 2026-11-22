@@ -59,6 +59,9 @@ const CHROME_HINT = "Chrome must be open with the Claude extension signed in: th
 const SERVER_HINT = "Runs in a browser on the Paseo server: no desktop app needed, but not signed in to your accounts.";
 const SIGNED_IN_HINT =
   "Runs in your signed-in browser on the Paseo server: no desktop app needed. Use Take over to watch it, or to log in or enter a 2FA code from any device (in a new tab: the agent cannot see tabs you open).";
+/** Under the Take over button while a signed-in run waits for the owner. */
+const SIGNED_IN_TAKEOVER_HELP =
+  "Tap the mouse icon to take control and log in in a new tab (+). With Bitwarden in the signed-in browser: unlock it there and fill from its toolbar icon, the field's suggestion or a passkey prompt; release control when done, and Bitwarden is locked again before the run goes on.";
 const HINTS: Record<BrowserAgent, string> = { paseo: DESKTOP_HINT, chrome: CHROME_HINT, server: SERVER_HINT, "signed-in": SIGNED_IN_HINT };
 const BROWSER_NAMES: Record<BrowserAgent, string> = {
   paseo: "in Paseo browser",
@@ -817,6 +820,9 @@ export function BrowserPromptCard({
           <Icon name="Globe" size={14} color={theme.colors.accentForeground} />
           <Text style={styles.primaryText}>{openingViewer ? "Opening…" : "Take over the browser"}</Text>
         </Pressable>
+      ) : null}
+      {runAgentId && runBrowser === "signed-in" && (runState === "needs-input" || shownState === "asking") ? (
+        <Text style={styles.hint}>{SIGNED_IN_TAKEOVER_HELP}</Text>
       ) : null}
       {runAgentId && runState === "needs-input" ? (
         <OwnerPromptBox

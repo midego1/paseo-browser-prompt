@@ -1,6 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { SIGNED_IN_STATES } from "./signed-in";
+import { BITWARDEN_STATES, SIGNED_IN_STATES } from "./signed-in";
 
 const state = z.enum(SIGNED_IN_STATES);
 
@@ -15,6 +15,8 @@ export const signedInStatus = defineRpc({
     state,
     image: z.string(),
     serverImage: z.string(),
+    /** Bitwarden in the signed-in browser: off, or why it is not there yet; `active` when the running browser has it. */
+    bitwarden: z.object({ state: z.enum(BITWARDEN_STATES), version: z.string(), active: z.boolean(), detail: z.string() }),
     running: z.boolean(),
     viewers: z.number(),
     busy: z.boolean(),
@@ -47,5 +49,16 @@ export const signedInViewerLink = defineRpc({
 export const signedInControl = defineRpc({
   name: "signed-in.control",
   input: z.object({ action: z.enum(["stop", "logout", "rotate-key"]) }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
+
+/**
+ * Bitwarden in the signed-in browser. `download` only from the settings' second press (the owner's
+ * explicit consent): builds the image variant with the pinned Bitwarden release. `apply` restarts an
+ * idle browser so a changed choice takes effect now (never under a run).
+ */
+export const signedInBitwarden = defineRpc({
+  name: "signed-in.bitwarden",
+  input: z.object({ action: z.enum(["download", "apply"]) }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });

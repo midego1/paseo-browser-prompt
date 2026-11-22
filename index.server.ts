@@ -12,8 +12,8 @@ import { createRunLocks, runLockKey } from "./shared/run-lock";
 import { acquireRunLock, finishRunLock } from "./shared/run-lock-rpc";
 import { prepareServerBrowserRun, serverBrowserStatus } from "./shared/server-browser-rpc";
 import { preferences, signedInSettings } from "./shared/settings";
-import { DEFAULT_SIGNED_IN_PORT, validateHttpsBase } from "./shared/signed-in";
-import { prepareSignedInRun, signedInControl, signedInStatus, signedInViewerLink } from "./shared/signed-in-rpc";
+import { BITWARDEN, DEFAULT_SIGNED_IN_PORT, SIGNED_IN_STATE_MESSAGES, validateHttpsBase } from "./shared/signed-in";
+import { prepareSignedInRun, signedInBitwarden, signedInControl, signedInStatus, signedInViewerLink } from "./shared/signed-in-rpc";
 import { chooseTrampolineHost } from "./shared/trampoline-host";
 import { getLauncherStatus, stashPrompt } from "./shared/trampoline";
 import { DEFAULT_TRAMPOLINE_PORT } from "./shared/trampoline-host";
@@ -95,9 +95,9 @@ export default function contribute(server: PluginServerContext) {
     },
     config: async () => {
       const current = await signedInConfig.read().catch(() => null);
-      if (current?.status !== "ready") return { port: DEFAULT_SIGNED_IN_PORT, httpsBaseUrl: "" };
+      if (current?.status !== "ready") return { port: DEFAULT_SIGNED_IN_PORT, httpsBaseUrl: "", bitwarden: false };
       const base = current.values.httpsBaseUrl.trim();
-      return { port: current.values.port, httpsBaseUrl: validateHttpsBase(base) === null ? base : "" };
+      return { port: current.values.port, httpsBaseUrl: validateHttpsBase(base) === null ? base : "", bitwarden: current.values.bitwarden === true };
     },
   });
   signedIn.startIdleChecks();
@@ -113,7 +113,18 @@ export default function contribute(server: PluginServerContext) {
 
   server.handle(signedInStatus, async ({ build }) => {
     if (!serverBrowserHook.supported) {
-      return { state: "unsupported" as const, image: signedIn.image, serverImage: serverBrowser.image, running: false, viewers: 0, busy: false, bindHost: null, viewerOrigin: null, detail: "" };
+      return {
+        state: "unsupported" as const,
+        image: signedIn.image,
+        serverImage: serverBrowser.image,
+        bitwarden: { state: "off" as const, version: BITWARDEN.version, active: false, detail: "" },
+        running: false,
+        viewers: 0,
+        busy: false,
+        bindHost: null,
+        viewerOrigin: null,
+        detail: "",
+      };
     }
     return signedIn.status({ build });
   });
@@ -132,6 +143,15 @@ export default function contribute(server: PluginServerContext) {
       else await signedIn.rotateKey();
       const done = { stop: "Stopped the signed-in browser. Your logins are kept.", logout: "Logged out of everything: the signed-in browser's profile was removed.", "rotate-key": "New viewer key: earlier links and viewer sessions no longer work." } as const;
       return { ok: true, message: done[action] };
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  server.handle(signedInBitwarden, async ({ action }) => {
+    if (!serverBrowserHook.supported) return { ok: false, message: SIGNED_IN_STATE_MESSAGES.unsupported };
+    try {
+      return await signedIn.bitwarden(action);
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) };
     }

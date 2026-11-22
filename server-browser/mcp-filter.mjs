@@ -44,6 +44,36 @@ export const SIGNED_IN_ALLOWED_TOOLS = new Set([...ALLOWED_TOOLS].filter((name) 
 
 export const DENIED_TEXT = "This tool is turned off in the browser-prompt Server browser.";
 
+/** What a tool call that names a chrome-extension:// page gets (a password manager's pages are never the agent's). */
+export const EXTENSION_URL_TEXT =
+  "Browser extension pages (chrome-extension://) are not available in the browser-prompt Server browser. Never open or use the password manager: ask the owner to take over for logins and passkeys.";
+
+/** Whether any string in a tool call's arguments names an extension page (chrome-extension:, also percent-encoded). */
+export function namesExtensionPage(args) {
+  const seen = [];
+  const visit = (value, depth) => {
+    if (depth > 6) return false;
+    if (typeof value === "string") {
+      let text = value;
+      for (let i = 0; i < 3 && /%[0-9a-f]{2}/i.test(text); i++) {
+        try {
+          text = decodeURIComponent(text);
+        } catch {
+          break;
+        }
+      }
+      return /chrome-extension:/i.test(text.replace(/[\s\u0000-\u001f]+/g, ""));
+    }
+    if (!value || typeof value !== "object" || seen.includes(value)) return false;
+    seen.push(value);
+    return Object.values(value).some((item) => visit(item, depth + 1));
+  };
+  return visit(args, 0);
+}
+
+/** Tools whose arguments open a page. */
+const NAVIGATING_TOOLS = new Set(["browser_navigate", "browser_tabs"]);
+
 /** Whether a tool may be listed and called: on the (signed-in) allowlist and not on the denylist. */
 export function toolAllowed(name, signedIn = false) {
   const allowed = signedIn ? SIGNED_IN_ALLOWED_TOOLS : ALLOWED_TOOLS;
@@ -62,7 +92,7 @@ function parseObject(line) {
 
 /** What a signed-in run's tool call gets while the owner holds control of the browser (Take over). */
 export const OWNER_CONTROL_TEXT =
-  "The owner has taken over the signed-in browser and holds control right now, so browser tools are paused (no reading and no actions). Do not retry in a loop: ask the owner with AskUserQuestion to answer \"done\" when they are finished and have released control (tap the mouse icon again or close the viewer), then take a new snapshot and continue.";
+  "The owner has taken over the signed-in browser and holds control right now (or the takeover just ended and the browser is being secured for a few seconds), so browser tools are paused (no reading and no actions). Do not retry in a loop: ask the owner with AskUserQuestion to answer \"done\" when they are finished and have released control (tap the mouse icon again or close the viewer), then take a new snapshot and continue.";
 
 /**
  * A message from the agent: `{ forward }` to pass it on, `{ reply }` to answer it here, or
@@ -82,6 +112,12 @@ export function filterClientLine(line, { ownerControl = false, signedIn = false 
     if (message.id === undefined || message.id === null) return { drop: true };
     return {
       reply: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: DENIED_TEXT }], isError: true } }),
+    };
+  }
+  if (message.method === "tools/call" && NAVIGATING_TOOLS.has(message.params?.name) && namesExtensionPage(message.params?.arguments)) {
+    if (message.id === undefined || message.id === null) return { drop: true };
+    return {
+      reply: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: EXTENSION_URL_TEXT }], isError: true } }),
     };
   }
   return { forward: line };
