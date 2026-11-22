@@ -271,6 +271,8 @@ export async function startRelay(options) {
   // (a confirmation for an earlier release does not clear a later one).
   let lockPending = lockOnRelease;
   let lockGeneration = lockOnRelease ? 1 : 0;
+  /** The daemon could not lock the vault for this release: the run is told the owner has to act. */
+  let lockFailed = false;
   let wasHeld = false;
   /** After a takeover ends (released, reset, or the viewer gone): the run waits for the lock. */
   function requireLock(reason) {
@@ -278,6 +280,7 @@ export async function startRelay(options) {
     lockGeneration++;
     if (!lockPending) log(`vault lock needed (${reason})`);
     lockPending = true;
+    lockFailed = false;
   }
   /** Notes the end of a held period (held or unsure while a viewer is connected). */
   function noteControl() {
@@ -515,7 +518,7 @@ export async function startRelay(options) {
         } catch {
           nekoUp = false;
         }
-        return sendJson(res, 200, { viewers, idleMs: Math.max(0, now() - lastActivity), nekoUp, portrait: screenIsPortrait, ownerControl: controlHeld(), lastPeer, lockPending, lockGeneration });
+        return sendJson(res, 200, { viewers, idleMs: Math.max(0, now() - lastActivity), nekoUp, portrait: screenIsPortrait, ownerControl: controlHeld(), lastPeer, lockPending, lockGeneration, lockFailed });
       }
       if (path === "/bp/locked" && req.method === "POST") {
         // The daemon locked the vault (Bitwarden's own Lock command) for release `generation`.
@@ -532,9 +535,25 @@ export async function startRelay(options) {
         const cleared = lockPending && generation === lockGeneration && !controlHeld();
         if (cleared) {
           lockPending = false;
+          lockFailed = false;
           log("vault locked; the run may go on");
         }
         return sendJson(res, 200, { lockPending, lockGeneration, cleared });
+      }
+      if (path === "/bp/lock-failed" && req.method === "POST") {
+        // The daemon could not lock the vault for release `generation`: the run stays paused and is
+        // told that the owner has to act (Lock now, Restart browser, Bitwarden's settings).
+        const auth = String(req.headers.authorization ?? "");
+        const expected = `Bearer ${statusToken}`;
+        if (auth.length !== expected.length || !timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) return sendJson(res, 401, { error: "status token" });
+        let generation = -1;
+        try {
+          generation = Number(JSON.parse((await readBody(req, 256)) || "{}").generation);
+        } catch {
+          return sendJson(res, 400, { error: "body" });
+        }
+        if (lockPending && generation === lockGeneration) lockFailed = true;
+        return sendJson(res, 200, { lockPending, lockGeneration, lockFailed });
       }
       if (!hostOk(req)) return send(res, 421, "Unknown host.", { "Content-Type": "text/plain" });
       if (path === "/bp/open" && (req.method === "GET" || req.method === "HEAD")) {
@@ -760,7 +779,7 @@ export async function startRelay(options) {
             ownerControl: controlHeld() || lockPending,
             known: controlKnown || viewers === 0,
             // Paused only because the vault is being locked (nobody holds control): the run waits, it does not ask the owner.
-            ...(lockOnRelease ? { lockPending, securing: lockPending && !controlHeld() } : {}),
+            ...(lockOnRelease ? { lockPending, securing: lockPending && !controlHeld() && !lockFailed, lockFailed: lockPending && lockFailed && !controlHeld() } : {}),
           }),
         );
     });

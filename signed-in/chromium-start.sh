@@ -14,6 +14,9 @@
 PROFILE=/home/neko/.config/chromium
 PIN=/opt/bitwarden/browser-prompt-pin.json
 IDS="$PROFILE/.bp-bitwarden-ids"
+DBS="$PROFILE/.bp-bitwarden-dbs-cleared"
+# The first 0.23.0 builds loaded Bitwarden with its store id: a stale build where it left traces.
+LEGACY_ID=nngceckbapebfimnlniiiahkandclblb
 rm -f "$PROFILE/SingletonLock" "$PROFILE/SingletonCookie" "$PROFILE/SingletonSocket"
 if ! printf '%s' "${BP_PROXY:-}" | grep -Eq '^http://(bp-si-[0-9a-f]{8}-proxy|[0-9]{1,3}(\.[0-9]{1,3}){3}):[0-9]{1,5}$'; then
   echo "browser-prompt: BP_PROXY is missing or not http://<stack proxy or ipv4>:<port>; refusing to start Chromium without the proxy" >&2
@@ -24,6 +27,9 @@ CURRENT=""
 if [ -f "$PIN" ]; then
   CURRENT=$(grep -oE '"id": *"[a-p]{32}"' "$PIN" | grep -oE '[a-p]{32}')
   if [ -n "$CURRENT" ] && ! grep -qx "$CURRENT" "$IDS" 2>/dev/null; then printf '%s\n' "$CURRENT" >> "$IDS"; fi
+fi
+if [ "$LEGACY_ID" != "$CURRENT" ] && ! grep -qx "$LEGACY_ID" "$IDS" 2>/dev/null; then
+  if [ -e "$PROFILE/Default/Local Extension Settings/$LEGACY_ID" ] || grep -q "$LEGACY_ID" "$PROFILE/Default/Preferences" 2>/dev/null; then printf '%s\n' "$LEGACY_ID" >> "$IDS"; fi
 fi
 if [ -f "$IDS" ]; then
   STALE=""
@@ -39,10 +45,14 @@ if [ -f "$IDS" ]; then
   done
   # Chromium's shared extension databases (state, rules, dynamic scripts) are keyed by extension id;
   # Bitwarden is the only extension besides Chromium's own components, which rebuild their entries.
-  if [ -n "$STALE" ]; then
+  # Only on the first start after a build became stale (not on every start).
+  NEW_STALE=""
+  for id in $STALE; do grep -qx "$id" "$DBS" 2>/dev/null || NEW_STALE="$NEW_STALE $id"; done
+  if [ -n "$NEW_STALE" ]; then
     for dir in "$PROFILE"/Default "$PROFILE"/Profile*; do
       [ -d "$dir" ] && rm -rf "$dir/Extension State" "$dir/Extension Rules" "$dir/Extension Scripts"
     done
+    for id in $NEW_STALE; do printf '%s\n' "$id" >> "$DBS"; done
   fi
   # Their entries in Chromium's preferences (settings, uninstall records, shortcuts, MACs), before Chromium reads them.
   if [ -n "$STALE" ] && command -v python3 >/dev/null 2>&1; then
@@ -55,7 +65,8 @@ def clean(value):
     if isinstance(value, dict):
         # Drop entries named after a stale build, and records that point at one (keyboard shortcuts:
         # {"extension": id, ...}), so Chromium does not bring them back.
-        return {k: clean(v) for k, v in value.items() if k not in stale and not names(v) and not (isinstance(v, dict) and any(names(x) for x in v.values()))}
+        # Also keys that name one: content settings use "chrome-extension://<id>,*".
+        return {k: clean(v) for k, v in value.items() if k not in stale and not names(k) and not names(v) and not (isinstance(v, dict) and any(names(x) for x in v.values()))}
     if isinstance(value, list):
         return [clean(v) for v in value if not names(v)]
     return value

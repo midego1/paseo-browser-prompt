@@ -95,9 +95,15 @@ export default function contribute(server: PluginServerContext) {
     },
     config: async () => {
       const current = await signedInConfig.read().catch(() => null);
-      if (current?.status !== "ready") return { port: DEFAULT_SIGNED_IN_PORT, httpsBaseUrl: "", bitwarden: false };
+      // Unknown settings stay unknown (bitwarden undefined): the browser never switches images on a guess.
+      if (current?.status !== "ready") return { port: DEFAULT_SIGNED_IN_PORT, httpsBaseUrl: "", bitwarden: undefined, bitwardenConsent: "" };
       const base = current.values.httpsBaseUrl.trim();
-      return { port: current.values.port, httpsBaseUrl: validateHttpsBase(base) === null ? base : "", bitwarden: current.values.bitwarden === true };
+      return {
+        port: current.values.port,
+        httpsBaseUrl: validateHttpsBase(base) === null ? base : "",
+        bitwarden: current.values.bitwarden === true,
+        bitwardenConsent: current.values.bitwardenConsent,
+      };
     },
   });
   signedIn.startIdleChecks();

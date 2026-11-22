@@ -27,23 +27,35 @@ const EXTENSION_ID = /^[a-p]{32}$/;
 /** Bitwarden's authentication status of every account, in its service worker (internal API of the pinned version; the smoke test checks it). */
 export const STATUS_EXPRESSION = `(async () => {
   const main = self.bitwardenMain && self.bitwardenMain.ossMain;
-  if (!main || !main.authService || !main.authService.authStatuses$) return { ready: false };
-  const statuses = await new Promise((resolve, reject) => {
-    let sub = null;
-    let done = false;
-    const timer = setTimeout(() => { done = true; sub && sub.unsubscribe(); reject(new Error("no status")); }, 4000);
-    sub = main.authService.authStatuses$.subscribe((value) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      resolve(value);
-      queueMicrotask(() => sub && sub.unsubscribe());
+  // Bitwarden is still starting (its service worker sets bitwardenMain while it bootstraps).
+  if (!main) return { ready: false, reason: "starting" };
+  const accounts$ = main.accountService && main.accountService.accounts$;
+  const statuses$ = main.authService && main.authService.authStatuses$;
+  if (!accounts$ || typeof accounts$.subscribe !== "function" || !statuses$ || typeof statuses$.subscribe !== "function") return { ready: false, reason: "unknown shape" };
+  const first = (observable) =>
+    new Promise((resolve, reject) => {
+      let sub = null;
+      let done = false;
+      const timer = setTimeout(() => { done = true; sub && sub.unsubscribe(); reject(new Error("no answer")); }, 4000);
+      sub = observable.subscribe((value) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(value);
+        queueMicrotask(() => sub && sub.unsubscribe());
+      });
+      if (done && sub) sub.unsubscribe();
     });
-    if (done && sub) sub.unsubscribe();
-  });
-  // A map of account id to status (an array of { userId, status } in other versions).
-  const list = Array.isArray(statuses) ? statuses.map((s) => s && s.status) : Object.values(statuses || {});
-  return { ready: true, statuses: list.map((status) => ({ status: Number(status) })) };
+  const accounts = await first(accounts$);
+  const statuses = await first(statuses$);
+  // Both are maps keyed by account id in the pinned version (statuses: an array of { userId, status } in others).
+  if (!accounts || typeof accounts !== "object" || Array.isArray(accounts)) return { ready: false, reason: "unknown shape" };
+  let list;
+  if (Array.isArray(statuses)) list = statuses.map((s) => s && s.status);
+  else if (statuses && typeof statuses === "object") list = Object.values(statuses);
+  else return { ready: false, reason: "unknown shape" };
+  if (list.some((status) => !Number.isInteger(status) || status < 0 || status > 2)) return { ready: false, reason: "unknown shape" };
+  return { ready: true, accounts: Object.keys(accounts).length, statuses: list.map((status) => ({ status })) };
 })()`;
 export const LOCK_EXPRESSION = `(async () => {
   const main = self.bitwardenMain && self.bitwardenMain.ossMain;
@@ -53,8 +65,20 @@ export const LOCK_EXPRESSION = `(async () => {
 })()`;
 
 /** Whether a status answer shows Bitwarden locked: it answered, and no account is unlocked. */
+/**
+ * Whether a status answer shows Bitwarden locked: it answered in the expected shape, it reported a
+ * state for every account it has (an empty list counts only when there is no account), and no
+ * account is unlocked.
+ */
 export function isLocked(answer) {
-  return !!answer && answer.ready === true && Array.isArray(answer.statuses) && answer.statuses.every((s) => s && Number.isInteger(s.status) && s.status !== UNLOCKED);
+  return (
+    !!answer &&
+    answer.ready === true &&
+    Number.isInteger(answer.accounts) &&
+    Array.isArray(answer.statuses) &&
+    answer.statuses.length === answer.accounts &&
+    answer.statuses.every((s) => s && Number.isInteger(s.status) && s.status >= 0 && s.status < UNLOCKED)
+  );
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -134,9 +158,12 @@ async function status(cdp, id, { except = null, waitMs = 25_000 } = {}) {
     if (!sw) return { ready: false, reason: "no service worker" };
     const session = await attach(cdp, sw.targetId);
     if (session) {
-      last = (await evaluate(cdp, session, STATUS_EXPRESSION)) ?? { ready: false };
+      last = (await evaluate(cdp, session, STATUS_EXPRESSION)) ?? { ready: false, reason: "no answer" };
       await cdp.send("Target.detachFromTarget", { sessionId: session });
       if (last.ready === true) return { ...last, targetId: sw.targetId };
+      // Permanent: another Bitwarden than the one this checks (its internals changed). No retries.
+      if (last.reason === "unknown shape") return last;
+      if (typeof last.error === "string" && !/^timeout/.test(last.error)) return { ready: false, reason: last.error };
     }
     await sleep(1000);
   }

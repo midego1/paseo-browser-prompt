@@ -122,5 +122,7 @@ export const signedInSettings = defineSettings({
      * after the settings' two-press consent; the pinned release is downloaded only then.
      */
     bitwarden: z.boolean().default(false),
+    /** SHA-256 of the Bitwarden release the owner confirmed downloading (a new pin needs a new confirmation). */
+    bitwardenConsent: z.string().default(""),
   }),
 });

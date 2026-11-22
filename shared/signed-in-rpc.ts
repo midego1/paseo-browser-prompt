@@ -23,7 +23,7 @@ export const signedInStatus = defineRpc({
       detail: z.string(),
       /** A run waits until the vault is locked after a takeover. */
       lockPending: z.boolean(),
-      lastLock: z.object({ at: z.number(), ok: z.boolean(), detail: z.string() }).nullable(),
+      lastLock: z.object({ at: z.number(), ok: z.boolean(), detail: z.string(), failures: z.number() }).nullable(),
       /** The running browser has another image than the current choice needs; it switches once no run holds it. */
       updatePending: z.boolean(),
     }),

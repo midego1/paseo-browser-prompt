@@ -98,18 +98,22 @@ export const OWNER_CONTROL_TEXT =
 export const SECURING_TEXT =
   "The signed-in browser is being secured right now (its password manager is being locked after a takeover or a start); this takes a few seconds. Wait about 5 seconds and try the same call again. Do not ask the owner about it unless it still fails after a minute.";
 
+/** What a tool call gets when the vault could not be locked after a takeover: only the owner can fix it. */
+export const LOCK_FAILED_TEXT =
+  "The signed-in browser stays paused for safety: its password manager (Bitwarden) could not be locked after the takeover. Only the owner can fix this. Ask the owner with AskUserQuestion to press Lock Bitwarden now or Restart browser on the card (or in the plugin settings), and to check Bitwarden's vault timeout (not Never), then answer \"done\". Wait for that answer and try again; do not retry in a loop.";
+
 /**
  * A message from the agent: `{ forward }` to pass it on, `{ reply }` to answer it here, or
  * `{ drop: true }` to discard it. With `ownerControl` (signed-in runs, while the owner holds control
  * in the viewer) every tool call is answered with OWNER_CONTROL_TEXT instead of reaching the browser.
  */
-export function filterClientLine(line, { ownerControl = false, securing = false, signedIn = false } = {}) {
+export function filterClientLine(line, { ownerControl = false, securing = false, lockFailed = false, signedIn = false } = {}) {
   const message = parseObject(line);
   if (!message) return { drop: true };
   if (ownerControl && message.method === "tools/call") {
     if (message.id === undefined || message.id === null) return { drop: true };
     return {
-      reply: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: securing ? SECURING_TEXT : OWNER_CONTROL_TEXT }], isError: true } }),
+      reply: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: lockFailed ? LOCK_FAILED_TEXT : securing ? SECURING_TEXT : OWNER_CONTROL_TEXT }], isError: true } }),
     };
   }
   if (message.method === "tools/call" && !toolAllowed(message.params?.name, signedIn)) {
@@ -171,6 +175,7 @@ export function lineSplitter(onLine) {
 export function createControlGuard({ now = Date.now, holdMs = 10_000, failuresToOpen = 3 } = {}) {
   let held = false;
   let securing = false;
+  let lockFailed = false;
   let lastHeldAt = -Infinity;
   let failures = 0;
   let issued = 0;
@@ -186,6 +191,7 @@ export function createControlGuard({ now = Date.now, holdMs = 10_000, failuresTo
       // `known` is informational.
       held = body?.ownerControl === true;
       securing = held && body?.securing === true;
+      lockFailed = held && body?.lockFailed === true;
       if (held) lastHeldAt = now();
     },
     failure(seq) {
@@ -193,6 +199,7 @@ export function createControlGuard({ now = Date.now, holdMs = 10_000, failuresTo
       applied = seq;
       failures++;
       securing = false;
+      lockFailed = false;
       if (now() - lastHeldAt < holdMs) held = true;
       else if (failures >= failuresToOpen) held = false;
       else if (!Number.isFinite(failuresToOpen)) held = true;
@@ -200,6 +207,8 @@ export function createControlGuard({ now = Date.now, holdMs = 10_000, failuresTo
     held: () => held,
     /** Held only because the vault is being locked (nobody holds control). */
     securing: () => securing,
+    /** Held because the vault could not be locked: the owner has to act. */
+    lockFailed: () => lockFailed,
   };
 }
 

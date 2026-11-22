@@ -184,7 +184,7 @@ const child = spawn(process.execPath, cliArgs, {
 let lastMessage = Date.now();
 const fromAgent = lineSplitter((line) => {
   lastMessage = Date.now();
-  const verdict = filterClientLine(line, { ownerControl: guard.held(), securing: guard.securing(), signedIn });
+  const verdict = filterClientLine(line, { ownerControl: guard.held(), securing: guard.securing(), lockFailed: guard.lockFailed(), signedIn });
   if ("reply" in verdict) process.stdout.write(`${verdict.reply}\n`);
   else if ("forward" in verdict) {
     if (signedIn) calls.started(verdict.forward);

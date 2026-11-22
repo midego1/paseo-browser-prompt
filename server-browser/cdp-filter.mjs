@@ -295,6 +295,9 @@ export function createTargetFilter({ held = () => false } = {}) {
       return nodes.every((node) => node && typeof node === "object" && !(typeof node.frameId === "string" && frames.has(node.frameId)));
     },
     refusal: (message) => error(message.id, EXTENSION_TEXT, message.sessionId),
+    /** Whether the owner holds control (or the vault waits to be locked) now: checked again right before a checked input goes out. */
+    isHeld: () => held(),
+    heldRefusal: (message) => error(message.id, HELD_TEXT, message.sessionId),
     /**
      * After a focus check: `focused` is DOM.describeNode of document.activeElement (depth -1, shadow
      * roots pierced), or null when it could not be read. Refused when the focus is an extension frame
@@ -311,7 +314,8 @@ export function createTargetFilter({ held = () => false } = {}) {
         for (const key of ["children", "shadowRoots"]) if (Array.isArray(node?.[key])) stack.push(...node[key]);
         if (node?.contentDocument) stack.push(node.contentDocument);
       }
-      return true;
+      // Not walked to the end (a huge subtree): refused.
+      return stack.length === 0;
     },
     fromClient(message) {
       if (!message || typeof message !== "object" || typeof message.method !== "string") return { reply: error(message?.id ?? 0, "Malformed message.") };
@@ -492,6 +496,8 @@ export async function startCdpFilter({ upstream, held = () => false, log = () =>
         });
       // Pointer commands of one session stay in order: each waits for the one before it.
       const pointerQueues = new Map();
+      /** The filter's focus world per session and frame: execution context id. */
+      const worlds = new Map();
       const hitTest = ({ message, points, frames }) => {
         const before = pointerQueues.get(message.sessionId) ?? Promise.resolve();
         const done = before.then(async () => {
@@ -501,7 +507,10 @@ export async function startCdpFilter({ upstream, held = () => false, log = () =>
             const described = hit && typeof hit.backendNodeId === "number" ? await ask(message.sessionId, "DOM.describeNode", { backendNodeId: hit.backendNodeId }) : null;
             nodes.push(described?.node ?? null);
           }
-          if (filter.hitAllowed(frames, nodes)) toBrowser(message);
+          // The checks took a moment: a takeover that began meanwhile wins.
+          if (filter.isHeld()) {
+            if (client.readyState === 1) client.send(JSON.stringify(filter.heldRefusal(message)));
+          } else if (filter.hitAllowed(frames, nodes)) toBrowser(message);
           else if (client.readyState === 1) {
             log("refused a click or tap on an extension frame");
             client.send(JSON.stringify(filter.refusal(message)));
@@ -516,16 +525,26 @@ export async function startCdpFilter({ upstream, held = () => false, log = () =>
         const before = pointerQueues.get(message.sessionId) ?? Promise.resolve();
         const done = before.then(async () => {
           let focused = null;
-          const world = await ask(message.sessionId, "Page.createIsolatedWorld", { frameId, worldName: FOCUS_WORLD });
-          const active = world?.executionContextId
-            ? await ask(message.sessionId, "Runtime.evaluate", { contextId: world.executionContextId, expression: "document.activeElement || document.body", returnByValue: false })
-            : null;
+          const read = async (contextId) => ask(message.sessionId, "Runtime.evaluate", { contextId, expression: "document.activeElement || document.body", returnByValue: false });
+          // The world is made once per frame and document; a navigation (or a gone context) makes a new one.
+          const key = `${message.sessionId}|${frameId}`;
+          let contextId = worlds.get(key);
+          let active = contextId ? await read(contextId) : null;
+          if (!active?.result?.objectId) {
+            const world = await ask(message.sessionId, "Page.createIsolatedWorld", { frameId, worldName: FOCUS_WORLD });
+            contextId = world?.executionContextId;
+            if (contextId) worlds.set(key, contextId);
+            else worlds.delete(key);
+            active = contextId ? await read(contextId) : null;
+          }
           const objectId = active?.result?.objectId;
           if (objectId) {
             focused = (await ask(message.sessionId, "DOM.describeNode", { objectId, depth: -1, pierce: true }))?.node ?? null;
             await ask(message.sessionId, "Runtime.releaseObject", { objectId });
           }
-          if (filter.focusAllowed(frames, focused)) toBrowser(message);
+          if (filter.isHeld()) {
+            if (client.readyState === 1) client.send(JSON.stringify(filter.heldRefusal(message)));
+          } else if (filter.focusAllowed(frames, focused)) toBrowser(message);
           else if (client.readyState === 1) {
             log("refused keyboard input into an extension frame");
             client.send(JSON.stringify(filter.refusal(message)));
@@ -545,6 +564,12 @@ export async function startCdpFilter({ upstream, held = () => false, log = () =>
           own.delete(message.id);
           answer(message);
           return;
+        }
+        if (message.method === "Runtime.executionContextsCleared" || message.method === "Runtime.executionContextDestroyed") {
+          for (const [key, contextId] of worlds) {
+            if (!key.startsWith(`${message.sessionId}|`)) continue;
+            if (message.method === "Runtime.executionContextsCleared" || message.params?.executionContextId === contextId) worlds.delete(key);
+          }
         }
         const verdict = filter.fromBrowser(message);
         for (const extra of verdict.toBrowser) toBrowser(extra);

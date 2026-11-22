@@ -189,7 +189,11 @@ export function SignedInSettings({ theme }: Pick<PluginSurfaceProps, "theme">) {
                   info.running ? (info.bitwarden.active ? "in the running browser" : "not in the running browser") : "",
                   info.bitwarden.updatePending ? (info.busy ? "Update pending: the browser switches when the run ends" : "Update pending: the browser switches at its next check") : "",
                   info.bitwarden.lockPending ? "a run waits until Bitwarden is locked" : "",
-                  info.bitwarden.lastLock ? (info.bitwarden.lastLock.ok ? "last lock verified" : `last lock failed: ${info.bitwarden.lastLock.detail}`) : "",
+                  info.bitwarden.lastLock
+                    ? info.bitwarden.lastLock.ok
+                      ? "last lock verified"
+                      : `last lock failed${info.bitwarden.lastLock.failures > 1 ? ` (${info.bitwarden.lastLock.failures} times in a row; tried again after a growing pause)` : ""}: ${info.bitwarden.lastLock.detail}`
+                    : "",
                 ]
                   .filter(Boolean)
                   .join(" · ")
@@ -218,7 +222,8 @@ export function SignedInSettings({ theme }: Pick<PluginSurfaceProps, "theme">) {
             setArmed(null);
             void act(async () => {
               if (config.status !== "ready") return "Settings are not loaded yet.";
-              if (!config.values.bitwarden && !(await config.save({ ...config.values, bitwarden: true }, config.revision))) return "Could not save the setting.";
+              // The consent names the pinned release (its SHA-256); a new pin asks again.
+              if (!(config.values.bitwarden && config.values.bitwardenConsent === BITWARDEN.sha256) && !(await config.save({ ...config.values, bitwarden: true, bitwardenConsent: BITWARDEN.sha256 }, config.revision))) return "Could not save the setting.";
               return (await bitwarden({ action: "download" })).message;
             });
           }}
