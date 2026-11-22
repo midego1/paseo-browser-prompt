@@ -2236,7 +2236,7 @@ test("Bitwarden prompt, card and settings: the agent never uses the password man
   assert.match(settings, /never “Never” \(that stores the key on the server's disk/);
   assert.match(settings, /turn off card and identity suggestions in the inline menu/);
   assert.match(settings, /Autofill on page load off/);
-  assert.match(settings, /A plugin update that pins a newer Bitwarden builds a new extension/);
+  assert.match(settings, /A plugin update that pins a newer Bitwarden asks you to confirm and download it again; it keeps its extension id/);
   assert.match(settings, /bitwarden\(\{ action: "lock" \}\)/);
   assert.match(settings, /bitwarden\(\{ action: "restart-browser" \}\)/);
   assert.match(settings, /Update pending: the browser switches when the run ends/);

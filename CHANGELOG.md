@@ -24,9 +24,14 @@
   lock lets the run continue; the card and the settings show a pending or failed lock and offer
   **Lock Bitwarden now** and **Restart browser**. With Bitwarden, the run's takeover guard fails
   closed when the relay cannot be asked, and the daemon locks the vault anyway.
-- **Turn Bitwarden off** uninstalls it and removes its data from the profile; a new pin is a new
-  build (new id) and removes the old one's data too. The signed-in image is rebuilt once (its start
-  script changed).
+- **Turn Bitwarden off** uninstalls it and removes its data from the profile at the browser's next
+  start. The extension is signed with this install's key (made once, kept 0600 in the plugin's state
+  directory, given to the image build only as a BuildKit secret), so its id and Bitwarden's local
+  data survive new images and pins; a new pin asks for a new confirmation (the consent names the
+  release's SHA-256). The signed-in image is rebuilt once (its start script changed).
+- A lock that cannot be verified is reported to the run ("the owner has to act"), retried after a
+  growing pause, never while you hold control, and the browser is restarted for it only with no
+  viewer connected. Unknown settings never switch the browser's image.
 - A running signed-in browser started from an older image (after a plugin update, or Bitwarden turned
   on or off) is stopped gracefully and started again with the right image as soon as no run holds it;
   meanwhile the settings show **Update pending**.

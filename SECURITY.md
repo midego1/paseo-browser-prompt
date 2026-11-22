@@ -339,17 +339,27 @@ over, Log in to sites): unlock, fill logins (inline menu, toolbar popup, shortcu
 passkey provider. **The agent must never be able to use or read the vault.**
 
 **How it gets there (pinned, with consent).** Nothing is downloaded until you press **Download and
-enable Bitwarden** and then **Confirm download**, and the daemon refuses the download unless that
-choice is saved. It then builds a variant of the signed-in image (`signed-in-bitwarden/`):
+enable Bitwarden** and then **Confirm download**; the choice is saved together with the SHA-256 of
+the release you confirmed, and the daemon refuses a download (and does not use a built image)
+unless that consent is for the pinned release, so a new pin asks again. It then builds a variant of the signed-in image (`signed-in-bitwarden/`):
 `install-bitwarden.py` downloads the release pinned in `bitwarden.json` (`bit-dist-chrome-<version>.zip`
 from Bitwarden's GitHub releases; https only, also on redirects), refuses it unless size and SHA-256
 match the pin, refuses unsafe archive paths, and checks the manifest (the pinned version, Manifest
 V3, no `update_url`, no `key`). Its files are identical to the Chrome Web Store build of that
 version (checked for 2026.11.0: only the store's `update_url` and `_metadata` differ). The image's
-own Chromium packs them **unchanged** into a CRX signed with a key made for that build; the private
-key is deleted right away, so the extension id is new with every build. Only the CRX, a local update
-manifest (`file:///opt/bitwarden/updates.xml`, the same version) and the pin record stay in the
-image, root-owned and read-only. Chromium force-installs it by policy from that manifest, so it
+own Chromium packs them **unchanged** into a CRX signed with **this install's extension key**: the
+daemon makes it once (RSA 2048) and keeps it in the plugin's state directory
+(`signed-in/bitwarden-key.pem`, mode 0600, never logged); the image build gets it only as a BuildKit
+secret (`docker build --secret`, mounted for the one install step, never a build argument, a file of
+the build context or a layer; the smoke test checks the image and its history), and the install
+script refuses a packed id other than the one the daemon expects. So the extension id stays the same
+across new images and pins, and Bitwarden's local data (its vault cache and settings) survives them.
+**Trust:** whoever can read that key (the daemon user, root) could sign another CRX with this id;
+that user already controls the daemon and the browser's profile, so nothing new is exposed. Only the
+CRX, a local update manifest (`file:///opt/bitwarden/updates.xml`, the same version) and the pin
+record stay in the image, root-owned and read-only. Rootless Docker 28.5 on paseo-box supports
+BuildKit secrets; a Docker without BuildKit fails the build (shown in the settings) and runs no
+Bitwarden. Chromium force-installs it by policy from that manifest, so it
 never contacts the store and never updates behind the pin; a plugin release moves the pin and asks
 you to download again.
 
@@ -399,7 +409,9 @@ and the whole `Extensions` domain).
 - **During a takeover:** while you hold control (or the vault waits to be locked), the filter
   refuses everything that acts on or reads a page (input, navigation, reload, new tabs, script
   evaluation, DOM and storage reads, screenshots), so a call that was on its way when you took over
-  cannot act; the MCP filter also refuses every tool call and withholds results that overlap it.
+  cannot act; a click or key that was being checked when the takeover began is refused too (checked
+  again right before it is sent); the MCP filter also refuses every tool call and withholds results
+  that overlap it.
 - **Reading:** no `browser_evaluate`, console or network tools in this browser; snapshots do not
   include extension frames (the smoke test puts a marker into a real Bitwarden frame in the agent's
   tab and checks the snapshot and page HTML).
@@ -412,12 +424,19 @@ and the whole `Extensions` domain).
   short-lived container in neko's network namespace (the Server browser image, every capability
   dropped, read-only, unprivileged; its own DevTools connection, never the agent's filter) calls
   Bitwarden's own **lock all accounts** in its service worker and then asks Bitwarden for every
-  account's state; it counts as locked only when Bitwarden answers and no account is unlocked. If
-  that cannot be verified, it reloads the extension (which clears `chrome.storage.session`, where
-  Bitwarden keeps the key of its unlocked session; a marker put there must be gone) and checks again;
-  three rounds, then it restarts Chromium (your logins stay) and checks once more. Only a verified
-  lock is confirmed to the relay; otherwise the run stays paused (fail closed), and the card and the
-  settings show why and offer **Lock Bitwarden now** and **Restart browser**.
+  account's state; it counts as locked only when Bitwarden answers in the expected shape, reports a
+  state for every account it has (an empty list counts only with no account), and none is
+  unlocked. If that cannot be verified, it reloads the extension (which clears
+  `chrome.storage.session`, where Bitwarden keeps the key of its unlocked session; a marker put there
+  must be gone) and checks again; three rounds, then it restarts Chromium (your logins stay), but
+  only when no viewer is connected, and checks once more. Nothing is locked while you hold control
+  (your release starts the round). The release's generation is read before the lock and only that one
+  is confirmed to the relay; a lock that cannot be verified is reported to the relay, the run stays
+  paused (fail closed) and is told that you have to act, the daemon tries again after a growing pause
+  (15 s, 30 s, … at most 5 minutes; a new release right away), and the card and the settings show why
+  (for example a vault timeout set to Never) and offer **Lock Bitwarden now** and **Restart browser**.
+  After a start, the daemon waits up to 90 seconds for this first lock before it hands out the
+  browser, outside the stack's start lock.
 - **Relay unreachable:** with Bitwarden, the run's MCP container is started fail-closed: its
   takeover guard never opens because the relay cannot be asked. While the relay is down and a run
   uses a Bitwarden browser, the daemon locks the vault anyway (every 15 seconds at most); the restarted
@@ -459,16 +478,36 @@ https://webauthn.io with Bitwarden as the provider; release control and check th
 as locked (and that the settings show "last lock verified"); start a run on a login page and confirm
 it never shows a vault item.
 
-**Pin bump, turning it off, removal.** A plugin update that pins a newer Bitwarden is a new build
-with a new id: the old one is uninstalled and **its local data is removed** (you download the new one
-and log in again). **Turn Bitwarden off**: the browser starts without it (an idle browser restarts
-now; under a run the settings show "Update pending" and it switches when the run ends). Chromium
+**Pin bump, turning it off, removal.** A plugin update that pins a newer Bitwarden needs a new
+confirmation and download; the new build keeps this install's id, so Chromium updates the installed
+extension in place and Bitwarden's local data stays (you may have to unlock again). Only a lost key
+file (the state directory removed) gives a new id; the old build's data is then removed and you log
+in again. Builds of the first 0.23.0 designs (the store id `nngceck…` loaded from the command line,
+and per-build ids) count as old builds wherever they left traces. **Turn Bitwarden off**: the
+browser starts without it **at its next start** (an idle browser restarts right away; under a run
+or with a viewer connected the settings show "Update pending" and it switches once neither is
+there); **Log out of everything** removes the whole profile immediately. Chromium
 uninstalls the force-installed extension (and deletes its data), the start script removes the data
 directories of every Bitwarden build the profile has seen (recorded in `.bp-bitwarden-ids`), the
-shared extension databases (Extension State, Rules, Scripts) and their preference entries (settings,
-uninstall records, shortcuts, MACs) on every start, and the daemon clears those extension origins'
-storage through DevTools (service worker, local storage, IndexedDB). After a new pin Chromium may
-bring back an empty preference entry for the replaced build once (no data); the next start removes it. **Log out of everything** removes the whole profile. The variant images stay until you
+shared extension databases (Extension State, Rules, Scripts; only on the first start after a build
+became old) and their preference entries (settings, uninstall records, shortcuts, content-setting
+exceptions, MACs) on every start, and the daemon clears those extension origins' storage through
+DevTools (service worker, local storage, IndexedDB), retried, and forgets an id once nothing in the
+profile names it. Chromium may bring back an empty preference entry for a replaced build once (no
+data); the next start removes it.
+
+**What is verified and what is assumed.** Verified by the plugin or its smoke test on paseo-box:
+the release's size and SHA-256; the packed CRX holds exactly the release's files; the extension id
+is this install's; Bitwarden comes back after its own lock and after a reload; the lock state as
+Bitwarden reports it (with no account logged in); the agent cannot see, open, click or type into
+Bitwarden's targets and frames; the agent's Ctrl+Shift+L/U/Y/9 fire none of Bitwarden's commands;
+an old build's files and data are removed. Checked by hand once, not by the plugin: that the GitHub
+zip's files equal the Chrome Web Store build of 2026.11.0 (a new pin needs the same check).
+Assumed (Chromium's documented behaviour, observed but not guaranteed by the plugin): that Chromium
+uninstalls a force-installed extension and deletes its data when the policy no longer names it; that
+DevTools input never triggers extension shortcuts in other Chromium versions; Bitwarden's internal
+service-worker API in other versions. A real account's lock, autofill and passkeys are for you to
+test (above). **Log out of everything** removes the whole profile. The variant images stay until you
 remove them: `docker image ls 'browser-prompt-signed-in'` and `docker image rm <tag>-bw…`.
 
 ## Design limits

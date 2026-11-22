@@ -949,11 +949,13 @@ Paseo server (see [SECURITY.md](SECURITY.md#bitwarden-in-the-signed-in-browser))
   on the server's disk and Bitwarden unlocks itself; runs then stay paused); **Unlock with PIN off**,
   no biometrics; Autofill › **Autofill on page load off** (its default) and card and identity
   suggestions in the inline menu off. Log in with your master password and two-step login.
-- **A new pin** (a plugin update with a newer Bitwarden) is a new build with a new id: the old
-  extension and its local data are removed, you download the new one and log in again.
+- **A new pin** (a plugin update with a newer Bitwarden) asks for a new confirmation and download;
+  the extension keeps its id (this install's signing key, kept 0600 in the plugin's state directory
+  and given to the image build only as a BuildKit secret), so Bitwarden's local data stays.
 - **Turn it off:** **Turn Bitwarden off** uninstalls the extension and removes its data (vault cache,
-  settings, storage) from the profile; an idle browser restarts now. **Log out of everything** also
-  removes it with the whole profile.
+  settings, storage) at the browser's next start (an idle browser restarts right away; under a run or
+  with a viewer connected it waits). **Log out of everything** removes it with the whole profile
+  immediately.
 
 **What to test with your account** (the smoke test has no Bitwarden account; it checks the lock
 mechanism against the real extension with nobody logged in): log in to Bitwarden in the viewer, check

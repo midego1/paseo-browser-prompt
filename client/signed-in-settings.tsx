@@ -41,7 +41,7 @@ export const BITWARDEN_RECOMMENDED =
   "First, in Bitwarden in the signed-in browser (Bitwarden has no policy the plugin could force these with): Settings › Account security: Vault timeout 1 minute (or shorter) with action Lock, never “Never” (that stores the key on the server's disk and Bitwarden unlocks itself, so the plugin can never lock it and runs stay paused); Unlock with PIN off; no biometrics. Settings › Autofill: Autofill on page load off (Bitwarden's default), and turn off card and identity suggestions in the inline menu. Log in with your master password plus two-step login.";
 /** A new pin (plugin update) or turning Bitwarden off removes what it kept in the browser. */
 export const BITWARDEN_PIN_NOTE =
-  "A plugin update that pins a newer Bitwarden builds a new extension (its own id): the old one and its local data (vault cache, settings) are removed from the signed-in browser, and you download it again and log in again. The same happens when you turn Bitwarden off.";
+  "A plugin update that pins a newer Bitwarden asks you to confirm and download it again; it keeps its extension id (this install's signing key), so Bitwarden's local data stays. Turning Bitwarden off removes it and its data at the browser's next start (right away when the browser is idle); Log out of everything removes it with the whole profile at once.";
 
 /**
  * Signed-in Server browser: status, the explicit two-press image download, Log in to sites (the
