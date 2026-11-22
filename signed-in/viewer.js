@@ -14,8 +14,11 @@
 //   - Capitals and shifted symbols: neko sends the character's keysym without Shift when the browser
 //     reports none (the on-screen keyboard's text input, dictation, Safari's insertText), and the
 //     remote desktop then types the unshifted key ("T" became "t"). bpKeyDown, called from neko's
-//     onKeyDown (patched in the Dockerfile), holds Shift around such a key unless Shift or Caps Lock
-//     is down already.
+//     onKeyDown (patched in the Dockerfile), holds Shift around such a key unless Shift, Caps Lock
+//     (for letters), Ctrl, Alt or Meta is down already, or neko's key state cannot be read. Known
+//     limit: neko never reports the remote desktop's Caps Lock (it only sends the local one when a
+//     mouse enters the video), so with the remote Caps Lock on, a capital from the on-screen keyboard
+//     comes out lowercase.
 (() => {
   "use strict";
   const SHIFT_L = 0xffe1;
@@ -23,7 +26,11 @@
   // Characters on a shifted key of the US layout (the remote desktop's layout).
   const SHIFTED = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ~!@#$%^&*()_+{}|:"<>?';
   const touch = navigator.maxTouchPoints > 0 || "ontouchstart" in window;
+  // Caps Lock and Ctrl/Alt/Meta as the last key event reported them.
   let capsLock = false;
+  let otherModifier = false;
+  // Keysyms that make a key a shortcut: Control, Meta, Alt, Super (left and right), AltGr, Mode_switch.
+  const SHORTCUT_MODIFIERS = [0xffe3, 0xffe4, 0xffe7, 0xffe8, 0xffe9, 0xffea, 0xffeb, 0xffec, 0xfe03, 0xff7e];
 
   /** neko's key-capture textarea (the one right after the overlay canvas), or null. */
   const capture = () => document.querySelector("canvas + textarea");
@@ -73,9 +80,10 @@
   window.addEventListener("touchstart", onKeyboardButton, true);
   window.addEventListener("mousedown", onKeyboardButton, true);
 
-  // Caps Lock as the hardware keyboard reports it.
+  // Caps Lock (and Ctrl/Alt/Meta) as the hardware keyboard reports it.
   const onKey = (event) => {
     if (typeof event.getModifierState === "function") capsLock = event.getModifierState("CapsLock");
+    otherModifier = !!(event.ctrlKey || event.altKey || event.metaKey);
   };
   window.addEventListener("keydown", onKey, true);
   window.addEventListener("keyup", onKey, true);
@@ -99,12 +107,27 @@
   /** Called by neko's onKeyDown instead of client.input.key(keysym, true). */
   window.bpKeyDown = (overlay, keysym) => {
     const input = overlay.client.input;
-    const pressed = overlay.keyboard?.pressed ?? {};
+    // neko's Guacamole keyboard (overlay.keyboard, `pressed`: keysym -> true while down). Without it
+    // the Shift state is unknown: send the key as neko would.
+    const pressed = overlay.keyboard?.pressed;
+    const known = pressed !== null && typeof pressed === "object";
     const char = keysym > 0x20 && keysym < 0x7f ? String.fromCharCode(keysym) : "";
     const letter = char >= "A" && char <= "Z";
-    const shift = char !== "" && SHIFTED.includes(char) && !pressed[SHIFT_L] && !pressed[SHIFT_R] && !(letter && capsLock);
-    if (shift) input.key(SHIFT_L, true);
-    input.key(keysym, true);
-    if (shift) input.key(SHIFT_L, false);
+    const shift =
+      known &&
+      char !== "" &&
+      SHIFTED.includes(char) &&
+      !pressed[SHIFT_L] &&
+      !pressed[SHIFT_R] &&
+      !(letter && capsLock) &&
+      !otherModifier &&
+      !SHORTCUT_MODIFIERS.some((modifier) => pressed[modifier]);
+    if (!shift) return input.key(keysym, true);
+    input.key(SHIFT_L, true);
+    try {
+      input.key(keysym, true);
+    } finally {
+      input.key(SHIFT_L, false);
+    }
   };
 })();

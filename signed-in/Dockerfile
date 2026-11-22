@@ -18,7 +18,8 @@
 #     the agent nor a page can read history, settings or the list of signed-in sites there.
 #   - viewer.css: neko's web client shows its on-screen keyboard button only below 769 px, so an
 #     iPad could tap but not type; this stylesheet (linked from neko's index.html) shows it on touch
-#     screens of any width.
+#     screens of any width. viewer.css and viewer.js are served as bp-viewer-<content hash>.css/.js,
+#     so a browser never uses a cached copy from an older image.
 #   - viewer.js (linked from neko's index.html, before neko's own deferred bundle) plus a one-line
 #     hook in neko's onKeyDown: on touch devices a tap on the video focuses neko's key-capture
 #     textarea without the on-screen keyboard (so an iPad's hardware keyboard types right after
@@ -33,10 +34,12 @@ COPY policies.json /etc/chromium/policies/managed/policies.json
 RUN chmod 0755 /usr/local/bin/chromium-start.sh && chmod 0644 /etc/neko/supervisord/chromium.conf /etc/chromium/policies/managed/policies.json
 COPY viewer.css /var/www/assets/bp-viewer.css
 COPY viewer.js /var/www/assets/bp-viewer.js
-RUN chmod 0644 /var/www/assets/bp-viewer.css /var/www/assets/bp-viewer.js \
-  && sed -i 's#</head>#<link rel="stylesheet" href="./assets/bp-viewer.css"><script src="./assets/bp-viewer.js"></script></head>#' /var/www/index.html \
-  && grep -q 'href="./assets/bp-viewer.css"' /var/www/index.html \
-  && grep -q 'src="./assets/bp-viewer.js"' /var/www/index.html \
+RUN cd /var/www/assets \
+  && css="bp-viewer-$(sha256sum bp-viewer.css | cut -c1-12).css" && js="bp-viewer-$(sha256sum bp-viewer.js | cut -c1-12).js" \
+  && mv bp-viewer.css "$css" && mv bp-viewer.js "$js" && chmod 0644 "$css" "$js" \
+  && sed -i "s#</head>#<link rel=\"stylesheet\" href=\"./assets/$css\"><script src=\"./assets/$js\"></script></head>#" /var/www/index.html \
+  && grep -q "href=\"./assets/$css\"" /var/www/index.html \
+  && grep -q "src=\"./assets/$js\"" /var/www/index.html \
   && bundle=$(ls /var/www/assets/index-*.js) && [ "$(echo "$bundle" | wc -l)" = 1 ] \
   && [ "$(grep -o 'this\.client\.input\.key(e,!0),ze(e))' "$bundle" | wc -l)" = 1 ] \
   && sed -i 's/this\.client\.input\.key(e,!0),ze(e))/(window.bpKeyDown?window.bpKeyDown(this,e):this.client.input.key(e,!0)),ze(e))/' "$bundle" \

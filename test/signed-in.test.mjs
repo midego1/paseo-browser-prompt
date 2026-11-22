@@ -1114,8 +1114,11 @@ test("signed-in image: pinned neko, sandbox on, DevTools on loopback only, the p
   const css = SIGNED_IN_FILES["viewer.css"];
   assert.match(css, /@media \(pointer: coarse\) and \(min-width: 769px\) \{\s*\.phone\\:block \{\s*display: block;/);
   assert.match(SIGNED_IN_FILES.Dockerfile, /^COPY viewer\.css \/var\/www\/assets\/bp-viewer\.css$/m);
-  assert.ok(SIGNED_IN_FILES.Dockerfile.includes(`sed -i 's#</head>#<link rel="stylesheet" href="./assets/bp-viewer.css"><script src="./assets/bp-viewer.js"></script></head>#' /var/www/index.html`));
-  assert.equal(classifyRequest("GET", "/assets/bp-viewer.css"), "static");
+  // Served under a content-hashed name, so no browser keeps an old cached copy after an image update.
+  assert.ok(SIGNED_IN_FILES.Dockerfile.includes(`css="bp-viewer-$(sha256sum bp-viewer.css | cut -c1-12).css"`));
+  assert.ok(SIGNED_IN_FILES.Dockerfile.includes(`sed -i "s#</head>#<link rel=\\"stylesheet\\" href=\\"./assets/$css\\"><script src=\\"./assets/$js\\"></script></head>#" /var/www/index.html`));
+  assert.ok(SIGNED_IN_FILES.Dockerfile.includes(`grep -q "href=\\"./assets/$css\\"" /var/www/index.html`));
+  assert.equal(classifyRequest("GET", "/assets/bp-viewer-0123456789ab.css"), "static");
   for (const name of Object.keys(SIGNED_IN_FILES)) assert.equal(SIGNED_IN_FILES[name], readFileSync(new URL(`../signed-in/${name}`, import.meta.url), "utf8"), name);
 });
 
@@ -1272,12 +1275,43 @@ test("viewer.js: capitals and shifted symbols get Shift when the browser sent no
   assert.equal(press(0x21), "ffe1+ 21+ ffe1-", "Caps Lock does not shift symbols");
   v.fire("keyup", { getModifierState: () => false });
   assert.equal(press(0x54), "ffe1+ 54+ ffe1-");
+  // Shortcuts: no Shift while Ctrl, Alt or Meta is down (in neko's key state or the last key event).
+  for (const modifier of [0xffe3, 0xffe4, 0xffe7, 0xffe8, 0xffe9, 0xffea, 0xffeb, 0xffec, 0xfe03, 0xff7e]) {
+    pressed[modifier] = true;
+    assert.equal(press(0x54), "54+", `modifier ${modifier.toString(16)} held`);
+    delete pressed[modifier];
+  }
+  for (const flag of ["ctrlKey", "altKey", "metaKey"]) {
+    v.fire("keydown", { [flag]: true, getModifierState: () => false });
+    assert.equal(press(0x41), "41+", flag);
+    v.fire("keyup", { getModifierState: () => false });
+  }
+  assert.equal(press(0x41), "ffe1+ 41+ ffe1-", "after the modifier's keyup");
+});
+
+test("viewer.js: unknown key state means no Shift; Shift is always released", () => {
+  const v = loadViewerScript({ touch: true });
+  const sent = [];
+  const input = { key: (keysym, down) => sent.push(`${keysym.toString(16)}${down ? "+" : "-"}`) };
+  // neko's keyboard (or its `pressed` map) missing: the key goes out as neko would send it.
+  for (const keyboard of [undefined, null, {}, { pressed: null }, { pressed: undefined }, { pressed: 1 }]) {
+    sent.length = 0;
+    v.window.bpKeyDown({ client: { input }, keyboard }, 0x54);
+    assert.equal(sent.join(" "), "54+", JSON.stringify(keyboard));
+  }
+  // Sending the key throws: Shift is released anyway and the error goes on to neko.
+  sent.length = 0;
+  const failing = { key: (keysym, down) => { sent.push(`${keysym.toString(16)}${down ? "+" : "-"}`); if (keysym === 0x54) throw new Error("channel closed"); } };
+  assert.throws(() => v.window.bpKeyDown({ client: { input: failing }, keyboard: { pressed: {} } }, 0x54), /channel closed/);
+  assert.equal(sent.join(" "), "ffe1+ 54+ ffe1-");
 });
 
 test("signed-in image: viewer.js is linked and neko's onKeyDown calls bpKeyDown", () => {
   const dockerfile = SIGNED_IN_FILES.Dockerfile;
   assert.match(dockerfile, /^COPY viewer\.js \/var\/www\/assets\/bp-viewer\.js$/m);
-  assert.equal(classifyRequest("GET", "/assets/bp-viewer.js"), "static");
+  assert.ok(dockerfile.includes(`js="bp-viewer-$(sha256sum bp-viewer.js | cut -c1-12).js"`));
+  assert.ok(dockerfile.includes(`mv bp-viewer.css "$css" && mv bp-viewer.js "$js"`));
+  assert.equal(classifyRequest("GET", "/assets/bp-viewer-0123456789ab.js"), "static");
   // The image's sed, run on neko 3.2.0's onKeyDown (as minified in its bundle).
   const sed = dockerfile.match(/sed -i '(s\/this\\\.client[^']+)' "\$bundle"/);
   assert.ok(sed, "the bundle patch");
@@ -1291,7 +1325,7 @@ test("signed-in image: viewer.js is linked and neko's onKeyDown calls bpKeyDown"
   // The build fails unless the anchor is found exactly once and the hook is in.
   assert.ok(dockerfile.includes(`[ "$(grep -o 'this\\.client\\.input\\.key(e,!0),ze(e))' "$bundle" | wc -l)" = 1 ]`));
   assert.ok(dockerfile.includes(`grep -q 'window.bpKeyDown(this,e)' "$bundle"`));
-  assert.ok(dockerfile.includes(`grep -q 'src="./assets/bp-viewer.js"' /var/www/index.html`));
+  assert.ok(dockerfile.includes(`grep -q "src=\\"./assets/$js\\"" /var/www/index.html`));
 });
 
 test("chromium-start.sh refuses to start Chromium without a valid proxy", () => {

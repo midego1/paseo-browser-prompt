@@ -15,9 +15,14 @@
   keyboard's text, dictation): neko sent "T" without Shift and the remote desktop typed "t", so a
   password typed on the on-screen keyboard came out wrong. A one-line hook in neko's key handler
   (patched in the image; the build fails if neko's code does not match) holds Shift around such
-  keys unless Shift or Caps Lock is down already.
-- The field has autocorrect, autocapitalize, spell check and writing suggestions off, so iOS does
-  not change what you type.
+  keys unless Shift, Caps Lock (for letters), Ctrl, Alt or Meta is down already; Shift is always
+  released again. Known limit: neko never reports the remote desktop's Caps Lock (it sends the
+  local one only when a mouse or trackpad enters the video), so with the remote Caps Lock on, a
+  capital from the on-screen keyboard comes out lowercase.
+- The field sets autocorrect, autocapitalize, spell check and writing suggestions off, which asks
+  iOS not to change or suggest from what you type (best effort).
+- The viewer's stylesheet and script are served under content-hashed names
+  (`bp-viewer-<hash>.css/.js`), so a browser never uses a cached copy from an older image.
 - The image is rebuilt once (new tag); the owner downloads it again with the two-press consent.
 - Smoke test (WebKit): on the iPad a hardware keyboard types right after a tap, without the
   keyboard button (Shift, Backspace, arrows, Enter); the keyboard button opens the on-screen
