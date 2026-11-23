@@ -33,7 +33,8 @@ chmod 700 "$WORK"
 PASEO_VERSION="${PASEO_VERSION:-0.14.0}"
 PASEO_IMAGE="${PASEO_IMAGE:-ghcr.io/getpaseo/paseo:$PASEO_VERSION}"
 TOOLS_IMAGE="browser-prompt-demo-tools"
-DAEMON="browser-prompt-demo-daemon"
+# DEMO_DAEMON and DEMO_WORK let the tour and the stills run side by side.
+DAEMON="${DEMO_DAEMON:-browser-prompt-demo-daemon}"
 
 cleanup() { docker rm -f "$DAEMON" >/dev/null 2>&1 || true; }
 trap cleanup EXIT

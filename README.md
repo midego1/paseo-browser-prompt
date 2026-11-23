@@ -76,7 +76,11 @@ Browser prompts.
 ChatGPT and Send to Claude (see the table above). Run and the Run once in… rows ask first when
 **Confirm before running** is on.
 
-![The card before 0.24, with a button per way in three groups; since 0.24 it has Run with Run once in…, Send to ChatGPT and Send to Claude, and a quiet row with Copy steps and Mark done (screenshot to be refreshed)](docs/screenshots/card.png)
+![The card: the steps, the Run split button naming its browser (Paseo browser) with its chevron, Send to ChatGPT, Send to Claude, and a quiet row with Copy steps and Mark done](docs/screenshots/card.png)
+
+The Run button's chevron opens **Run once in…**: every browser for one run, the current default marked, and **Change the default…** at the end.
+
+![Run once in…: Server browser signed in, Server browser clean, Paseo browser (the default) and Claude in Chrome tab, then Change the default…](docs/screenshots/run-once.png)
 
 **2. Running in the background.** The agent works in the background and the card shows its state
 with **Watch** and **Stop** (**Open the agent when started** opens it right away instead). "Step N of
@@ -126,9 +130,11 @@ steps are done, later copies collapse to "Already done · Show", and Show opens 
 
 **7. Settings.** Each behavior above is a setting (see [Settings](#settings) for the full list).
 
-![Settings before 0.24 (to be refreshed): since 0.24 the page has Run, Send to and Signed-in Server browser, with everything else under Advanced](docs/screenshots/settings-general.png)
+![Settings: Run (which browser the Run button uses, Confirm before running, Report back to chat) and Send to (ChatGPT, Claude)](docs/screenshots/settings-run.png)
 
-![Settings: Run with Paseo agent options](docs/screenshots/settings-run.png)
+Everything else is under **Advanced**:
+
+![Settings, Advanced: the Card group (collapse repeats, done marks) and the start of Run details (open the agent when started, step progress, live screenshot)](docs/screenshots/settings-general.png)
 
 ![Settings: the agent's provider, model, permission mode, Claude in Chrome provider and thinking](docs/screenshots/settings-agent.png)
 

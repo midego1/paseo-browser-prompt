@@ -11,6 +11,8 @@ each at most 250 KB).
 ```bash
 scripts/demo/record.sh            # the tour
 scripts/demo/record.sh --stills   # the screenshots
+# both at once: DEMO_WORK=/tmp/a DEMO_DAEMON=demo-tour scripts/demo/record.sh &
+#               DEMO_WORK=/tmp/b DEMO_DAEMON=demo-stills scripts/demo/record.sh --stills
 # the Updates screenshot needs a Git install of a pushed branch:
 DEMO_PLUGIN_GIT=midego1/paseo-browser-prompt DEMO_PLUGIN_REF=<branch> scripts/demo/record.sh --stills
 ```
