@@ -1054,6 +1054,18 @@ test("daemon: a viewer link starts the stack in order with checked arguments; on
   assert.equal((await si.status()).busy, true);
 });
 
+test("daemon: a signed-in run stopped before its MCP container came up frees the browser for Run again", async () => {
+  const docker = fakeStackDocker();
+  const { si } = makeSignedIn(docker);
+  const first = await si.prepare({ sourceId: "s", cardId: "c" });
+  assert.equal(first.ok, true);
+  assert.equal(si.consumeTicket(first.ticket, { sourceId: "s", cardId: "c" }), true);
+  assert.ok("server" in (await si.mcpServer("run-a")));
+  assert.deepEqual(await si.prepare({ sourceId: "s", cardId: "c" }), { ok: false, state: "busy", detail: "" }, "admitted, not up yet: busy");
+  si.release("run-a");
+  assert.equal((await si.prepare({ sourceId: "s", cardId: "c" })).ok, true, "stopped within the window: Run again is not refused");
+});
+
 test("daemon: stop keeps the profile, log out removes it and the keys; rotate restarts only the relay", async () => {
   const docker = fakeStackDocker();
   const { si, dir } = makeSignedIn(docker);

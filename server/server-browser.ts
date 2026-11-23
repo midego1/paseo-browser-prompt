@@ -25,6 +25,7 @@ import {
   serverBrowserPlan,
   sessionNames,
   SESSION_LABEL,
+  SERVER_RUN_MARKER,
   serverRunRecorded,
   shouldAttachServerBrowser,
   shouldAttachSignedIn,
@@ -444,6 +445,13 @@ export function createServerBrowser(options: ServerBrowserOptions = {}) {
       return { server: serverBrowserMcpServer(node, join(runtimeDir, "launch.mjs"), plan, host), session: sessionNames(agentId, nonce).browser };
     },
     /**
+     * Frees the slot a run took when it was admitted (its container may never have come up): a run
+     * that is stopped or closed right after its start no longer counts toward the cap.
+     */
+    release(agentId: string): void {
+      starting.delete(agentId);
+    },
+    /**
      * Removes this run's containers and networks, except those of session `except` (a backstop: a
      * session's launcher removes them when it ends, but a killed launcher leaves them behind).
      */
@@ -494,6 +502,13 @@ const MAX_ATTACHED = 1000;
 export interface SignedInAttach {
   consumeTicket(ticket: string, target: { sourceId: string; cardId: string }): boolean;
   mcpServer(agentId: string): Promise<{ server: StdioServer; session: string } | { refused: "busy" | "unavailable" } | null>;
+  /** Frees the browser a run was admitted to before its MCP container came up (it was stopped or closed). */
+  release?(agentId: string): void;
+}
+
+/** Whether a card recorded `runId` as a Server browser or signed-in run (any card: the id is the run's). */
+export function browserRunRecorded(runs: readonly (readonly string[])[], runId: string): boolean {
+  return runs.some((entry) => entry[1] === runId && (entry.slice(2).includes(SERVER_RUN_MARKER) || entry.slice(2).includes(SIGNED_IN_RUN_MARKER)));
 }
 
 /**
@@ -599,9 +614,17 @@ export function registerServerBrowser(
     log(`this Paseo has no session-open hook; the Server browser is off (${error instanceof Error ? error.message : "error"})`);
   }
 
+  // A run that is stopped (archived, for example by the card's Stop) or closed frees its slot at
+  // once, and its containers go. Runs attached in this process, and after a daemon restart runs a
+  // card recorded as Server browser or signed-in runs; other agents cause no docker call.
   const cleanup = async (event: { agent: { id: string } }) => {
     const id = event.agent.id;
-    if (!attached.has(id)) return;
+    browser.release(id);
+    options.signedIn?.release?.(id);
+    if (!attached.has(id)) {
+      const state = await settings.read().catch(() => null);
+      if (state?.status !== "ready" || !browserRunRecorded(state.values.runs, id)) return;
+    }
     const removed = await browser.removeContainers(id).catch(() => 0);
     if (removed) log(`removed ${removed} Server browser container(s) of run ${id}`);
   };

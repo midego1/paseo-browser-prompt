@@ -76,6 +76,7 @@ import {
   findNode,
   loadInstanceId,
   processAlive,
+  browserRunRecorded,
   registerServerBrowser,
   resolveDockerHost,
   shortError,
@@ -968,6 +969,46 @@ test("the session-open hook adds the server-browser MCP server only for the run 
   assert.equal(docker.calls.length, 0, "agents without a Server browser are left alone");
   reg.dispose();
   assert.equal(hooks.size, 0);
+});
+
+test("a run stopped right after its start frees its Server browser slot at once, and the signed-in browser too", async () => {
+  // Two runs have a browser; run-c is admitted but its container is not up yet (the card's Stop in
+  // the first seconds). The cap is 3.
+  const docker = fakeDocker({ image: true, containers: [browserContainer("a1a1a1", "run-a"), browserContainer("b2b2b2", "run-b")] });
+  const browser = makeBrowser(docker);
+  const released = [];
+  const signedIn = { consumeTicket: () => false, mcpServer: async () => null, release: (id) => released.push(id) };
+  const { host, hooks } = fakeHost();
+  const reg = registerServerBrowser(host, settingsWith([]), browser, { log: quiet, signedIn });
+  assert.ok("server" in (await browser.mcpServer("run-c")));
+  assert.deepEqual(await browser.mcpServer("run-d"), { refused: "busy" }, "run-c holds the third slot");
+  assert.equal((await browser.prepare({ sourceId: "chat", cardId: "card" })).ok, false, "Run again is refused while it does");
+  await hooks.get("agent.archive.after")({ agent: { id: "run-c" } }, {});
+  assert.equal(await browser.activeRuns(), 2, "the stopped run no longer counts, without waiting for the window");
+  assert.equal((await browser.prepare({ sourceId: "chat", cardId: "card" })).ok, true, "Run again gets a ticket");
+  assert.deepEqual(released, ["run-c"], "the signed-in browser is released as well");
+  await hooks.get("agent.close.after")({ agent: { id: "run-x" } }, {});
+  assert.deepEqual(released, ["run-c", "run-x"], "on close too");
+  reg.dispose();
+});
+
+test("after a daemon restart, stopping a recorded browser run still removes its containers; other agents cause no docker call", async () => {
+  const docker = fakeDocker({ image: true, containers: [browserContainer("a1a1a1", "run-a", { session: "bp-sb-run-a-s" })] });
+  const browser = makeBrowser(docker);
+  const { host, hooks } = fakeHost();
+  // A fresh process: nothing attached in memory, but a card recorded run-a as a Server browser run.
+  const reg = registerServerBrowser(host, settingsWith([["chat:card", "run-a", "key:k", SERVER_RUN_MARKER], ["chat:card2", "run-p", "key:p"]]), browser, { log: quiet });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  docker.calls.length = 0;
+  await hooks.get("agent.archive.after")({ agent: { id: "run-p" } }, {});
+  assert.equal(docker.calls.length, 0, "a Paseo browser run (no browser marker): no docker call");
+  await hooks.get("agent.archive.after")({ agent: { id: "never-recorded" } }, {});
+  assert.equal(docker.calls.length, 0);
+  await hooks.get("agent.archive.after")({ agent: { id: "run-a" } }, {});
+  assert.ok(docker.calls.some((call) => call[1] === "rm" && call.includes("a1a1a1")), "its container is removed");
+  reg.dispose();
+  assert.equal(browserRunRecorded([["chat:c", "run-s", "browser:signed-in"]], "run-s"), true, "signed-in runs count");
+  assert.equal(browserRunRecorded([["chat:c", "run-s", "browser:chrome"]], "run-s"), false);
 });
 
 test("after a daemon restart the run record decides; old hosts use before(), very old ones have none", async () => {
