@@ -1,5 +1,5 @@
 import { createHash, createHmac, createPublicKey, generateKeyPairSync, randomBytes } from "node:crypto";
-import { chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants as fsConstants, fchmodSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -193,44 +193,79 @@ export interface SignedInConfig {
   bitwardenConsent?: string;
 }
 
+/** Whether a stat belongs to the daemon's user (always true where there are no uids). */
+const ownedByMe = (info: { uid: number }) => typeof process.getuid !== "function" || info.uid === process.getuid();
+
 /**
- * Tightens the Bitwarden signing key file (0600) and its directory (0700) again; on every daemon
- * start (the first lookup), not only when the key is made. Refuses a key that is not a regular file
- * of this user (a symlink, another owner): throws, and the callers keep what runs.
+ * Reads the Bitwarden signing key and tightens it again (0600, its directory 0700), on every daemon
+ * start (the first lookup), not only when the key is made. Works on opened descriptors (O_NOFOLLOW,
+ * then fstat and fchmod), so a file swapped between the check and the read is not followed. Refuses a
+ * directory or key that is a symlink, not a directory / regular file, or not the daemon user's: throws
+ * (and the callers keep what runs). A missing key or directory throws ENOENT ("no key yet").
  */
+export function readKeyFile(file: string): string {
+  const dirFd = openSync(dirname(file), fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+  try {
+    const dir = fstatSync(dirFd);
+    if (!dir.isDirectory()) throw new Error("the Bitwarden signing key's directory is not a directory");
+    if (!ownedByMe(dir)) throw new Error("the Bitwarden signing key's directory belongs to another user");
+    if ((dir.mode & 0o777) !== 0o700) fchmodSync(dirFd, 0o700);
+  } finally {
+    closeSync(dirFd);
+  }
+  let fd: number;
+  try {
+    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ELOOP") throw new Error("the Bitwarden signing key is a symlink, not a regular file");
+    throw error;
+  }
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile()) throw new Error("the Bitwarden signing key is not a regular file");
+    if (!ownedByMe(info)) throw new Error("the Bitwarden signing key belongs to another user");
+    if ((info.mode & 0o777) !== 0o600) fchmodSync(fd, 0o600);
+    return readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Tightens the signing key file and its directory again (see readKeyFile), for example right before a build uses it. */
 export function tightenKeyFile(file: string): void {
-  const info = lstatSync(file);
-  if (!info.isFile()) throw new Error("the Bitwarden signing key is not a regular file");
-  if (typeof process.getuid === "function" && info.uid !== process.getuid()) throw new Error("the Bitwarden signing key belongs to another user");
-  if ((info.mode & 0o777) !== 0o600) chmodSync(file, 0o600);
-  const dir = lstatSync(dirname(file));
-  if ((dir.mode & 0o777) !== 0o700) chmodSync(dirname(file), 0o700);
+  readKeyFile(file);
 }
 
 /**
  * Writes the signing key atomically: a new file in the same directory (0600, created exclusively,
- * flushed), renamed over the key file, so a crash never leaves a partial key; the directory 0700.
+ * flushed), renamed over the key file, then the directory flushed, so a crash never leaves a partial
+ * or missing key; the directory 0700. A temp file is removed whatever step fails.
  */
 export function writeKeyFileAtomic(file: string, content: string): void {
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-  chmodSync(dirname(file), 0o700);
+  const dir = dirname(file);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
   const temp = `${file}.${randomBytes(6).toString("hex")}.tmp`;
-  const fd = openSync(temp, "wx", 0o600);
   try {
-    writeSync(fd, content);
-    fsyncSync(fd);
-  } catch (error) {
-    closeSync(fd);
-    rmSync(temp, { force: true });
-    throw error;
-  }
-  closeSync(fd);
-  try {
+    const fd = openSync(temp, "wx", 0o600);
+    try {
+      writeSync(fd, content);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     chmodSync(temp, 0o600);
     renameSync(temp, file);
   } catch (error) {
     rmSync(temp, { force: true });
     throw error;
+  }
+  // The rename itself is durable only once the directory is flushed.
+  const dirFd = openSync(dir, "r");
+  try {
+    fsyncSync(dirFd);
+  } finally {
+    closeSync(dirFd);
   }
 }
 
@@ -348,8 +383,7 @@ export function createSignedIn(options: SignedInOptions) {
     let pem: string | null = null;
     try {
       // Permissions tightened again on every daemon start (the first lookup), not only on creation.
-      tightenKeyFile(bitwardenKeyFile);
-      pem = readFileSync(bitwardenKeyFile, "utf8");
+      pem = readKeyFile(bitwardenKeyFile);
     } catch (error) {
       // No key yet. Any other failure (unreadable, a symlink, another owner) is thrown: the callers
       // keep what runs instead of guessing "no Bitwarden" (which would remove its data).
@@ -987,6 +1021,9 @@ export function createSignedIn(options: SignedInOptions) {
       // The restart decision only now that the verification failed, against the relay's state now.
       const blocked = await restartBlocked(before, startedAt);
       if (blocked) return { ok: false, detail: `${detail}; the browser is not restarted ${blocked} (close the viewer, or press Restart browser)`, at: now() };
+      // A viewer could still connect between restartBlocked's answer and the restart below. That only
+      // costs availability (the owner's browser restarts under them, logins kept); the vault is
+      // locked either way, and no run goes on before a verified lock.
       log(`Bitwarden could not be locked (${detail}); restarting Chromium`);
       await bitwardenTool("restart", []);
       await sleep(5000);

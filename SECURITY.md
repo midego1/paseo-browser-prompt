@@ -350,8 +350,9 @@ version (checked for 2026.11.0: only the store's `update_url` and `_metadata` di
 own Chromium packs them **unchanged** into a CRX signed with **this install's extension key**: the
 daemon makes it once (RSA 2048) and keeps it in the plugin's state directory
 (`signed-in/bitwarden-key.pem`, mode 0600 in a 0700 directory, both tightened again on every daemon
-start, written atomically (a new file in the same directory, renamed), never logged; a key that is
-not a regular file of the daemon user is refused, and then the browser keeps what runs); the image build gets it only as a BuildKit
+start, written atomically (a new file in the same directory, renamed, the directory flushed), read
+through `O_NOFOLLOW` descriptors (fstat, fchmod), never logged; a key or directory that is a symlink,
+or not the daemon user's, is refused, and then the browser keeps what runs); the image build gets it only as a BuildKit
 secret (`docker build --secret`, mounted for the one install step, never a build argument, a file of
 the build context or a layer; the smoke test checks the image and its history), and the install
 script refuses a packed id other than the one the daemon expects. So the extension id stays the same
@@ -448,7 +449,10 @@ and the whole `Extensions` domain).
 - **Relay unreachable:** with Bitwarden, the run's MCP container is started fail-closed: its
   takeover guard never opens because the relay cannot be asked. While the relay is down and a run
   uses a Bitwarden browser, the daemon locks the vault anyway (every 15 seconds at most); the restarted
-  relay starts with the vault marked "to be locked". Any Bitwarden variant of the image counts (also
+  relay starts with the vault marked "to be locked".
+- **Which build is installed** is read from neko's pin file by a probe that reports "no pin file"
+  itself; a failed or unparseable probe is never "no Bitwarden": the lock fails (the run stays
+  paused) unless the running image is certainly a plain one, and nothing is cleared from the profile. Any Bitwarden variant of the image counts (also
   one this daemon would not build now, such as an older one still running after a plugin update): its
   relay locks on release and the run's guard fails closed.
 

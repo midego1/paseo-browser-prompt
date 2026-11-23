@@ -71,7 +71,7 @@ import {
   viewerOrigins,
 } from "../shared/signed-in.ts";
 import { createServerBrowser } from "../server/server-browser.ts";
-import { createSignedIn, extensionIdOfKey, loadKeys, relaySecret, signedInConfigFrom, signViewerTicket, tightenKeyFile, writeKeyFileAtomic } from "../server/signed-in.ts";
+import { createSignedIn, extensionIdOfKey, loadKeys, relaySecret, readKeyFile, signedInConfigFrom, signViewerTicket, tightenKeyFile, writeKeyFileAtomic } from "../server/signed-in.ts";
 import { SIGNED_IN_BITWARDEN_FILES, SIGNED_IN_FILES } from "../server/server-browser-files.ts";
 import { checkPlan, launch } from "../server-browser/launch.mjs";
 import {
@@ -2497,7 +2497,26 @@ test("0.23.1 Bitwarden key file: written atomically (0600 in a 0700 directory, n
   assert.equal(statSync(join(dir, "state")).mode & 0o777, 0o700);
   const link = join(dir, "state", "link.pem");
   symlinkSync(file, link);
-  assert.throws(() => tightenKeyFile(link), /not a regular file/);
+  assert.throws(() => tightenKeyFile(link), /symlink, not a regular file/);
+  // A symlinked directory is refused too (chmod would follow it), and its target is left as it is.
+  const realDir = join(dir, "real-dir");
+  mkdirSync(realDir, { mode: 0o755 });
+  writeFileSync(join(realDir, "bitwarden-key.pem"), "x", { mode: 0o644 });
+  symlinkSync(realDir, join(dir, "linked-dir"));
+  assert.throws(() => tightenKeyFile(join(dir, "linked-dir", "bitwarden-key.pem")));
+  assert.equal(statSync(realDir).mode & 0o777, 0o755, "the link's target is not chmod-ed");
+  assert.equal(statSync(join(realDir, "bitwarden-key.pem")).mode & 0o777, 0o644);
+  // A directory in place of the key file.
+  mkdirSync(join(dir, "state", "dir.pem"));
+  assert.throws(() => tightenKeyFile(join(dir, "state", "dir.pem")), /not a regular file/);
+  rmSync(join(dir, "state", "dir.pem"), { recursive: true });
+  assert.equal(readKeyFile(file), "second\n", "the read goes through the same checks");
+  // A failed rename (a non-empty directory in the key's place) leaves no temp file behind.
+  const blocked = join(dir, "state", "blocked.pem");
+  mkdirSync(join(blocked, "inside"), { recursive: true });
+  assert.throws(() => writeKeyFileAtomic(blocked, "x"));
+  assert.deepEqual(readdirSync(join(dir, "state")).filter((name) => name.endsWith(".tmp")), [], "temp removed after a failed rename");
+  rmSync(blocked, { recursive: true });
   assert.throws(() => tightenKeyFile(join(dir, "state", "missing.pem")), (error) => error.code === "ENOENT");
 
   // The daemon: a key made by the consent press, loosened on disk, is 0600 (and its directory 0700) again at the next daemon start.

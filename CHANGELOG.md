@@ -12,16 +12,24 @@ Follow-ups from the reviews of the Bitwarden work (0.23.0). Fail closed on lock,
 - **Lock backoff forgotten when it no longer applies:** the growing pause after failed locks is reset
   once nothing is pending and when the relay started again (the relay's status now names its start,
   `bootId`), so an old pause never delays a lock that is needed now.
-- **Signing key file:** written atomically (a new 0600 file in the same directory, flushed, renamed),
+- **Signing key file:** written atomically (a new 0600 file in the same directory, flushed, renamed,
+  the directory flushed; the temp file removed on any failure), read through `O_NOFOLLOW` descriptors
+  (fstat, fchmod: no check-then-read race; a symlinked directory or key is refused),
   and the file (0600) and its directory (0700) are tightened again on every daemon start, not only
   when the key is made. A key that is not a regular file of the daemon user is refused; then, like an
   unreadable key, the browser keeps the image it runs (no switch to "no Bitwarden" on a guess).
 - **Unknown settings keep the vault:** the daemon's view of the settings is one tested function; not
   ready, invalid, a failed read or a Bitwarden value that is not a boolean count as unknown (keep what
   runs), only an explicit off turns Bitwarden off and removes its data.
+- **A failed pin probe is never "no Bitwarden":** the daemon reads the installed build from neko's
+  pin file with a probe that reports "no pin file" itself. A docker exec error, a timeout or an
+  unparseable pin keeps the run paused ("cannot read the Bitwarden pin; staying paused") unless the
+  running image is certainly a plain one, and the cleanup of earlier builds then clears nothing (it
+  used to clear the current build's data too).
 - **Any Bitwarden image fails closed:** a Bitwarden variant that this daemon would not build now (an
   older one still running after a plugin update) still gets a relay that locks on release, the lock
-  while the relay is down, and a fail-closed run guard.
+  while the relay is down, and a fail-closed run guard; the owner's consent alone also makes the run
+  guard fail closed.
 - **Start script:** the installed build's id is dropped from `.bp-bitwarden-dbs-cleared`, so its
   shared extension databases are cleared again if it ever becomes stale later. This changes the
   signed-in image: after this update, Bitwarden has to be downloaded again (and you log in to it again).
