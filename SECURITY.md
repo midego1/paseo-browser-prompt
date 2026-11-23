@@ -349,7 +349,9 @@ V3, no `update_url`, no `key`). Its files are identical to the Chrome Web Store 
 version (checked for 2026.11.0: only the store's `update_url` and `_metadata` differ). The image's
 own Chromium packs them **unchanged** into a CRX signed with **this install's extension key**: the
 daemon makes it once (RSA 2048) and keeps it in the plugin's state directory
-(`signed-in/bitwarden-key.pem`, mode 0600, never logged); the image build gets it only as a BuildKit
+(`signed-in/bitwarden-key.pem`, mode 0600 in a 0700 directory, both tightened again on every daemon
+start, written atomically (a new file in the same directory, renamed), never logged; a key that is
+not a regular file of the daemon user is refused, and then the browser keeps what runs); the image build gets it only as a BuildKit
 secret (`docker build --secret`, mounted for the one install step, never a build argument, a file of
 the build context or a layer; the smoke test checks the image and its history), and the install
 script refuses a packed id other than the one the daemon expects. So the extension id stays the same
@@ -360,8 +362,9 @@ CRX, a local update manifest (`file:///opt/bitwarden/updates.xml`, the same vers
 record stay in the image, root-owned and read-only. Rootless Docker 28.5 on paseo-box supports
 BuildKit secrets; a Docker without BuildKit fails the build (shown in the settings) and runs no
 Bitwarden. Chromium force-installs it by policy from that manifest, so it
-never contacts the store and never updates behind the pin; a plugin release moves the pin and asks
-you to download again.
+never contacts the store and never updates behind the pin; a plugin release that moves the pin asks
+you to confirm and download again, and one that changes the signed-in image in other ways needs the
+download again too (the variant is built on that image).
 
 Why force-installed and not loaded from the command line (0.23.0's first design): Bitwarden reloads
 itself (`chrome.runtime.reload()`) after every lock, and Chromium 155 does not bring back an
@@ -428,19 +431,26 @@ and the whole `Extensions` domain).
   state for every account it has (an empty list counts only with no account), and none is
   unlocked. If that cannot be verified, it reloads the extension (which clears
   `chrome.storage.session`, where Bitwarden keeps the key of its unlocked session; a marker put there
-  must be gone) and checks again; three rounds, then it restarts Chromium (your logins stay), but
-  only when no viewer is connected, and checks once more. Nothing is locked while you hold control
+  must be gone) and checks again; three rounds, then it restarts Chromium (your logins stay), and
+  checks once more. Whether to restart is decided only after those rounds failed, with the relay
+  asked again then: never while a viewer is connected or you hold control, and not when a viewer was
+  used, a takeover began or ended, or the relay started again since the verification began (compared
+  with what the relay said before it), nor when the relay stopped answering in between. Nothing is locked while you hold control
   (your release starts the round). The release's generation is read before the lock and only that one
   is confirmed to the relay; a lock that cannot be verified is reported to the relay, the run stays
   paused (fail closed) and is told that you have to act, the daemon tries again after a growing pause
-  (15 s, 30 s, … at most 5 minutes; a new release right away), and the card and the settings show why
+  (15 s, 30 s, … at most 5 minutes; a new release right away; the pause is forgotten once nothing
+  is pending and when the relay started again, so an old pause never delays a lock that is needed
+  now), and the card and the settings show why
   (for example a vault timeout set to Never) and offer **Lock Bitwarden now** and **Restart browser**.
   After a start, the daemon waits up to 90 seconds for this first lock before it hands out the
   browser, outside the stack's start lock.
 - **Relay unreachable:** with Bitwarden, the run's MCP container is started fail-closed: its
   takeover guard never opens because the relay cannot be asked. While the relay is down and a run
   uses a Bitwarden browser, the daemon locks the vault anyway (every 15 seconds at most); the restarted
-  relay starts with the vault marked "to be locked".
+  relay starts with the vault marked "to be locked". Any Bitwarden variant of the image counts (also
+  one this daemon would not build now, such as an older one still running after a plugin update): its
+  relay locks on release and the run's guard fails closed.
 
 **Limits (what remains).**
 
@@ -478,9 +488,13 @@ https://webauthn.io with Bitwarden as the provider; release control and check th
 as locked (and that the settings show "last lock verified"); start a run on a login page and confirm
 it never shows a vault item.
 
-**Pin bump, turning it off, removal.** A plugin update that pins a newer Bitwarden needs a new
-confirmation and download; the new build keeps this install's id, so Chromium updates the installed
-extension in place and Bitwarden's local data stays (you may have to unlock again). Only a lost key
+**Plugin updates, turning it off, removal.** A plugin update that changes the browser image (a newer
+Bitwarden pin, which also needs a new confirmation, or a change to the signed-in image itself) can
+require downloading Bitwarden again: the variant is built on that image. Until then the browser
+starts without Bitwarden once it is idle (never on a guess: unknown settings or an unreadable key
+keep what runs), which removes Bitwarden's local data, so you log in to Bitwarden again afterwards.
+A download before that switch keeps this install's id, so Chromium updates the installed extension in
+place and Bitwarden's local data stays (you may have to unlock again). Only a lost key
 file (the state directory removed) gives a new id; the old build's data is then removed and you log
 in again. Builds of the first 0.23.0 designs (the store id `nngceck…` loaded from the command line,
 and per-build ids) count as old builds wherever they left traces. **Turn Bitwarden off**: the

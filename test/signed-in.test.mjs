@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
@@ -43,6 +43,7 @@ import {
   bitwardenIdFromPin,
   bitwardenImageTag,
   bitwardenToolArgs,
+  isBitwardenImageTag,
   parseBitwardenTool,
   bindHostAllowed,
   checkStackRun,
@@ -70,7 +71,7 @@ import {
   viewerOrigins,
 } from "../shared/signed-in.ts";
 import { createServerBrowser } from "../server/server-browser.ts";
-import { createSignedIn, extensionIdOfKey, loadKeys, relaySecret, signViewerTicket } from "../server/signed-in.ts";
+import { createSignedIn, extensionIdOfKey, loadKeys, relaySecret, signedInConfigFrom, signViewerTicket, tightenKeyFile, writeKeyFileAtomic } from "../server/signed-in.ts";
 import { SIGNED_IN_BITWARDEN_FILES, SIGNED_IN_FILES } from "../server/server-browser-files.ts";
 import { checkPlan, launch } from "../server-browser/launch.mjs";
 import {
@@ -2236,7 +2237,9 @@ test("Bitwarden prompt, card and settings: the agent never uses the password man
   assert.match(settings, /never “Never” \(that stores the key on the server's disk/);
   assert.match(settings, /turn off card and identity suggestions in the inline menu/);
   assert.match(settings, /Autofill on page load off/);
-  assert.match(settings, /A plugin update that pins a newer Bitwarden asks you to confirm and download it again; it keeps its extension id/);
+  assert.match(settings, /A plugin update that changes the browser image \(a newer Bitwarden pin, or a change to the signed-in browser itself\) can require downloading Bitwarden again/);
+  assert.match(settings, /so you log in to Bitwarden again afterwards\. Its extension id stays the same/);
+  assert.doesNotMatch(settings, /each build (gets|has) its own extension id|a key made for that build/);
   assert.match(settings, /bitwarden\(\{ action: "lock" \}\)/);
   assert.match(settings, /bitwarden\(\{ action: "restart-browser" \}\)/);
   assert.match(settings, /Update pending: the browser switches when the run ends/);
@@ -2438,3 +2441,283 @@ test("chromium-start.sh: the old store id counts as stale where it left traces, 
   assert.equal(readFileSync(join(clean, "profile", ".bp-bitwarden-ids"), "utf8"), `${current}\n`);
 });
 
+
+test("0.23.1 chromium-start.sh: the installed build's id leaves the shared-databases marker, so its databases are cleared again once it becomes stale", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bp-bw-start4-"));
+  const current = "c".repeat(32);
+  const other = "d".repeat(32);
+  const runStart = () =>
+    spawnSync("sh", ["-c", `sed -e "s|^PROFILE=.*|PROFILE=$T/profile|" -e "s|^PIN=.*|PIN=$T/pin.json|" -e "s|exec /usr/bin/chromium|exec echo|" "$0" | sh`, new URL("../signed-in/chromium-start.sh", import.meta.url).pathname], {
+      env: { PATH: "/usr/bin:/bin", BP_PROXY: "http://bp-si-0a1b2c3d-proxy:3128", T: dir },
+      encoding: "utf8",
+    });
+  const marker = join(dir, "profile", ".bp-bitwarden-dbs-cleared");
+  mkdirSync(join(dir, "profile", "Default", "Extension State"), { recursive: true });
+  writeFileSync(join(dir, "profile", ".bp-bitwarden-ids"), `${current}\n${other}\n`);
+  // The current id was once stale (Bitwarden off, then on again with the same key): the marker still names it.
+  writeFileSync(marker, `${current}\n${other}\n`);
+  writeFileSync(join(dir, "pin.json"), JSON.stringify({ id: current }));
+  let result = runStart();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(marker, "utf8"), `${other}\n`, "the current id is dropped; the stale one stays");
+  assert.equal(existsSync(join(dir, "profile", "Default", "Extension State")), true, "the current build's databases are kept");
+  assert.equal(existsSync(`${marker}.bp-tmp`), false);
+  // Only the current id named: the marker is left empty.
+  writeFileSync(join(dir, "profile", ".bp-bitwarden-ids"), `${current}\n`);
+  writeFileSync(marker, `${current}\n`);
+  assert.equal(runStart().status, 0);
+  assert.equal(readFileSync(marker, "utf8"), "");
+  // Turned off later: the build is stale again and its shared databases are cleared once more.
+  rmSync(join(dir, "pin.json"));
+  result = runStart();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(join(dir, "profile", "Default", "Extension State")), false, "cleared for the newly stale build");
+  assert.equal(readFileSync(marker, "utf8"), `${current}\n`);
+});
+
+test("0.23.1 Bitwarden key file: written atomically (0600 in a 0700 directory, no temp left), permissions tightened again on every start, a symlink refused", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bp-bw-key-"));
+  const file = join(dir, "state", "bitwarden-key.pem");
+  writeKeyFileAtomic(file, "first\n");
+  assert.equal(readFileSync(file, "utf8"), "first\n");
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  assert.equal(statSync(join(dir, "state")).mode & 0o777, 0o700);
+  writeKeyFileAtomic(file, "second\n");
+  assert.equal(readFileSync(file, "utf8"), "second\n", "replaced by rename");
+  assert.deepEqual(readdirSync(join(dir, "state")), ["bitwarden-key.pem"], "no temp file left");
+  chmodSync(file, 0o644);
+  chmodSync(join(dir, "state"), 0o755);
+  tightenKeyFile(file);
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  assert.equal(statSync(join(dir, "state")).mode & 0o777, 0o700);
+  const link = join(dir, "state", "link.pem");
+  symlinkSync(file, link);
+  assert.throws(() => tightenKeyFile(link), /not a regular file/);
+  assert.throws(() => tightenKeyFile(join(dir, "state", "missing.pem")), (error) => error.code === "ENOENT");
+
+  // The daemon: a key made by the consent press, loosened on disk, is 0600 (and its directory 0700) again at the next daemon start.
+  const docker = fakeStackDocker();
+  const consent = { config: async () => ({ port: 5301, httpsBaseUrl: "", bitwarden: true, bitwardenConsent: BITWARDEN.sha256 }) };
+  const helper = makeSignedIn(docker, consent);
+  assert.equal((await helper.si.bitwarden("download")).ok, true);
+  for (let i = 0; i < 100 && (await helper.si.status()).bitwarden.state === "building"; i++) await new Promise((r) => setTimeout(r, 5));
+  const keyFile = join(helper.dir, "bitwarden-key.pem");
+  const id = helper.si.bitwardenId();
+  assert.deepEqual(readdirSync(helper.dir).filter((name) => name.includes("bitwarden-key")), ["bitwarden-key.pem"], "no temp file left");
+  chmodSync(keyFile, 0o644);
+  chmodSync(helper.dir, 0o755);
+  const again = createSignedIn({ serverBrowser: createServerBrowser({ run: docker.run, instanceId: INSTANCE }), run: docker.run, keysFile: join(helper.dir, "keys.json"), bindHost: async () => null, config: consent.config, log: () => {} });
+  assert.equal(again.bitwardenId(), id, "the same key");
+  assert.equal(statSync(keyFile).mode & 0o777, 0o600, "tightened again on start");
+  assert.equal(statSync(helper.dir).mode & 0o777, 0o700);
+});
+
+test("0.23.1 Bitwarden: an unreadable signing key, or any Bitwarden image, never switches a running Bitwarden browser on a guess and keeps the lock on", async () => {
+  const docker = fakeStackDocker();
+  const consent = { config: async () => ({ port: 5301, httpsBaseUrl: "", bitwarden: true, bitwardenConsent: BITWARDEN.sha256 }) };
+  const helper = makeSignedIn(docker, consent);
+  assert.equal((await helper.si.bitwarden("download")).ok, true);
+  for (let i = 0; i < 100 && (await helper.si.status()).bitwarden.state === "building"; i++) await new Promise((r) => setTimeout(r, 5));
+  await helper.si.viewerLink({ purpose: "login", portrait: false });
+  const running = docker.state.nekoImage;
+  assert.match(running, /-bw/);
+  // A fresh daemon (no cached key) whose key file was replaced by a symlink: it cannot use the key.
+  const keyFile = join(helper.dir, "bitwarden-key.pem");
+  const real = join(helper.dir, "elsewhere.pem");
+  writeFileSync(real, readFileSync(keyFile, "utf8"), { mode: 0o600 });
+  rmSync(keyFile);
+  symlinkSync(real, keyFile);
+  const fresh = makeSignedIn(docker, { ...consent, keysFile: join(helper.dir, "keys.json"), bitwardenKeyFile: keyFile });
+  docker.calls.length = 0;
+  await fresh.si.idleCheck();
+  assert.ok(!docker.calls.some((args) => args[0] === "stop" || (args[0] === "run" && /-neko$/.test(value(args, "--name")[0] ?? ""))), "the Bitwarden browser keeps running");
+  assert.equal(docker.state.nekoImage, running);
+  assert.equal((await fresh.si.status()).bitwarden.updatePending, false, "no update pending on a guess");
+  // Any Bitwarden variant counts as Bitwarden (fail closed), also one this daemon would not build now.
+  assert.equal(isBitwardenImageTag(running), true);
+  assert.equal(isBitwardenImageTag("browser-prompt-signed-in:neko3.0.6-aaaaaaaaaaaa-bw2026.10.0-bbbbbbbbbbbb"), true);
+  assert.equal(isBitwardenImageTag(signedInImageTag("0".repeat(64))), false);
+  assert.equal(isBitwardenImageTag("other:x-bw2026.11.0-bbbbbbbbbbbb"), false);
+  const mcp = await fresh.si.mcpServer("run-x");
+  const plan = JSON.parse(Buffer.from(mcp.server.args[1], "base64").toString("utf8"));
+  assert.ok(value(plan.agent.run, "--env").includes("BP_CONTROL_FAIL_CLOSED=1"), "the run's takeover guard fails closed while a Bitwarden image runs, key or not");
+});
+
+test("0.23.1 settings: not ready, invalid, a failed read or a non-boolean Bitwarden value are unknown (keep); only an explicit false is off", async () => {
+  const defaults = { port: DEFAULT_SIGNED_IN_PORT, validHttpsBase: (base) => base.startsWith("https://") };
+  const unknown = { port: DEFAULT_SIGNED_IN_PORT, httpsBaseUrl: "", bitwarden: undefined, bitwardenConsent: "" };
+  assert.deepEqual(signedInConfigFrom(null, defaults), unknown, "the read threw");
+  assert.deepEqual(signedInConfigFrom({ status: "invalid" }, defaults), unknown);
+  assert.deepEqual(signedInConfigFrom({ status: "loading", values: { bitwarden: false } }, defaults), unknown, "not ready: never an off");
+  assert.equal(signedInConfigFrom({ status: "ready", values: { port: 5301, httpsBaseUrl: "", bitwarden: "no", bitwardenConsent: "" } }, defaults).bitwarden, undefined);
+  assert.equal(signedInConfigFrom({ status: "ready", values: { port: 5301, httpsBaseUrl: "", bitwardenConsent: "" } }, defaults).bitwarden, undefined);
+  assert.deepEqual(signedInConfigFrom({ status: "ready", values: { port: 5301, httpsBaseUrl: " https://x.ts.net ", bitwarden: false, bitwardenConsent: "" } }, defaults), { port: 5301, httpsBaseUrl: "https://x.ts.net", bitwarden: false, bitwardenConsent: "" });
+  assert.equal(signedInConfigFrom({ status: "ready", values: { port: 5301, httpsBaseUrl: "http://x", bitwarden: true, bitwardenConsent: BITWARDEN.sha256 } }, defaults).httpsBaseUrl, "");
+  assert.equal(signedInConfigFrom({ status: "ready", values: { port: 5301, httpsBaseUrl: "", bitwarden: true, bitwardenConsent: BITWARDEN.sha256 } }, defaults).bitwarden, true);
+  // The plugin entry uses it for the daemon's settings.
+  const entry = readFileSync(new URL("../index.server.ts", import.meta.url), "utf8");
+  assert.match(entry, /config: async \(\) => signedInConfigFrom\(await signedInConfig\.read\(\)\.catch\(\(\) => null\)/);
+
+  // A transient failed read while the Bitwarden browser runs: idle checks keep it (no stop, no new image, no wipe).
+  const docker = fakeStackDocker();
+  let config = { port: 5301, httpsBaseUrl: "", bitwarden: true, bitwardenConsent: BITWARDEN.sha256 };
+  const { si } = makeSignedIn(docker, { config: async () => config });
+  assert.equal((await si.bitwarden("download")).ok, true);
+  for (let i = 0; i < 100 && (await si.status()).bitwarden.state === "building"; i++) await new Promise((r) => setTimeout(r, 5));
+  await si.viewerLink({ purpose: "login", portrait: false });
+  const running = docker.state.nekoImage;
+  assert.match(running, /-bw/);
+  config = signedInConfigFrom(null, defaults);
+  docker.calls.length = 0;
+  await si.idleCheck();
+  assert.ok(!docker.calls.some((args) => args[0] === "stop" || args[0] === "rm" || (args[0] === "run" && /-neko$/.test(value(args, "--name")[0] ?? ""))), "kept as it runs");
+  assert.equal(docker.state.nekoImage, running);
+  assert.equal((await si.bitwarden("apply")).ok, true);
+  // An explicit off does switch (once nothing holds it).
+  config = { port: 5301, httpsBaseUrl: "", bitwarden: false, bitwardenConsent: BITWARDEN.sha256 };
+  await si.viewerLink({ purpose: "login", portrait: false });
+  assert.doesNotMatch(docker.state.nekoImage, /-bw/, "off: the plain image");
+});
+
+/** A signed-in daemon with Bitwarden built and running, and a relay whose answers the test sets. */
+async function bitwardenLockRig() {
+  const docker = fakeStackDocker();
+  const relay = { lockPending: false, lockGeneration: 1, viewers: 0, ownerControl: false, idleMs: 60_000, bootId: "boot-1" };
+  let relayUp = true;
+  const lockedCalls = [];
+  const failedCalls = [];
+  const helper = makeSignedIn(docker, {
+    config: async () => ({ port: 5301, httpsBaseUrl: "", bitwarden: true, bitwardenConsent: BITWARDEN.sha256 }),
+    relayStatus: async () => (relayUp ? { nekoUp: true, portrait: false, ...relay } : null),
+    relayLocked: async (_h, _p, _t, generation) => {
+      lockedCalls.push(generation);
+      return true;
+    },
+    relayLockFailed: async (_h, _p, _t, generation) => {
+      failedCalls.push(generation);
+      return true;
+    },
+  });
+  assert.equal((await helper.si.bitwarden("download")).ok, true);
+  for (let i = 0; i < 100 && (await helper.si.status()).bitwarden.state === "building"; i++) await new Promise((r) => setTimeout(r, 5));
+  await helper.si.viewerLink({ purpose: "login", portrait: false });
+  docker.state.bitwardenId = "m".repeat(32);
+  docker.state.tools = [];
+  return { docker, relay, setRelayUp: (up) => (relayUp = up), lockedCalls, failedCalls, ...helper };
+}
+const NEVER_LOCKS = (mode) => (mode === "restart" ? { restarted: true } : { locked: false, statuses: [{ status: 2 }], detail: "" });
+
+test("0.23.1 Bitwarden lock backoff: forgotten once nothing is pending and after a relay restart, so an old pause never delays a needed lock", async () => {
+  const rig = await bitwardenLockRig();
+  const { si, docker, relay } = rig;
+  // A failed round (a viewer connected, so no restart): a 15 s pause follows.
+  relay.lockPending = true;
+  relay.lockGeneration = 3;
+  relay.viewers = 1;
+  docker.state.tool = NEVER_LOCKS;
+  assert.equal(await si.lockCheck(), false);
+  assert.equal((await si.status()).bitwarden.lastLock.failures, 1);
+  docker.state.tools = [];
+  assert.equal(await si.lockCheck(), false);
+  assert.equal(docker.state.tools.length, 0, "paused");
+  // The vault got locked otherwise (nothing pending any more): the pause and the count are forgotten.
+  relay.lockPending = false;
+  assert.equal(await si.lockCheck(), false);
+  relay.lockPending = true;
+  assert.equal(await si.lockCheck(), false);
+  assert.ok(docker.state.tools.length > 0, "tried right away, not after the old pause");
+  assert.equal((await si.status()).bitwarden.lastLock.failures, 1, "counted from the start again");
+  // Fails again (pause). The relay starts again: its generations count from 1 again, the pause is forgotten.
+  relay.lockGeneration = 1;
+  rig.advance(16_000);
+  assert.equal(await si.lockCheck(), false);
+  assert.equal((await si.status()).bitwarden.lastLock.failures, 2);
+  docker.state.tools = [];
+  assert.equal(await si.lockCheck(), false);
+  assert.equal(docker.state.tools.length, 0, "paused (same relay, same generation)");
+  relay.bootId = "boot-2";
+  relay.viewers = 0;
+  docker.state.tool = () => ({ locked: true });
+  assert.equal(await si.lockCheck(), true, "a new relay's round is locked right away");
+  assert.deepEqual(docker.state.tools.map((t) => t.mode), ["lock"]);
+  assert.deepEqual(rig.lockedCalls, [1]);
+  assert.equal((await si.status()).bitwarden.lastLock.failures, 0);
+});
+
+test("0.23.1 Bitwarden lock: the browser restart is decided after the verification failed, against the relay then; never with a viewer, control, or a new round meanwhile", async () => {
+  const rig = await bitwardenLockRig();
+  const { si, docker, relay } = rig;
+  relay.lockPending = true;
+  const modes = () => docker.state.tools.map((t) => t.mode);
+  const round = async (generation, during) => {
+    relay.lockGeneration = generation;
+    relay.viewers = 0;
+    relay.ownerControl = false;
+    relay.idleMs = 60_000;
+    docker.state.tools = [];
+    let calls = 0;
+    docker.state.tool = (mode, ids) => {
+      // The last verification call (the third reload): the world changes before the restart decision.
+      if (mode === "reload" && ++calls === 3) during?.();
+      return NEVER_LOCKS(mode, ids);
+    };
+    assert.equal(await si.lockCheck(), false);
+    rig.advance(10 * 60_000);
+    return (await si.status()).bitwarden.lastLock.detail;
+  };
+  const verify = ["lock", "reload", "lock", "reload", "lock", "reload"];
+  // No viewer at the start, one connects while verifying: no restart.
+  let detail = await round(10, () => (relay.viewers = 1));
+  assert.deepEqual(modes(), verify);
+  assert.match(detail, /not restarted while a viewer is connected/);
+  // The owner takes control while verifying: no restart.
+  detail = await round(11, () => (relay.ownerControl = true));
+  assert.deepEqual(modes(), verify);
+  assert.match(detail, /not restarted while you hold control/);
+  // A takeover began and ended while verifying (a new generation): no restart for the old one.
+  detail = await round(12, () => (relay.lockGeneration = 13));
+  assert.deepEqual(modes(), verify);
+  assert.match(detail, /takeover began or ended meanwhile/);
+  // The relay started again while verifying: no restart.
+  detail = await round(14, () => (relay.bootId = "boot-3"));
+  assert.deepEqual(modes(), verify);
+  // A viewer was used while verifying (the relay's last viewer activity is newer than the start).
+  detail = await round(15, () => {
+    rig.advance(30_000);
+    relay.idleMs = 1000;
+  });
+  assert.deepEqual(modes(), verify);
+  assert.match(detail, /viewer was used meanwhile/);
+  // The relay stops answering while verifying: it cannot tell, no restart (fail closed: the run stays paused).
+  detail = await round(16, () => rig.setRelayUp(false));
+  assert.deepEqual(modes(), verify);
+  assert.match(detail, /relay does not answer/);
+  rig.setRelayUp(true);
+  // A viewer at the start that is gone (same generation, no use meanwhile): the restart happens now.
+  relay.viewers = 1;
+  detail = await round(17, () => (relay.viewers = 0));
+  assert.deepEqual(modes(), [...verify, "restart", "status"]);
+  // Nothing changed: restart.
+  detail = await round(18);
+  assert.deepEqual(modes(), [...verify, "restart", "status"]);
+  assert.deepEqual(rig.lockedCalls, [], "never confirmed: the run stays paused (fail closed)");
+  assert.deepEqual(rig.failedCalls, [10, 11, 12, 14, 15, 16, 17, 18]);
+});
+
+test("0.23.1 relay: /bp/status names its start (bootId), new on every relay start", async () => {
+  const neko = await fakeNeko();
+  const a = await relayFor(neko, { log: () => {}, lockOnRelease: true });
+  const b = await relayFor(neko, { log: () => {}, lockOnRelease: true });
+  try {
+    const status = async (relay) => JSON.parse((await http(relay.port, "GET", "/bp/status", { ...HOST, Authorization: `Bearer ${STATUS}` })).body);
+    const first = await status(a);
+    assert.match(first.bootId, /^[0-9a-f]{16}$/);
+    assert.equal((await status(a)).bootId, first.bootId);
+    assert.notEqual((await status(b)).bootId, first.bootId);
+    assert.equal(a.state().bootId, first.bootId);
+  } finally {
+    await a.close();
+    await b.close();
+    await neko.close();
+  }
+});
