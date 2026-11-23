@@ -390,7 +390,12 @@ export function createSignedIn(options: SignedInOptions) {
       if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
       pem = null;
     }
-    if (!pem) {
+    // Only a missing file means "no key yet". An empty or truncated one is an error, never a reason
+    // to make a new key (a new id would remove Bitwarden's data): the callers keep what runs.
+    if (pem !== null && !/^-----BEGIN PRIVATE KEY-----\r?\n[\s\S]+\r?\n-----END PRIVATE KEY-----\s*$/.test(pem)) {
+      throw new Error(`the Bitwarden signing key file is empty or not a PEM key (${bitwardenKeyFile}); restore it, or remove it to make a new key (Bitwarden's local data is then removed)`);
+    }
+    if (pem === null) {
       if (!create) return null;
       const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "der" } });
       writeKeyFileAtomic(bitwardenKeyFile, privateKey);
@@ -1095,7 +1100,8 @@ export function createSignedIn(options: SignedInOptions) {
       }
       if (now() - relayDownLockAt < 15_000) return false;
       relayDownLockAt = now();
-      if (!isBitwardenImage(await runningNekoImage()) || (await holders().catch(() => 1)) === 0) return false;
+      // An image that cannot be read counts as possibly Bitwarden: try to lock.
+      if ((await definitelyNoBitwarden()) || (await holders().catch(() => 1)) === 0) return false;
       log("the relay does not answer while a run uses Bitwarden's browser: locking the vault");
       // Without the relay no viewer can be connected (restartBlocked asks it again before a restart).
       await verifiedLock(null);

@@ -14,7 +14,8 @@ Follow-ups from the reviews of the Bitwarden work (0.23.0). Fail closed on lock,
   `bootId`), so an old pause never delays a lock that is needed now.
 - **Signing key file:** written atomically (a new 0600 file in the same directory, flushed, renamed,
   the directory flushed; the temp file removed on any failure), read through `O_NOFOLLOW` descriptors
-  (fstat, fchmod: no check-then-read race; a symlinked directory or key is refused),
+  (fstat, fchmod: no check-then-read race; a symlinked directory or key is refused; an empty or
+  truncated key is an error, never a reason to make a new key and id),
   and the file (0600) and its directory (0700) are tightened again on every daemon start, not only
   when the key is made. A key that is not a regular file of the daemon user is refused; then, like an
   unreadable key, the browser keeps the image it runs (no switch to "no Bitwarden" on a guess).
@@ -25,7 +26,8 @@ Follow-ups from the reviews of the Bitwarden work (0.23.0). Fail closed on lock,
   pin file with a probe that reports "no pin file" itself. A docker exec error, a timeout or an
   unparseable pin keeps the run paused ("cannot read the Bitwarden pin; staying paused") unless the
   running image is certainly a plain one, and the cleanup of earlier builds then clears nothing (it
-  used to clear the current build's data too).
+  used to clear the current build's data too). With the relay down, an image name that cannot be
+  read counts as possibly Bitwarden (the vault is locked).
 - **Any Bitwarden image fails closed:** a Bitwarden variant that this daemon would not build now (an
   older one still running after a plugin update) still gets a relay that locks on release, the lock
   while the relay is down, and a fail-closed run guard; the owner's consent alone also makes the run

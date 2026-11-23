@@ -929,6 +929,7 @@ function fakeStackDocker({ serverImage = true, nekoImage = true } = {}) {
       if (tag) state.relayTag = tag.split("=")[1];
       return ok("cid");
     }
+    if (sub === "inspect" && args[2] === "{{.Config.Image}}" && state.inspectFails) return { code: 1, stdout: "", stderr: "Error response from daemon: timeout" };
     if (sub === "inspect" && args[2] === "{{.Config.Image}}") return ok(/-neko$/.test(args[3]) && state.containers.has(args[3]) ? `${state.nekoImage}\n` : "");
     if (sub === "inspect") return args[2].includes("IPAddress") ? ok("172.30.0.2\n") : ok(state.relayTag ?? "");
     if (sub === "stop") return ok();
@@ -2819,4 +2820,50 @@ test("0.23.1 Bitwarden: the owner's consent alone makes the run's takeover guard
   await plain.si.viewerLink({ purpose: "login", portrait: false });
   const open = JSON.parse(Buffer.from((await plain.si.mcpServer("run-z")).server.args[1], "base64").toString("utf8"));
   assert.ok(!value(open.agent.run, "--env").includes("BP_CONTROL_FAIL_CLOSED=1"), "without Bitwarden: as before");
+});
+
+test("0.23.1 Bitwarden lock with the relay down: an image name that cannot be read counts as possibly Bitwarden (the vault is locked)", async () => {
+  const rig = await bitwardenLockRig();
+  const { si, docker } = rig;
+  rig.setRelayUp(false);
+  docker.state.agents.push({ id: "abcdef000009", agent: "run-q" });
+  docker.state.inspectFails = true;
+  assert.equal(await si.lockCheck(), false);
+  assert.deepEqual(docker.state.tools.map((t) => t.mode), ["lock"], "locked although docker inspect failed");
+  // A plain image, read: nothing to lock.
+  docker.state.inspectFails = false;
+  docker.state.nekoImage = signedInImageTag("0".repeat(64));
+  docker.state.tools = [];
+  rig.advance(16_000);
+  assert.equal(await si.lockCheck(), false);
+  assert.deepEqual(docker.state.tools, []);
+});
+
+test("0.23.1 Bitwarden key: an empty or truncated key file is an error, never a reason to make a new key (no new id, the running browser kept)", async () => {
+  for (const broken of ["", "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC"]) {
+    const docker = fakeStackDocker();
+    const consent = { config: async () => ({ port: 5301, httpsBaseUrl: "", bitwarden: true, bitwardenConsent: BITWARDEN.sha256 }) };
+    const helper = makeSignedIn(docker, consent);
+    assert.equal((await helper.si.bitwarden("download")).ok, true);
+    for (let i = 0; i < 100 && (await helper.si.status()).bitwarden.state === "building"; i++) await new Promise((r) => setTimeout(r, 5));
+    await helper.si.viewerLink({ purpose: "login", portrait: false });
+    const running = docker.state.nekoImage;
+    assert.match(running, /-bw/);
+    const keyFile = join(helper.dir, "bitwarden-key.pem");
+    writeFileSync(keyFile, broken, { mode: 0o600 });
+    const fresh = makeSignedIn(docker, { ...consent, keysFile: join(helper.dir, "keys.json"), bitwardenKeyFile: keyFile, buildRoot: join(helper.dir, "build") });
+    assert.equal(fresh.si.bitwardenImage(), null);
+    assert.throws(() => fresh.si.bitwardenId(), /empty or not a PEM key/);
+    docker.calls.length = 0;
+    await fresh.si.idleCheck();
+    assert.ok(!docker.calls.some((args) => args[0] === "stop" || (args[0] === "run" && /-neko$/.test(value(args, "--name")[0] ?? ""))), "the Bitwarden browser keeps running");
+    assert.equal(docker.state.nekoImage, running);
+    // A download press does not make a new key over it either.
+    assert.equal((await fresh.si.bitwarden("download")).ok, true);
+    for (let i = 0; i < 100 && (await fresh.si.status()).bitwarden.state === "building"; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(readFileSync(keyFile, "utf8"), broken, "the key file is left as it is");
+    const bw = (await fresh.si.status()).bitwarden;
+    assert.equal(bw.state, "build-failed");
+    assert.match(bw.detail, /empty or not a PEM key/);
+  }
 });
