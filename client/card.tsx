@@ -808,12 +808,14 @@ export function BrowserPromptCard({
       // Recorded on the run, so the card shows it stopped after a reload and on other devices.
       // The card keeps showing it stopped in this session; if the mark is not saved, say so.
       const unsaved = (reason?: unknown) => {
-        console.warn(`[browser-prompt] could not record the stop of run ${stopped} on the card${reason instanceof Error ? ` (${reason.message})` : ""}`);
+        console.warn(`[browser-prompt] could not record the stop of run ${stopped} on the card${reason === undefined ? "" : ` (${reason instanceof Error ? reason.message : String(reason)})`}`);
         toast.show("Run stopped, but the card could not save that. After a reload it may show the run as still going.", { durationMs: 5000 });
       };
-      saveWithRetries(newestSettings, (values) => ({ ...values, runs: markRunStopped(values.runs, stopped) })).then((saved) => {
-        if (!saved) unsaved();
-      }, unsaved);
+      saveWithRetries(newestSettings, (values) => ({ ...values, runs: markRunStopped(values.runs, stopped) }))
+        .then((saved) => {
+          if (!saved) unsaved();
+        }, unsaved)
+        .catch((error: unknown) => console.warn(`[browser-prompt] could not show the notice that the stop of run ${stopped} was not saved (${String(error)})`));
       toast.show("Run stopped. The agent is archived; its history stays in Paseo.", { durationMs: 3500 });
     } catch (error) {
       toast.error(`Could not stop the run: ${error instanceof Error ? error.message : String(error)}. Stop it in Paseo.`);

@@ -1076,16 +1076,30 @@ test("daemon: a stale close of an older signed-in session leaves the new session
   const admitted = si.admission("run-a");
   assert.equal(admitted.session, mcp.session, "the admission names its session");
   // A close seen before this admission is about an older session: the browser stays held.
-  si.release("run-a", admitted.at - 1);
+  si.release("run-a", admitted.seq - 1);
   assert.deepEqual(await si.prepare({ sourceId: "s", cardId: "c" }), { ok: false, state: "busy", detail: "" }, "still held");
   // One seen at or after it releases, and so does a call without a time.
-  si.release("run-a", admitted.at);
+  si.release("run-a", admitted.seq);
   const again = await si.prepare({ sourceId: "s", cardId: "c" });
   assert.equal(again.ok, true);
   assert.equal(si.consumeTicket(again.ticket, { sourceId: "s", cardId: "c" }), true);
   assert.ok("server" in (await si.mcpServer("run-a")));
   si.release("run-a");
   assert.equal((await si.prepare({ sourceId: "s", cardId: "c" })).ok, true);
+});
+
+test("daemon: an admission whose setup throws is dropped, and a failed second call does not touch the first's session", async () => {
+  const docker = fakeStackDocker();
+  let failConfig = false;
+  const { si } = makeSignedIn(docker, { config: async () => { if (failConfig) throw new Error("config unreadable"); return { port: 5301, httpsBaseUrl: "", bitwarden: false }; } });
+  const first = await si.prepare({ sourceId: "s", cardId: "c" });
+  assert.equal(si.consumeTicket(first.ticket, { sourceId: "s", cardId: "c" }), true);
+  const ok = await si.mcpServer("run-a");
+  assert.ok("server" in ok);
+  assert.equal(si.admission("run-a").session, ok.session);
+  failConfig = true;
+  await assert.rejects(si.mcpServer("run-a"), /config unreadable/);
+  assert.equal(si.admission("run-a"), undefined, "the failed call's admission is dropped, not given the first session's name");
 });
 
 test("daemon: stop keeps the profile, log out removes it and the keys; rotate restarts only the relay", async () => {

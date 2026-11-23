@@ -9,7 +9,8 @@ Follow-ups from the review of the redesigned card (0.24.0).
   for the same run, dropping its slot (the Server browser cap and the signed-in browser's one run at
   a time were briefly bypassable) and removing its containers. The hook now ignores an event about an
   agent the daemon shows as live again, keeps the slot of a run admitted after the event was seen,
-  and removes only the older sessions' containers (the new session is kept).
+  and removes only the older sessions' containers (the new session is kept). The status read is made
+  only for runs this plugin has a browser for, with a 5 s limit.
 - **Stop** keeps the card showing the run stopped even if saving that mark fails; it then logs a
   warning and says so in a short notice (after a reload the card may show the run as going).
 - The README screenshots and tour were re-recorded for the redesigned card.
