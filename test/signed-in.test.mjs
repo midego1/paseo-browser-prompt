@@ -1054,6 +1054,18 @@ test("daemon: a viewer link starts the stack in order with checked arguments; on
   assert.equal((await si.status()).busy, true);
 });
 
+test("daemon: a signed-in run stopped before its MCP container came up frees the browser for Run again", async () => {
+  const docker = fakeStackDocker();
+  const { si } = makeSignedIn(docker);
+  const first = await si.prepare({ sourceId: "s", cardId: "c" });
+  assert.equal(first.ok, true);
+  assert.equal(si.consumeTicket(first.ticket, { sourceId: "s", cardId: "c" }), true);
+  assert.ok("server" in (await si.mcpServer("run-a")));
+  assert.deepEqual(await si.prepare({ sourceId: "s", cardId: "c" }), { ok: false, state: "busy", detail: "" }, "admitted, not up yet: busy");
+  si.release("run-a");
+  assert.equal((await si.prepare({ sourceId: "s", cardId: "c" })).ok, true, "stopped within the window: Run again is not refused");
+});
+
 test("daemon: stop keeps the profile, log out removes it and the keys; rotate restarts only the relay", async () => {
   const docker = fakeStackDocker();
   const { si, dir } = makeSignedIn(docker);
@@ -1415,7 +1427,9 @@ test("card and settings: Take over opens a one-time link from the daemon, and do
   const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
   assert.match(card, /viewerLink\(\{ purpose: "takeover", portrait: mobile \}\)/);
   assert.match(card, /await openExternalUrl\(link\.url\);/);
-  assert.match(card, /runBrowser === "signed-in" && \(active \|\| runState === "needs-input" \|\| shownState === "asking"\)/);
+  // Watch on a signed-in run opens the same viewer (Take over) while the run is going or waits.
+  assert.match(card, /const watchesViewer = runBrowser === "signed-in";/);
+  assert.match(card, /onPress=\{\(\) => \(watchesViewer \? void takeOver\(\) : openAgent\(\)\)\}/);
   assert.match(card, /prepareSignedIn\(\{ sourceAgentId: agentId, cardId \}\), SIGNED_IN_RPC_TIMEOUT_MS/);
   assert.doesNotMatch(card, /signedInStatus\(\{ build: true \}\)|signedInState\(\{ build: true \}\)/, "the card never builds");
   const settings = readFileSync(new URL("../client/signed-in-settings.tsx", import.meta.url), "utf8");

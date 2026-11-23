@@ -82,7 +82,10 @@ try {
   film.mark("run");
   await caption("Run them with a Paseo agent, in the background");
   await pause(600);
-  await pointTo(page.getByRole("button", { name: /Run .* in the Paseo browser/ }), { click: true });
+  // Since 0.24 the Paseo browser is a "Run once in…" row (unless it is the Run default).
+  await pointTo(page.getByRole("button", { name: "Run once in another browser" }), { click: true });
+  await pause(500);
+  await pointTo(page.getByRole("menuitem", { name: /Run .* in the Paseo browser/ }), { click: true });
   await page.getByRole("button", { name: "Start the Paseo agent" }).waitFor();
   await pause(1300);
   await pointTo(page.getByRole("button", { name: "Start the Paseo agent" }), { click: true });

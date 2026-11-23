@@ -23,8 +23,11 @@ export const DEFAULT_AGENT_SETTINGS = {
   showStepProgress: true,
   /** Ask the run for a viewport screenshot after each step, and show them as card thumbnails. */
   showLiveScreenshot: true,
-  /** Thumbnails on the card: one per step ("all") or only the newest ("latest"). */
-  thumbnailMode: "all",
+  /**
+   * Thumbnails on the card: only the newest ("latest", the default since 0.24.0) or one per step
+   * ("all", under Advanced). A saved choice is kept.
+   */
+  thumbnailMode: "latest",
   /** After a fully successful run, the agent closes the browser tabs it opened itself. */
   closeTabsOnSuccess: true,
   /** After a fully successful run, the plugin archives the agent once its report went out. */

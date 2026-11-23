@@ -39,7 +39,7 @@ test("package files exist and the descriptions name every way to start", async (
   }
 });
 
-test("OVERVIEW.md describes the 0.20 card and settings", () => {
+test("OVERVIEW.md describes the 0.24 card and settings", () => {
   const overview = readFileSync(new URL("../OVERVIEW.md", import.meta.url), "utf8");
   assert.doesNotMatch(overview.split("\n")[0], /Chrome extension/, "ChatGPT has no extension button since 0.20");
   assert.doesNotMatch(overview, /\*\*Chrome\*\* button|ChatGPT app button/);

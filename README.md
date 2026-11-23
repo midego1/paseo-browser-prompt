@@ -1,23 +1,24 @@
 # Browser prompt for Paseo
 
 A [Paseo](https://paseo.sh) plugin that turns every `browser-prompt` block in an assistant message
-into a card with a button for each way to run the steps, in three groups, each with its mark:
+into a card. The card reads top to bottom: the title (the gear opens the settings), the steps, what
+is happening, and a quiet last row. One button is filled at a time: **Run**, or **Take over the
+browser** when a signed-in run needs you.
 
 | Button | What it does |
 | --- | --- |
-| Paseo › **Paseo browser** | Starts a Paseo agent that works in the browser tabs of your Paseo desktop app, with step progress and a screenshot per step on the card. |
-| Paseo › **Server browser** | Starts a Paseo agent with its own headless Chromium in a throwaway Docker container on the Paseo server: no desktop app needed (also on phones), but not signed in to any of your accounts, and tailnet and private addresses are blocked. For public pages and checks. See [Server browser](#server-browser). |
-| Paseo › **Server (signed in)** | Starts a Paseo agent in your own persistent, signed-in Chromium on the Paseo server. You log in to sites there once (2FA included) and can watch and **Take over** a run live from your phone or any device on your tailnet: no Mac needed. One run at a time; tailnet and private addresses stay blocked. See [Signed-in Server browser](#signed-in-server-browser). |
-| ChatGPT › **Desktop** | Opens the ChatGPT desktop app with the steps in a new chat, asking ChatGPT to use its own computer use (`@Computer`). You press send. Desktop only. |
-| ChatGPT › **Web** | Opens chatgpt.com in agent mode, with the steps in the URL when they are short and look secret-free. |
-| Claude › **Desktop** | Opens the Claude desktop app with the steps in a new chat (`claude://claude.ai/new?q=…`), asking Claude to use Claude in Chrome. You press send. Desktop only. |
-| Claude › **Chrome tab** | Starts a Paseo agent that works in a tab of your real Chrome through the Claude in Chrome extension, with every account you are signed in to. No screenshots on the card. |
-| **Copy** | Copies the steps. |
-| **Mark done** | Marks the card done on this host; **Undo done** reverts it. |
+| **Run** | Starts a Paseo agent in your default browser, named under the button (**Paseo browser** unless you choose another under Settings › Run or had a browser as your usual way before 0.24; the signed-in Server browser only when you choose it). With step progress and the latest screenshot on the card. |
+| **Run once in…** (Run's chevron) | Every browser, for one run; the default stays. **Server browser · signed in**: your own persistent, signed-in Chromium on the Paseo server; you log in to sites there once (2FA included) and can watch and take over a run live from your phone or any device on your tailnet; one run at a time. See [Signed-in Server browser](#signed-in-server-browser). **Server browser · clean**: its own headless Chromium in a throwaway Docker container on the Paseo server, signed in to nothing; for public pages and checks. See [Server browser](#server-browser). **Paseo browser**: the browser tabs of your Paseo desktop app (the app must be open). **Claude in Chrome tab** (with a Claude provider): a tab of your real Chrome through the Claude in Chrome extension, with every account you are signed in to; no screenshots on the card. Tailnet and private addresses stay blocked for both Server browsers. **Change the default…** opens the settings. |
+| **Send to ChatGPT** | Opens the ChatGPT desktop app with the steps in a new chat, asking ChatGPT to use its own computer use (`@Computer`), or chatgpt.com in agent mode (steps in the URL when short and secret-free), or only copies, as set under Settings › Send to. You press send. |
+| **Send to Claude** | Opens the Claude desktop app with the steps in a new chat (`claude://claude.ai/new?q=…`), asking Claude to use Claude in Chrome, or only copies. You press send. Not on phones or tablets (no Claude app link there). |
+| **Watch**, **Stop** | While a run is going. Watch opens the agent's view, or the signed-in browser's live viewer for a signed-in run. Stop asks for a second press, then stops the run by archiving its agent (its history stays in Paseo). |
+| **Copy steps** | Copies the steps. |
+| **Mark done** | Marks the card done on this host; **Not done** reverts it. |
 
-Your **Usual way to start** is highlighted. With a run on the card the agent buttons say "Again: …",
-and the status line names the browser the run uses. The gear in the card's header opens these
-settings.
+On a phone, Run takes the full width and the Send buttons share the next row ("Send to [ChatGPT]").
+The Send buttons hide while a run is going and in a done card, which folds to a summary line with
+**Run again** until you press **Show steps**. A sent prompt does not report back, so the card
+reminds you to mark it done.
 
 **Claude in Chrome** needs Chrome open with the extension signed in to the agent's Claude account. It
 follows Permission mode, so Auto by default: a model classifier approves browser actions and the
@@ -44,14 +45,15 @@ provider**:
 }
 ```
 
-- **Paseo browser**, **Server browser** and **Claude in Chrome** start a browser agent in the background (Claude Auto mode by default,
-  with a fixed safety preamble). The card shows "Step N of M", a screenshot per step, and the run's
-  state; questions and permissions for you are answered right on the card.
+- **Run** (and every **Run once in…** row) starts a browser agent in the background (Claude Auto
+  mode by default, with a fixed safety preamble). The card shows "Step N of M" with one bar segment
+  per step, the latest screenshot, and the run's state; questions and permissions for you are
+  answered right on the card.
 - The browser agent can ask the chat that showed the card about the task (**Talk to the chat**), and
   tells that chat when it finishes or fails (**Report back to chat**: the full report to chats in an
   ask-first mode, a status-only notice otherwise).
 - A block the agent repeats later in the chat is a full card that shares the first's done mark and
-  run; once done, later copies collapse to "✓ Already done · Show".
+  run; once done, later copies collapse to "Already done · Show".
 - No auto-update without your consent: it is off until you enable it for the named repository.
 
 [![Browser prompt tour: a card in the chat, a background Paseo agent with step progress and a screenshot per step, a question to the chat, a question and a permission answered on the card, the report coming back, and the settings](docs/assets/browser-prompt-tour.gif)](docs/assets/browser-prompt-tour.mp4)
@@ -70,16 +72,17 @@ screenshots (real example.com and iana.org pages) are demo stand-ins; see
 [how they are made](scripts/demo/README.md). The settings named here are under Settings → Plugins →
 Browser prompts.
 
-**1. The card.** Every `browser-prompt` block in an agent's reply becomes a card with a button for
-each way to run it (see the table above). The agent buttons ask first when **Confirm before
-starting** is on.
+**1. The card.** Every `browser-prompt` block in an agent's reply becomes a card with Run, Send to
+ChatGPT and Send to Claude (see the table above). Run and the Run once in… rows ask first when
+**Confirm before running** is on.
 
-![The card in 0.19: ChatGPT with Desktop, Web and Extension; Claude with Paseo browser and Chrome; copy and done icons. Since 0.20 the groups are Paseo, ChatGPT (Desktop, Web) and Claude (Desktop, Chrome tab)](docs/screenshots/card.png)
+![The card before 0.24, with a button per way in three groups; since 0.24 it has Run with Run once in…, Send to ChatGPT and Send to Claude, and a quiet row with Copy steps and Mark done (screenshot to be refreshed)](docs/screenshots/card.png)
 
 **2. Running in the background.** The agent works in the background and the card shows its state
-with an Open link (**Open the agent when started** opens it right away instead). "Step N of M" and
-the bar follow the agent's step lines (**Show step progress**), and a screenshot per step appears
-under it with its step number, the latest highlighted (**Show live screenshot**, **Thumbnails**).
+with **Watch** and **Stop** (**Open the agent when started** opens it right away instead). "Step N of
+M" and the bar, one segment per step, follow the agent's step lines (**Show step progress**), and the
+latest screenshot appears with its step number, beside the status in a wide card and below it on a
+phone (**Show live screenshot**; **Thumbnails** under Advanced shows one per step instead).
 A small line under the progress shows the run time since it started (counting up with a spinning
 icon while it runs, the total once it ended) and, once a turn has finished, that turn's tokens, for
 example "Took 3m 02s · last turn: 36 in · 701k cached · 4.6k out".
@@ -97,7 +100,8 @@ the chat per run**). Secrets and risky approvals are never asked of the chat.
 
 ![Waiting for the chat's answer, and the forwarded question in the chat](docs/screenshots/asking.png)
 
-**4. The agent needs you.** A question for you or a permission request appears on the card. Tap an
+**4. The agent needs you.** A question for you or a permission request appears in an amber panel on
+the card, with **Take over the browser** at the top for a signed-in run. Tap an
 option and press **Send answer**. A permission shows exactly what it would allow (typed text masked
 until you tap Show) and needs **Confirm allow**; when the card cannot show all of it, it offers only
 Deny and Open run. **Permission mode** decides how often the agent asks.
@@ -106,7 +110,7 @@ Deny and Open run. **Permission mode** decides how often the agent asks.
 
 ![A permission request: Browser navigate with its URL, and Confirm allow](docs/screenshots/needs-you-permission.png)
 
-**5. Done, and the report.** The card shows done ✓, and the chat gets the run's report as untrusted
+**5. Done, and the report.** The card folds to "Done" with Run again (Show steps opens it), and the chat gets the run's report as untrusted
 data (**Report back to chat**: Auto sends the full report to a chat in an ask-first mode and a
 status-only notice otherwise).
 
@@ -115,14 +119,14 @@ status-only notice otherwise).
 **6. Repeated blocks.** When the agent writes the same steps again later in the chat (for example
 when you ask for them again), the copy is a full card with "Also shown earlier in this chat"; it
 shares the first's done mark and run, and does not start a second run while one is going. Once the
-steps are done, later copies collapse to "✓ Already done · Show", and Show opens the card in place
+steps are done, later copies collapse to "Already done · Show", and Show opens the card in place
 (**Collapse repeated blocks that are done**).
 
-![A copy of a done block opened with Show, with "Also shown earlier in this chat", above another copy collapsed to "✓ Already done · Show"](docs/screenshots/repeat-done.png)
+![A copy of a done block opened with Show, with "Also shown earlier in this chat", above another copy collapsed to "Already done · Show"](docs/screenshots/repeat-done.png)
 
 **7. Settings.** Each behavior above is a setting (see [Settings](#settings) for the full list).
 
-![Settings: Usual way to start, the deep link, Collapse repeated blocks that are done, and Done marks](docs/screenshots/settings-general.png)
+![Settings before 0.24 (to be refreshed): since 0.24 the page has Run, Send to and Signed-in Server browser, with everything else under Advanced](docs/screenshots/settings-general.png)
 
 ![Settings: Run with Paseo agent options](docs/screenshots/settings-run.png)
 
@@ -163,42 +167,61 @@ everything else works without it.
 
 ## Settings
 
-Settings → Plugins → Browser prompts, in the order shown there. All are host settings, so every
-connected app shares them.
+Settings → Plugins → Browser prompts, in the order shown there: **Run**, **Send to** and
+**Signed-in Server browser**, then **Advanced** (press Show) with the rest. All are host settings, so
+every connected app shares them. Run and Send to are kept in their own settings document (`card`),
+so an older plugin version ignores them; until you choose, your usual way from before 0.24 decides.
 
-**Browser prompts**
+**Run**
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Usual way to start (desktop) | ChatGPT desktop | The button highlighted on the card: ChatGPT desktop or Claude desktop (both through the launcher), ChatGPT web, Paseo browser, Server browser, Server browser (signed in), Claude Chrome tab or Copy only. The other ways stay on the card, except the Chrome tab button, which shows only when the Provider (or Claude in Chrome provider) is a Claude provider. The Command Center opens ChatGPT this way, or the ChatGPT desktop app for any other choice. |
-| Usual way to start (iOS and Android) | Copy only | Copy only, ChatGPT web, Paseo browser, Server browser, Server browser (signed in) or Claude in Chrome. Phones get no Desktop buttons (ChatGPT or Claude): ChatGPT documents no mobile deep link for a new prompt. Both Server browsers need no Mac, so on a phone they are the agent ways that work with your desktop app closed; the signed-in one also works with your logins. |
-| ChatGPT app deep link | `codex://new?prompt={prompt}` | `{prompt}` is replaced by the encoded prompt; only `codex:` and `https:` are accepted. Save and Reset to default. |
-| Collapse repeated blocks that are done | on | A later copy of a block in the chat is a full card with "Also shown earlier in this chat"; once done, copies collapse to "✓ Already done · Show". Off: every copy is a plain full card. |
+| The Run button uses | Paseo browser | The browser Run starts the agent in: Server browser · signed in, Server browser · clean, Paseo browser, or Claude in Chrome tab (only with a Claude provider, under Provider or Claude in Chrome provider; without one, Run uses the Paseo browser). Until you choose, a browser you had as your usual way to start before 0.24 stays the default; any other usual way means the Paseo browser. The signed-in browser, with your logins, is never a default you did not choose. Once you choose here (or under Send to), the choice no longer follows the old usual way. Run once in… on the card offers the others for one run without changing this. |
+| Confirm before running | on | Asks before starting the agent, naming its browser, provider and mode; says when it will run in Auto mode. |
+| Report back to chat | Auto | Auto, Always send the full report, or Off (see below). |
+
+**Send to**
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| ChatGPT | Desktop app (copy only on phones) | Where Send to ChatGPT opens: Desktop app (through the launcher), ChatGPT web (agent mode), or Copy only. Phones have no ChatGPT app link, so they use ChatGPT web or Copy only. Until you choose, your usual way from before 0.24 decides (ChatGPT web or Copy only). The Command Center's Open last browser prompt in ChatGPT goes the same way. |
+| Claude | Desktop app | Where Send to Claude opens: Desktop app (through the launcher) or Copy only. Not shown on phones. |
+
+**Signed-in Server browser**: see the table further down.
+
+**Advanced › Card**
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Collapse repeated blocks that are done | on | A later copy of a block in the chat is a full card with "Also shown earlier in this chat"; once done, copies collapse to "Already done · Show". Off: every copy is a plain full card. |
 | Done marks | – | How many cards are marked done on this host; Clear removes all marks. |
 
-**Run with Paseo agent**
+**Advanced › Run details**
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Confirm before starting | on | Asks before starting the agent; says when it will run in Auto mode. |
-| Open the agent when started | off | Off: the agent works in the background; the card shows its status (running…, needs you, done ✓, failed) and an Open link. On: its view opens right away. |
+| Open the agent when started | off | Off: the agent works in the background; the card shows its status (running…, needs you, done ✓, failed) with Watch and Stop. On: its view opens right away. |
 | Show step progress | on | The agent marks each numbered step as it starts it (`[browser-prompt step N/M] …`); the card shows "Step N of M · …" with a progress bar. |
 | Show live screenshot | on | The agent takes a viewport screenshot after each numbered step (never of pages showing secrets); the card shows them as thumbnails under the progress bar. Needs a Paseo 0.13+ app to show them. |
-| Thumbnails | All steps | All steps: one thumbnail per step with "Step N" above it and the latest highlighted, side by side when the card is wide enough, a horizontal strip otherwise, the latest alone on very narrow screens. Latest only: just the newest screenshot. |
+| Thumbnails | Latest only | Latest only: just the newest screenshot, beside the status in a wide card. All steps: one thumbnail per step with "Step N" above it and the latest highlighted, side by side when the card is wide enough, a horizontal strip otherwise, the latest alone on very narrow screens. A choice saved before 0.24 is kept. |
 | Close tabs after a successful run | on | When every step succeeded, the agent closes the browser tabs it opened itself (with `browser_new_tab`, or in a Chrome tab run with `tabs_create_mcp`, closed with `tabs_close_mcp`) as its last action and names their hosts in its report. Tabs that were open before the run, tabs a step says to leave open and tabs it is unsure about stay open; a run that fails, stops or needs you leaves every tab open. In Always Ask mode you approve the close like any other new tool. An instruction in the agent's prompt, not enforced: it depends on the provider and model, which may close the wrong tab or none. |
 | Archive the agent after a successful run | off | When every step succeeded, the agent ends its report with a fixed last line and the plugin archives it, once the chat got the report or notice (with Report back to chat off, right away). Any other run stays open, and so does one you gave a follow-up. The card keeps showing it as done; its screenshots, time and tokens show until the card reloads. Applies to runs started after you turn it on. |
 | Talk to the chat | on | The agent may ask the chat that showed the card about the task; the plugin forwards each question framed as untrusted text (see below). |
 | Max questions to the chat per run | `10` | Whole number from 0 to 50; 0 works like Talk to the chat off. After the limit the agent asks you. |
-| Report back to chat | Auto | Auto, Always send the full report, or Off (see below). |
+
+**Advanced › Agent**
+
+| Setting | Default | What it does |
+| --- | --- | --- |
 | Provider | `claude` | Paseo provider id; only providers with a known ask-first mode are started. |
 | Model | `claude-sonnet-5-5` | Model id, or `provider/model`. |
 | Permission mode | `auto` | Claude: `auto` (Auto mode, a model classifier reviews tool calls; the default), `default` (Always Ask) or `plan`. Oh My Pi: `ask`. Bypass, accept-edits and other modes are refused and fall back to the default mode. |
-| Claude in Chrome provider | empty | Paseo provider for the Chrome tab button, on the extension's Claude account. Empty: `claude-chrome` when the daemon has it, else Provider. |
+| Claude in Chrome provider | empty | Paseo provider for Claude in Chrome tab runs, on the extension's Claude account. Empty: `claude-chrome` when the daemon has it, else Provider. |
 | Thinking | `high` | Thinking level passed to the provider. |
 | Reset agent settings to default | – | Provider, model, mode and thinking back to the defaults above. |
 | Agent links on cards | – | How many started runs cards remember (at most 5 per card and 200 in total, oldest dropped first); Clear forgets them after a second press (Clear anyway), since runs may still be going. A run whose link drops out keeps its mode guard and report back while the daemon runs, if the server already saw its link; its card no longer shows it. |
 
-**Server browser**
+**Advanced › Server browser**
 
 | Setting | Default | What it does |
 | --- | --- | --- |
@@ -219,7 +242,13 @@ connected app shares them.
 | HTTPS address | empty | Optional `https://name[:port]` in front of the viewer (for example `tailscale serve`), used in viewer links; empty: plain http on the Tailscale address. |
 | Bitwarden | off | **Download and enable Bitwarden**, then **Confirm download**: downloads the pinned Bitwarden Password Manager release (about 34 MB, SHA-256 checked) and builds it into the signed-in image, where Chromium force-installs it, for you while you hold control. Shows whether the running browser has it, an update pending under a run, a run waiting for the lock, and the last lock (verified or why not). **Lock now** and **Restart browser** lock it on demand; **Turn off** removes it and its data (an idle browser restarts now); **Restart** applies a changed choice now. See [Bitwarden in the signed-in browser](#bitwarden-in-the-signed-in-browser-optional). |
 
-**ChatGPT launcher**
+**Advanced › ChatGPT app link**
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| ChatGPT app deep link | `codex://new?prompt={prompt}` | `{prompt}` is replaced by the encoded prompt; only `codex:` and `https:` are accepted. Save and Reset to default. |
+
+**Advanced › ChatGPT launcher**
 
 | Setting | Default | What it does |
 | --- | --- | --- |
@@ -227,7 +256,7 @@ connected app shares them.
 | Bind address | empty | Empty: this machine's Tailscale IPv4 (detected). Otherwise only this machine's own Tailscale address or 127.0.0.1; never 0.0.0.0 or a LAN address. |
 | Port | `5299` | The launcher's port. |
 
-**Updates** (Git installs)
+**Advanced › Updates** (Git installs)
 
 | Setting | Default | What it does |
 | --- | --- | --- |
@@ -333,7 +362,7 @@ changes restart the listener. The client only uses the URL the server returns.
 Agents often repeat a block they wrote earlier in the same chat, for example when asked for the
 steps again. Every copy is a full card with working buttons; a later copy says "Also shown earlier
 in this chat" and shares the first's done mark and run. Once the block is done, later copies
-collapse to "✓ Already done · Show", and Show opens the card right there (with Undo done). Nothing
+collapse to "Already done · Show", and Show opens the card right there (with Not done). Nothing
 scrolls the chat: in a long chat the first card may not even be rendered.
 
 Setting: **Collapse repeated blocks that are done** (on; stored as `mergeRepeats`). Off: every copy is
@@ -743,7 +772,7 @@ model, frames what reaches the chat:
 
 ## Server browser
 
-The card's Paseo › **Server browser** button runs the steps without your desktop app. Paseo browser
+The card's **Server browser · clean** (Run once in…, or as the Run default) runs the steps without your desktop app. Paseo browser
 runs drive the tabs of your Paseo desktop app, so they need it open ([Paseo's browser is desktop
 only](https://paseo.sh/docs/browser.md)). A Server browser run instead gets its own headless
 Chromium on the Paseo server, driven by [Playwright MCP](https://github.com/microsoft/playwright-mcp)
@@ -852,10 +881,10 @@ for any run.
 
 ## Signed-in Server browser
 
-The card's Paseo › **Server (signed in)** button runs the steps in **your own persistent Chromium on
+The card's **Run** (with **Server browser · signed in** as the default, or from **Run once in…**) runs the steps in **your own persistent Chromium on
 the Paseo server**, signed in to the sites you logged in to there. You never need the Mac: you log in
 once (2FA included) from your phone or any device on your tailnet, and you can watch a run live and
-**take it over** (a login, a 2FA code, a captcha) from the card's **Take over** button. You accepted
+**take it over** (a login, a 2FA code, a captcha) from the card's **Watch** or **Take over the browser** button. You accepted
 that these login sessions live on the Paseo server (see [SECURITY.md](SECURITY.md#signed-in-server-browser)).
 
 **Needs:** everything the [Server browser](#server-browser) needs, plus a Tailscale address on the
@@ -897,7 +926,8 @@ press says it is in use. The agent's own tabs are its work area; it is told to l
 after a fully successful run with **Close tabs after a successful run** on, to close only the tabs it
 opened.
 
-**Take over.** While a signed-in run is going, the card's status line shows **Take over**. It asks the
+**Take over.** While a signed-in run is going, the card's **Watch** opens the same viewer, and when the
+run waits for you the needs-you panel shows a full-width **Take over the browser**. Both ask the
 daemon for a one-time link (valid once, for 5 minutes) and opens it; the link is never put in the
 chat. The page trades the ticket in the link's fragment for an HttpOnly, SameSite=Strict session
 cookie (random name, scoped to a random path, 2 hours at most and 20 minutes without use), the relay

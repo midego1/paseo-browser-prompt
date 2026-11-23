@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.24.0 (unreleased)
+
+- **Redesigned card.** One filled button per state. **Run** is a split button: the main part runs
+  the steps in your default browser and names it; its chevron opens **Run once in…** with every browser (signed-in and clean Server
+  browser, Paseo browser, and Claude in Chrome tab with a Claude provider). A row runs once and does
+  not change the default; **Change the default…** opens the settings. The default is the browser you
+  had as your usual way before 0.24, else the **Paseo browser**; the signed-in Server browser (your
+  logins) is the default only when you choose it, and a Claude in Chrome choice without a Claude
+  provider falls back to the Paseo browser.
+- **Send to ChatGPT** and **Send to Claude** replace the Desktop, Web and Chrome tab buttons. Where
+  they open is a setting (Settings › Send to: ChatGPT desktop app, ChatGPT web or copy only; Claude
+  desktop app or copy only). Until you choose, your usual way from before 0.24 decides, so nothing
+  changes on the update. On a phone the Send buttons have their own row and there is no Send to
+  Claude (no Claude app link there, as before). After a send, the card says it does not report back.
+  Claude's Chrome tab is a Paseo agent run, so it moved to Run once in….
+- **Stop** (new): while a run is going, **Watch** (the agent's view, or the signed-in browser's
+  viewer for a signed-in run) and **Stop**. Stop asks for a second press, then archives the run's
+  agent, the same stop the mode guard uses, and only a run this chat's card recorded (never the
+  chat's own agent); its history stays in Paseo. The run record is marked stopped, so the card shows
+  it as stopped (not done) after a reload and on other devices.
+- A run that is stopped or closed frees its Server browser slot or the signed-in browser at once
+  (before, a run stopped in its first two minutes held it until then), and its containers are removed
+  also after a daemon restart when a card recorded it as a browser run.
+- **Needs you**: an amber panel with the question or permission and, for a signed-in run, a
+  full-width **Take over the browser**. The owner prompt box and its exact-action Allow checks are
+  unchanged.
+- **Done**: full contrast with a green border, folded to a summary line with **Run again**; **Show
+  steps** brings back the steps and the Send buttons. **Copy steps** and **Mark done** / **Not done**
+  are in a quiet last row in every state.
+- The step bar has one segment per step (up to 12). The card shows the latest screenshot by default
+  (beside the status in a wide card); one per step is under Advanced › Thumbnails. A choice saved
+  before is kept; an owner without saved plugin settings now gets Latest only instead of All steps.
+- **Settings**: three groups (Run, Send to, Signed-in Server browser) with everything else under a
+  collapsed **Advanced**. The new choices live in their own host settings document (`card`), so the
+  `preferences` document keeps version 18 and an older plugin version ignores them. Once you pick a
+  Run default or a Send to target there, it no longer follows the old usual way (there is no "as
+  before" choice to go back to). Buttons are at least 44 high on any touch screen (iPad included).
+- The Command Center's Open last browser prompt in ChatGPT goes where Send to ChatGPT goes.
+
 ## 0.23.1 (unreleased)
 
 Follow-ups from the reviews of the Bitwarden work (0.23.0). Fail closed on lock, fail safe on wipe.

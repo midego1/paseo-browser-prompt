@@ -124,20 +124,26 @@ test("the card's settings icon opens the page the plugin registers", () => {
   assert.match(run, /SETTINGS_SCREEN_ID = "preferences"/);
 });
 
-test("every way on the card can be the usual way", () => {
+test("every way on the card stays reachable: the usual way keeps working until the card settings say otherwise", () => {
   const settings = readFileSync(new URL("../shared/settings.ts", import.meta.url), "utf8");
   const screen = readFileSync(new URL("../client/settings-screen.tsx", import.meta.url), "utf8");
   const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
+  // The stored usual way is unchanged (older plugin versions still read it) and decides the defaults.
   assert.match(settings, /startMode: z\.enum\(\["app", "web-agent", "copy-only", "claude-desktop", "paseo", "chrome", "server", "signed-in"\]\)\.default\("app"\)/);
   assert.match(settings, /mobileStartMode: z\.enum\(\["copy-only", "web-agent", "paseo", "chrome", "server", "signed-in"\]\)\.default\("copy-only"\)/);
-  assert.equal(screen.match(/label: "Server browser", value: "server"/g)?.length, 2, "desktop and phones");
-  assert.equal(screen.match(/label: "Server browser \(signed in\)", value: "signed-in"/g)?.length, 2, "desktop and phones");
-  assert.equal(screen.match(/label: "Paseo browser", value: "paseo"/g)?.length, 2);
-  assert.equal(screen.match(/label: "Claude Chrome tab", value: "chrome"/g)?.length, 2);
-  assert.equal(screen.match(/label: "Claude desktop", value: "claude-desktop"/g)?.length, 1, "desktop only");
-  for (const way of ["app", "web-agent", "claude-desktop", "paseo", "chrome", "server", "signed-in"]) assert.ok(card.includes(`highlighted={defaultMode === "${way}"}`), way);
-  assert.ok(card.includes('defaultMode === "copy-only" ? styles.primary'), "copy-only");
-  assert.match(readFileSync(new URL("../index.client.tsx", import.meta.url), "utf8"), /chatGptMode\(effectiveMode\(/, "the Command Center only opens ChatGPT");
+  // The card's own choices live in their own document (rollback-safe).
+  assert.match(settings, /id: "card",\n  scope: "host",\n  version: 1,/);
+  assert.match(settings, /runWay: z\.enum\(\["", "signed-in", "server", "paseo", "chrome"\]\)\.default\(""\)/);
+  assert.match(settings, /chatGpt: z\.enum\(\["", "app", "web-agent", "copy-only"\]\)\.default\(""\)/);
+  assert.match(settings, /claude: z\.enum\(\["claude-desktop", "copy-only"\]\)\.default\("claude-desktop"\)/);
+  assert.match(card, /const runWay = defaultRunWay\(choices, usualWay, showChrome\);/);
+  assert.match(card, /const gptTarget = chatGptTarget\(choices, usualWay, mobile\);/);
+  for (const label of ['label="The Run button uses"', 'label="ChatGPT"', 'label="Claude"']) assert.ok(screen.includes(label), label);
+  for (const way of ['value: "signed-in"', 'value: "server"', 'value: "paseo"', 'value: "chrome"', 'value: "app"', 'value: "web-agent"', 'value: "copy-only"', 'value: "claude-desktop"']) assert.ok(screen.includes(way), way);
+  const entry = readFileSync(new URL("../index.client.tsx", import.meta.url), "utf8");
+  const launch = readFileSync(new URL("../client/launch.ts", import.meta.url), "utf8");
+  assert.match(entry, /commandCenterChatGptMode\(\)/, "the Command Center only opens ChatGPT");
+  assert.match(launch, /return lastChatGpt \?\? chatGptMode\(effectiveMode\(getRememberedModes\(\)\)\);/, "as the cards' Send to ChatGPT, else from the usual way");
 });
 
 test("the Claude group opens the Claude desktop app and runs in a Chrome tab", () => {
@@ -145,7 +151,7 @@ test("the Claude group opens the Claude desktop app and runs in a Chrome tab", (
   const launch = readFileSync(new URL("../client/launch.ts", import.meta.url), "utf8");
   const server = readFileSync(new URL("../index.server.ts", import.meta.url), "utf8");
   assert.match(card, /startInClaudeDesktop\(title, text, \(prompt\) => stash\(\{ prompt, target: "claude" \}\)\)/);
-  assert.match(card, /"Again: Chrome tab" : "Chrome tab"/);
+  assert.match(card, /copyForClaude\(title, text\)/, "Send to Claude with Copy only");
   assert.match(launch, /composePrompt\(title, body, CLAUDE_DESKTOP_HEADER\)/);
   assert.match(server, /if \(target === "claude"\) return launcher\.stash\(prompt, CLAUDE_DESKTOP_LINK_TEMPLATE\);/);
   assert.doesNotMatch(card, /"extension"/, "no ChatGPT extension button any more");
@@ -159,32 +165,57 @@ test("a stored Browser setting is dropped", () => {
   assert.equal("browserAgent" in migratePreferences({ browserAgent: "firefox" }, 14), false);
 });
 
-test("the card offers every way to run, per card", () => {
+test("the card offers every way to run, per card: Run, Run once in…, Send to ChatGPT and Claude, Copy steps, Mark done", () => {
   const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
-  for (const label of ['label="Desktop"', 'label="Web"', '"Paseo browser"', '"Chrome tab"', ">Copy<", '"Mark done"', "`Copy ${displayTitle}`", "`Mark ${displayTitle} done`"]) assert.ok(card.includes(label), label);
-  // Order: Paseo, then ChatGPT, then Claude.
-  const paseo = card.indexOf('accessibilityLabel="Paseo">');
-  const chatgpt = card.indexOf('accessibilityLabel="ChatGPT">');
-  const claude = card.indexOf('accessibilityLabel="Claude">');
-  assert.ok(paseo > 0 && paseo < chatgpt && chatgpt < claude, "Paseo first, then ChatGPT, then Claude");
-  assert.match(card, /<Icon icon=\{PASEO_ICON\}/);
-  assert.match(card, /<Icon icon=\{OPENAI_ICON\} size=\{16\} color=\{OPENAI_COLOR\} \/>\s*<Text style=\{styles\.groupLabel\}>ChatGPT<\/Text>/, "ChatGPT group: mark in color and name");
-  assert.match(card, /startInChatGpt\(title, text, "app"/);
-  assert.match(card, /startInChatGpt\(title, text, "web-agent"/);
-  assert.match(card, /onRunPress\("paseo"\)/);
-  assert.match(card, /onRunPress\("chrome"\)/);
+  for (const label of ['"Copy steps"', '"Mark done"', '"Not done"', "`Copy ${displayTitle}`", "`Mark ${displayTitle} done`", 'name="ChatGPT"', 'name="Claude"', "Change the default…", 'title="Run once in…"']) assert.ok(card.includes(label), label);
+  // Order: Run, then Send to ChatGPT, then Send to Claude; the quiet row last.
+  const run = card.indexOf("<SplitRun");
+  const chatgpt = card.indexOf('name="ChatGPT"');
+  const claude = card.indexOf('name="Claude"');
+  const quiet = card.indexOf("<View style={styles.quiet}>");
+  assert.ok(run > 0 && run < chatgpt && chatgpt < claude && claude < quiet, "Run, then ChatGPT, then Claude, then the quiet row");
+  assert.match(card, /<Icon icon=\{icon\} size=\{16\} color=\{color\} \/>/, "Send buttons: brand mark in color");
+  assert.match(card, /icon=\{OPENAI_ICON\}\s+color=\{OPENAI_COLOR\}/);
+  assert.match(card, /icon=\{CLAUDE_ICON\}\s+color=\{CLAUDE_COLOR\}/);
+  assert.match(card, /startInChatGpt\(title, text, gptTarget, \(prompt\) => stash\(\{ prompt \}\)\)/);
+  assert.match(card, /startInClaudeDesktop\(title, text, \(prompt\) => stash\(\{ prompt, target: "claude" \}\)\)/);
+  assert.match(card, /onRun=\{\(\) => void onRunPress\(runWay\)\}/);
+  assert.match(card, /runMenuItems\(runWay, showChrome\)/, "Claude in Chrome only when the launch would work");
   assert.match(card, /launchAgent\(pendingLaunch\)/);
   assert.match(card, /resolveLaunch\(paseo, [^)]*, browser\)/, "the press decides the browser, not a setting");
-  assert.match(card, /\{mobile \? null : \(/, "no ChatGPT app button without a mobile deep link");
-  assert.match(card, /\{showChrome \? \(/, "Claude in Chrome only when the launch would work");
-  assert.match(card, /"Again: Paseo browser"/, "a card with a run says it would be another run");
-  assert.match(card, /"Again: Chrome tab"/);
+  assert.match(card, /\{shape\.showSendClaude \? \(/, "no Claude button without a Claude app (phones)");
   assert.match(card, /\{active \? <Text/, "the confirmation warns about a run still going");
-  assert.match(card, /startInChatGpt\(title, text, "copy-only"/, "highlighted Copy keeps the paste hint");
+  assert.match(card, /copyPrompt\(title, text\)/, "Copy steps copies the prompt");
   for (const demo of ["capture", "stills"]) {
     const script = readFileSync(new URL(`../scripts/demo/${demo}.mjs`, import.meta.url), "utf8");
     assert.match(script, /Run \.\* in the Paseo browser/, "the demo presses one button, the Paseo browser");
   }
+});
+
+test("Run once in… runs once and never changes the default", () => {
+  const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
+  const once = card.slice(card.indexOf("function runOnceIn("), card.indexOf("function sendTo("));
+  assert.match(once, /setMenuOpen\(false\);\s+void onRunPress\(way\);/);
+  assert.doesNotMatch(once, /save|cardPrefs|runWay/, "no settings write, no default change");
+  assert.match(card, /accessibilityLabel="Change the default way to run"[\s\S]{0,200}openSettingsScreen\(\)/, "Change the default… opens the settings");
+  const onRunPress = card.slice(card.indexOf("async function onRunPress("), card.indexOf("/** The owner's Lock now"));
+  assert.doesNotMatch(onRunPress, /\.save\(/, "a run never saves a default");
+});
+
+test("Stop is wired to the guarded archive, only after a second press, and recorded on the run", () => {
+  // The guard and the archive are tested in card-layout.test.mjs (stopRecordedRun); this checks the wiring.
+  const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
+  const run = readFileSync(new URL("../client/agent-run.ts", import.meta.url), "utf8");
+  assert.match(run, /await stopRecordedRun\(\(agentId\) => paseo\.agents\.ref\(agentId\)\.archive\(\), input\);/);
+  const stop = card.slice(card.indexOf("async function stopRun("), card.indexOf("const runVisuals ="));
+  assert.match(stop, /if \(!stopArmed\) \{\s+setStopArmed\(true\);\s+return;\s+\}/, "the first press only arms it");
+  assert.match(stop, /await stopRunAgent\(paseo, \{ runId: stopped, sourceAgentId: agentId,/);
+  assert.match(stop, /markRunStopped\(values\.runs, stopped\)/);
+  assert.match(card, /ownerStopState\(archivedRun === runAgentId && mayBeArchived \? "done" : followedState,/, "the shown state follows the stop");
+  assert.match(card, /setTimeout\(\(\) => setStopArmed\(false\), STOP_CONFIRM_MS\)/, "and it disarms by itself");
+  assert.match(card, /\{phase === "running" \? watchStop\(\) : null\}/);
+  const panel = card.slice(card.indexOf("<View style={styles.ask}>"), card.indexOf("{showSteps ? ("));
+  assert.match(panel, /\{watchStop\(\)\}/, "in the needs-you panel too");
 });
 
 test("the confirmation describes the exact provider and mode the run starts with", () => {
@@ -228,7 +259,10 @@ test("only the latest press counts, and the agent buttons wait while it resolves
   const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
   assert.match(card, /const seq = \+\+pressSeq\.current;/);
   assert.match(card, /if \(seq !== pressSeq\.current\) return;/);
-  assert.equal(card.match(/disabled=\{busy \|\| resolving \|\| runBlocked\}/g)?.length, 4);
+  assert.match(card, /const runDisabled = busy \|\| resolving \|\| runBlocked;/);
+  // Run, its chevron and every "Run once in…" row wait.
+  assert.equal(card.match(/disabled=\{runDisabled\}/g)?.length, 2);
+  assert.match(card, /disabled=\{disabled\}\n\s+onPress=\{onMenu\}/, "the chevron too");
 });
 
 test("Claude in Chrome shows only when the launch would work", () => {

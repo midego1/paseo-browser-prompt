@@ -1262,6 +1262,10 @@ export function createSignedIn(options: SignedInOptions) {
     },
     consumeTicket: (ticket: string, target: { sourceId: string; cardId: string }) => tickets.consume(ticket, target),
     /** The MCP server for one session of a signed-in run; refused while another run holds the browser. */
+    /** Frees the browser for the next run when this one was admitted but is stopped or closed before its MCP container came up. */
+    release(agentId: string): void {
+      starting.delete(agentId);
+    },
     async mcpServer(agentId: string): Promise<{ server: StdioServer; session: string } | { refused: "busy" | "unavailable" } | null> {
       const { path, host } = await sb.docker();
       const node = await sb.node();

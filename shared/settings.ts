@@ -126,3 +126,22 @@ export const signedInSettings = defineSettings({
     bitwardenConsent: z.string().default(""),
   }),
 });
+
+/**
+ * The card's own choices since 0.24.0, in a document of their own so older plugin versions never see
+ * them (rollback-safe, like `signedInSettings`). "" = follow the usual way in `preferences` (see
+ * shared/card-layout.ts), so nothing changes for an owner until they pick here.
+ */
+export const cardSettings = defineSettings({
+  id: "card",
+  scope: "host",
+  version: 1,
+  schema: z.object({
+    /** The browser the card's Run button uses; "Run once in…" rows never change it. */
+    runWay: z.enum(["", "signed-in", "server", "paseo", "chrome"]).default(""),
+    /** Where Send to ChatGPT goes: the desktop app, chatgpt.com, or the clipboard. Phones never use the app. */
+    chatGpt: z.enum(["", "app", "web-agent", "copy-only"]).default(""),
+    /** Where Send to Claude goes: the Claude desktop app or the clipboard (no Claude button on phones). */
+    claude: z.enum(["claude-desktop", "copy-only"]).default("claude-desktop"),
+  }),
+});
