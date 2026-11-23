@@ -570,7 +570,11 @@ remove them: `docker image ls 'browser-prompt-signed-in'` and `docker image rm <
   the last line of its own final report says it fully succeeded. The agent writes that line, so a page
   that misleads it could get a run archived too early; archiving keeps the agent's history. The daemon
   keeps the archived run ids, and nothing else, in `archived-runs.json` in the plugin's state directory.
-- The Claude › Chrome tab button on the card (Claude in Chrome) runs the agent in your real Chrome, with every account you
+- Stop on the card (0.24.0) archives the run's agent from your own Paseo app, the same call the mode
+  guard uses; it needs no new server permission and keeps the agent's history. It asks for a second
+  press. A run's tool call already under way may still finish; the Server browser's containers are
+  removed with the archived run, and the signed-in browser is free again once the run's session ends.
+- A Claude in Chrome tab run (the card's Run once in…, or the Run default; Claude in Chrome) runs the agent in your real Chrome, with every account you
   are signed in to, not in the Paseo browser. Its reach is much wider. In Auto mode, its default, a
   model classifier approves browser actions and the extension skips its own check per site, so the
   limits on sites and secrets are rules the agent is told, not rules that are enforced. A malicious
