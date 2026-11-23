@@ -870,7 +870,12 @@ function fakeStackDocker({ serverImage = true, nekoImage = true } = {}) {
     }
     if (sub === "exec") {
       state.execs = [...(state.execs ?? []), args];
-      if (args.includes("/opt/bitwarden/browser-prompt-pin.json")) return /-bw\d/.test(state.nekoImage ?? "") ? ok(JSON.stringify({ id: state.bitwardenId ?? "k".repeat(32) })) : { code: 1, stdout: "", stderr: "No such file" };
+      if (args.some((a) => a.includes("/opt/bitwarden/browser-prompt-pin.json"))) {
+        // The pin probe: docker exec may fail (state.pinFails), else the pin or "no pin file".
+        if (state.pinFails) return { code: 1, stdout: "", stderr: "Error response from daemon: timeout" };
+        if (state.pinText !== undefined) return ok(state.pinText);
+        return /-bw\d/.test(state.nekoImage ?? "") ? ok(JSON.stringify({ id: state.bitwardenId ?? "k".repeat(32) })) : ok("BP_NO_BITWARDEN_PIN\n");
+      }
       if (args.at(-1) === "/home/neko/.config/chromium/.bp-bitwarden-ids") return state.idsFile === undefined ? { code: 1, stdout: "", stderr: "" } : ok(state.idsFile);
       if (args.includes("sh") && /find \/home\/neko\/\.config\/chromium -name/.test(args.at(-1))) {
         const id = /\*([a-p]{32})\*/.exec(args.at(-1))?.[1];
@@ -2720,4 +2725,79 @@ test("0.23.1 relay: /bp/status names its start (bootId), new on every relay star
     await b.close();
     await neko.close();
   }
+});
+
+test("0.23.1 Bitwarden lock: a failed pin probe is never 'no Bitwarden': the run stays paused unless the running image is certainly without Bitwarden", async () => {
+  const rig = await bitwardenLockRig();
+  const { si, docker, relay } = rig;
+  relay.lockPending = true;
+  relay.lockGeneration = 4;
+  // docker exec of the pin probe fails while a Bitwarden image runs: not locked, the relay hears it failed.
+  docker.state.pinFails = true;
+  assert.equal(await si.lockCheck(), false);
+  assert.deepEqual(rig.lockedCalls, [], "the run stays paused");
+  assert.deepEqual(rig.failedCalls, [4]);
+  assert.match((await si.status()).bitwarden.lastLock.detail, /cannot read the Bitwarden pin; staying paused/);
+  assert.deepEqual(docker.state.tools, [], "no lock tool on an unknown build");
+  const now = await si.bitwarden("lock");
+  assert.equal(now.ok, false, "Lock now does not report a lock either");
+  // An unparseable pin: the same.
+  docker.state.pinFails = false;
+  docker.state.pinText = "{not json";
+  relay.lockGeneration = 5;
+  assert.equal(await si.lockCheck(), false);
+  assert.deepEqual(rig.lockedCalls, []);
+  // "No pin file" while the image name says Bitwarden: contradictory, still paused.
+  docker.state.pinText = "BP_NO_BITWARDEN_PIN\n";
+  relay.lockGeneration = 6;
+  assert.equal(await si.lockCheck(), false);
+  assert.deepEqual(rig.lockedCalls, []);
+  // The running image is certainly without Bitwarden (plain tag, read): nothing to lock, the run goes on.
+  docker.state.nekoImage = signedInImageTag("0".repeat(64));
+  docker.state.pinFails = true;
+  relay.lockGeneration = 7;
+  assert.equal(await si.lockCheck(), true);
+  assert.deepEqual(rig.lockedCalls, [7]);
+});
+
+test("0.23.1 Bitwarden cleanup: never clears anything when the installed build cannot be told (the current build's data is never wiped on a failed probe)", async () => {
+  const rig = await bitwardenLockRig();
+  const { si, docker } = rig;
+  const current = "m".repeat(32);
+  const old = "a".repeat(32);
+  docker.state.idsFile = `${current}\n${old}\n`;
+  docker.state.tool = (mode, ids) => (mode === "cleanup" ? { cleared: ids } : { locked: true });
+  for (const setup of [() => (docker.state.pinFails = true), () => (docker.state.pinText = "garbage"), () => (docker.state.pinText = "BP_NO_BITWARDEN_PIN\n")]) {
+    docker.state.pinFails = false;
+    docker.state.pinText = undefined;
+    setup();
+    docker.state.tools = [];
+    assert.deepEqual(await si.cleanupOldBitwarden(), []);
+    assert.deepEqual(docker.state.tools, [], "no cleanup call");
+    assert.equal(docker.state.idsFile, `${current}\n${old}\n`, "nothing forgotten");
+  }
+  // A definite answer: the installed build is kept, only the old one is cleared.
+  docker.state.pinFails = false;
+  docker.state.pinText = undefined;
+  docker.state.tools = [];
+  assert.deepEqual(await si.cleanupOldBitwarden(), [old]);
+  assert.deepEqual(docker.state.tools.map((t) => `${t.mode} ${t.ids.join(",")}`), [`cleanup ${old}`]);
+  // Bitwarden off for certain (plain image, the probe reports no pin): every recorded build is old.
+  docker.state.idsFile = `${current}\n`;
+  docker.state.nekoImage = signedInImageTag("0".repeat(64));
+  docker.state.tools = [];
+  assert.deepEqual(await si.cleanupOldBitwarden(), [current]);
+});
+
+test("0.23.1 Bitwarden: the owner's consent alone makes the run's takeover guard fail closed", async () => {
+  const docker = fakeStackDocker();
+  const { si } = makeSignedIn(docker, { config: async () => ({ port: 5301, httpsBaseUrl: "", bitwarden: true, bitwardenConsent: BITWARDEN.sha256 }) });
+  await si.viewerLink({ purpose: "login", portrait: false });
+  assert.doesNotMatch(docker.state.nekoImage, /-bw/, "plain image (Bitwarden not built, no key)");
+  const plan = JSON.parse(Buffer.from((await si.mcpServer("run-y")).server.args[1], "base64").toString("utf8"));
+  assert.ok(value(plan.agent.run, "--env").includes("BP_CONTROL_FAIL_CLOSED=1"));
+  const plain = makeSignedIn(fakeStackDocker(), { config: async () => ({ port: 5301, httpsBaseUrl: "", bitwarden: false, bitwardenConsent: "" }) });
+  await plain.si.viewerLink({ purpose: "login", portrait: false });
+  const open = JSON.parse(Buffer.from((await plain.si.mcpServer("run-z")).server.args[1], "base64").toString("utf8"));
+  assert.ok(!value(open.agent.run, "--env").includes("BP_CONTROL_FAIL_CLOSED=1"), "without Bitwarden: as before");
 });

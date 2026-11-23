@@ -318,6 +318,10 @@ export interface SignedInStatus {
 }
 
 const CONFIG_LABEL = "browser-prompt.signed-in-config";
+/** The Bitwarden variant's pin record in neko (signed-in-bitwarden/Dockerfile). */
+const BITWARDEN_PIN_FILE = "/opt/bitwarden/browser-prompt-pin.json";
+/** What the pin probe prints when the running image has no pin file. */
+const NO_PIN = "BP_NO_BITWARDEN_PIN";
 
 /**
  * The daemon side of the signed-in Server browser: builds its image on the owner's explicit choice,
@@ -878,11 +882,27 @@ export function createSignedIn(options: SignedInOptions) {
     return result.code === 0 ? result.stdout.trim() : "";
   }
 
-  /** The id of the Bitwarden build in the running neko, or null. */
-  async function installedBitwardenId(): Promise<string | null> {
+  /**
+   * The Bitwarden build in the running neko, read from its pin file: `id`, `none` (the probe ran and
+   * reported no pin file: definitive), or `unknown` (docker exec failed or timed out, or the pin did
+   * not parse). `unknown` is never taken for "no Bitwarden".
+   */
+  async function installedBitwarden(): Promise<{ kind: "id"; id: string } | { kind: "none" } | { kind: "unknown" }> {
     const names = stackNames(await stackId());
-    const result = await docker(["exec", names.neko, "cat", "/opt/bitwarden/browser-prompt-pin.json"], 15_000).catch(() => ({ code: 1, stdout: "" }));
-    return result.code === 0 ? bitwardenIdFromPin(result.stdout) : null;
+    const result = await docker(["exec", names.neko, "sh", "-c", `if [ -e ${BITWARDEN_PIN_FILE} ]; then cat ${BITWARDEN_PIN_FILE}; else echo ${NO_PIN}; fi`], 15_000).catch(() => ({ code: 1, stdout: "" }));
+    if (result.code !== 0) return { kind: "unknown" };
+    if (result.stdout.trim() === NO_PIN) return { kind: "none" };
+    const id = bitwardenIdFromPin(result.stdout);
+    return id ? { kind: "id", id } : { kind: "unknown" };
+  }
+
+  /**
+   * Whether the running browser definitely has no Bitwarden: its image name was read and is not a
+   * Bitwarden variant. Anything less (the image unreadable, a Bitwarden tag) is not "no Bitwarden".
+   */
+  async function definitelyNoBitwarden(): Promise<boolean> {
+    const running = await runningNekoImage();
+    return running !== "" && !isBitwardenImage(running);
   }
 
   /** Runs the Bitwarden tool (server-browser/bitwarden-lock.mjs) in neko's network namespace. */
@@ -945,9 +965,14 @@ export function createSignedIn(options: SignedInOptions) {
   function verifiedLock(before: RelayStatus | null): Promise<{ ok: boolean; detail: string; at: number }> {
     locking ??= (async () => {
       const startedAt = now();
-      const id = await installedBitwardenId();
-      // No Bitwarden in the running browser: nothing to lock.
-      if (!id) return { ok: true, detail: "no Bitwarden in the running browser", at: now() };
+      const pin = await installedBitwarden();
+      if (pin.kind !== "id") {
+        // No Bitwarden in the running browser: nothing to lock. Only when that is certain (the image
+        // was read and is not a Bitwarden variant); otherwise the run stays paused (fail closed).
+        if (await definitelyNoBitwarden()) return { ok: true, detail: "no Bitwarden in the running browser", at: now() };
+        return { ok: false, detail: "cannot read the Bitwarden pin; staying paused", at: now() };
+      }
+      const id = pin.id;
       let detail = "";
       for (let attempt = 0; attempt < BITWARDEN_LOCK_ATTEMPTS; attempt++) {
         for (const mode of ["lock", "reload"] as const) {
@@ -1081,7 +1106,14 @@ export function createSignedIn(options: SignedInOptions) {
     const file = "/home/neko/.config/chromium/.bp-bitwarden-ids";
     const listed = await docker(["exec", "--user", "neko", names.neko, "cat", file], 15_000).catch(() => ({ code: 1, stdout: "" }));
     if (listed.code !== 0) return [];
-    const current = await installedBitwardenId();
+    // Which build is installed now. Its data is never cleared on a guess: a failed probe (or a "no pin"
+    // that the image name contradicts) clears nothing; the next start tries again.
+    const pin = await installedBitwarden();
+    if (pin.kind === "unknown" || (pin.kind === "none" && !(await definitelyNoBitwarden()))) {
+      log("could not tell which Bitwarden build is installed; earlier builds' storage is cleared at a later start");
+      return [];
+    }
+    const current = pin.kind === "id" ? pin.id : null;
     const all = [...new Set(listed.stdout.split("\n").map((line) => line.trim()).filter((line) => /^[a-p]{32}$/.test(line)))];
     const old = all.filter((id) => id !== current);
     if (old.length === 0) return [];
@@ -1205,10 +1237,10 @@ export function createSignedIn(options: SignedInOptions) {
       if (claimed) return { refused: claimed };
       const runtime = await sb.runtime();
       const nonce = random().slice(0, 12);
-      // With Bitwarden (running, or chosen and built) the run's takeover guard fails closed.
+      // With Bitwarden (running, or chosen: the owner's consent alone is enough) the run's takeover
+      // guard fails closed.
       const config = await options.config();
-      const bw = bitwardenImageOrNull();
-      const failClosed = isBitwardenImage(await runningNekoImage()) || (!!bw && consented(config) && (await imageExists(bw)));
+      const failClosed = isBitwardenImage(await runningNekoImage()) || consented(config);
       const plan = signedInPlan(path, { stackId: await stackId(), instance: await sb.instance(), serverImage: sb.image, agentId, nonce, blockedIps: sb.blockedIps(), failClosed });
       lastActive = now();
       // A resumed run may find the browser stopped (idle): start it; the launcher waits for it.
