@@ -28,6 +28,7 @@ import {
   SERVER_SCREENSHOT_RULE,
   DEFAULT_AGENT_SETTINGS,
 } from "../shared/agent-prompt.ts";
+import { SIGNED_IN_RUN_MARKER } from "../shared/signed-in.ts";
 import { permissionDetails } from "../shared/owner-prompt.ts";
 import { runLabels } from "../shared/report-back.ts";
 import { isScreenshotTool } from "../shared/screenshot.ts";
@@ -977,7 +978,7 @@ test("a run stopped right after its start frees its Server browser slot at once,
   const docker = fakeDocker({ image: true, containers: [browserContainer("a1a1a1", "run-a"), browserContainer("b2b2b2", "run-b")] });
   const browser = makeBrowser(docker);
   const released = [];
-  const signedIn = { consumeTicket: () => false, mcpServer: async () => null, release: (id) => released.push(id) };
+  const signedIn = { consumeTicket: () => false, mcpServer: async () => null, release: (id) => released.push(id), admission: (id) => (id === "run-x" ? { seq: 0, session: "s" } : undefined) };
   const { host, hooks } = fakeHost();
   const reg = registerServerBrowser(host, settingsWith([]), browser, { log: quiet, signedIn });
   assert.ok("server" in (await browser.mcpServer("run-c")));
@@ -989,6 +990,131 @@ test("a run stopped right after its start frees its Server browser slot at once,
   assert.deepEqual(released, ["run-c"], "the signed-in browser is released as well");
   await hooks.get("agent.close.after")({ agent: { id: "run-x" } }, {});
   assert.deepEqual(released, ["run-c", "run-x"], "on close too");
+  reg.dispose();
+});
+
+test("a stale close of an older session does not drop the new session's slot or kill its containers", async () => {
+  const docker = fakeDocker({ image: true });
+  const browser = makeBrowser(docker);
+  // release(id, seenAt): an admission after the event was seen keeps the slot; an older one is freed.
+  const first = await browser.mcpServer("run-s");
+  assert.ok("server" in first);
+  const admitted = browser.admission("run-s");
+  assert.equal(admitted.session, first.session);
+  browser.release("run-s", admitted.seq - 1);
+  assert.equal(await browser.activeRuns(), 1, "an event seen before the (re)admission leaves its slot");
+  browser.release("run-s", admitted.seq);
+  assert.equal(await browser.activeRuns(), 0, "an event seen at or after the admission frees it");
+  assert.ok("server" in (await browser.mcpServer("run-s")));
+  browser.release("run-s");
+  assert.equal(await browser.activeRuns(), 0, "without a number (older callers) it frees as before");
+  assert.ok(browser.admission("run-s").seq > admitted.seq, "admissions are numbered in order");
+});
+
+test("the close hook: a session admitted while the close is handled keeps its slot and its containers; only the older ones go", async () => {
+  const world = fakeDocker({ image: true, containers: [browserContainer("a1a1a1", "run-r", { session: "bp-sb-run-r-old" })] });
+  const browser = makeBrowser(world);
+  let newSession = "";
+  // The daemon's status read is where the new session gets admitted (after the close was seen), and
+  // it still reports the agent closed. No container of the new session exists yet.
+  const context = {
+    paseo: {
+      agents: {
+        ref: () => ({
+          refresh: async () => {
+            newSession = (await browser.mcpServer("run-r")).session;
+            return { agent: { status: "closed" } };
+          },
+        }),
+      },
+    },
+  };
+  const { host, hooks } = fakeHost();
+  const reg = registerServerBrowser(host, settingsWith([["chat:card", "run-r", SERVER_RUN_MARKER]]), browser, { log: quiet });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await hooks.get("agent.close.after")({ agent: { id: "run-r" } }, context);
+  assert.equal(world.state.containers.length, 0, "the older session's container went");
+  assert.equal(await browser.activeRuns(), 1, "and the new session keeps its slot (no container needed)");
+  // Again, now with the new session's container present: it stays.
+  world.state.containers.push(browserContainer("b2b2b2", "run-r", { session: newSession }), browserContainer("c3c3c3", "run-r", { session: "bp-sb-run-r-old2" }));
+  await hooks.get("agent.close.after")({ agent: { id: "run-r" } }, { paseo: { agents: { ref: () => ({ refresh: async () => ({ agent: { status: "closed" } }) }) } } });
+  assert.deepEqual(world.state.containers.map((c) => c.id), [], "a close with no newer admission removes every session's containers");
+  reg.dispose();
+});
+
+test("the close hook with the signed-in browser: an unnamed newer session removes nothing; a named one keeps its containers", async () => {
+  const docker = fakeDocker({
+    image: true,
+    containers: [browserContainer("a1a1a1", "run-n", { session: "bp-si-run-n-old" }), browserContainer("b2b2b2", "run-n", { session: "bp-si-run-n-new" })],
+  });
+  const browser = makeBrowser(docker);
+  const releases = [];
+  let admission;
+  const signedIn = { consumeTicket: () => false, mcpServer: async () => null, release: (id, seen) => releases.push([id, typeof seen]), admission: () => admission };
+  const { host, hooks } = fakeHost();
+  const reg = registerServerBrowser(host, settingsWith([["chat:card", "run-n", SIGNED_IN_RUN_MARKER]]), browser, { log: quiet, signedIn });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  docker.calls.length = 0;
+  const newer = Number.MAX_SAFE_INTEGER;
+  // Admitted after the event was seen, still without its session name: nothing is removed.
+  admission = { seq: newer, session: "" };
+  await hooks.get("agent.close.after")({ agent: { id: "run-n" } }, {});
+  assert.equal(docker.calls.some((call) => call[1] === "rm"), false);
+  assert.equal(docker.state.containers.length, 2);
+  // Named: its containers stay, the older ones go.
+  admission = { seq: newer, session: "bp-si-run-n-new" };
+  await hooks.get("agent.close.after")({ agent: { id: "run-n" } }, {});
+  assert.deepEqual(docker.state.containers.map((c) => c.id), ["b2b2b2"]);
+  assert.deepEqual(releases, [["run-n", "number"], ["run-n", "number"]], "release gets the sequence number the event was seen at");
+  reg.dispose();
+});
+
+test("the close hook: other agents cost no status read; a hanging status read does not block the cleanup", async () => {
+  const docker = fakeDocker({ image: true, containers: [browserContainer("a1a1a1", "run-h", { session: "bp-sb-run-h-s" })] });
+  const browser = makeBrowser(docker);
+  const { host, hooks } = fakeHost();
+  const reg = registerServerBrowser(host, settingsWith([["chat:card", "run-h", SERVER_RUN_MARKER]]), browser, { log: quiet, liveCheckMs: 20 });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  let reads = 0;
+  const hanging = { paseo: { agents: { ref: () => ({ refresh: () => (reads++, new Promise(() => {})) }) } } };
+  await hooks.get("agent.close.after")({ agent: { id: "someone-else" } }, hanging);
+  assert.equal(reads, 0, "an agent the plugin has nothing for is never read");
+  await hooks.get("agent.close.after")({ agent: { id: "run-h" } }, hanging);
+  assert.equal(reads, 1);
+  assert.equal(docker.state.containers.length, 0, "the timeout counts as not live: the containers went");
+  // An aborted hook counts as not live too.
+  docker.state.containers.push(browserContainer("b2b2b2", "run-h", { session: "bp-sb-run-h-t" }));
+  const controller = new AbortController();
+  controller.abort();
+  await hooks.get("agent.archive.after")({ agent: { id: "run-h" } }, { ...hanging, signal: controller.signal });
+  assert.equal(docker.state.containers.length, 0);
+  reg.dispose();
+});
+
+test("a close or archive event about an agent that is live again changes nothing; a closed or archived one is cleaned up", async () => {
+  const docker = fakeDocker({ image: true, containers: [browserContainer("a1a1a1", "run-l", { session: "bp-sb-run-l-s" })] });
+  const browser = makeBrowser(docker);
+  const released = [];
+  const signedIn = { consumeTicket: () => false, mcpServer: async () => null, release: (id, at) => released.push([id, typeof at]) };
+  const { host, hooks } = fakeHost();
+  const reg = registerServerBrowser(host, settingsWith([["chat:card", "run-l", SERVER_RUN_MARKER]]), browser, { log: quiet, signedIn });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.ok("server" in (await browser.mcpServer("run-l")));
+  docker.calls.length = 0;
+  const ctx = (agent) => ({ paseo: { agents: { ref: () => ({ refresh: async () => ({ agent }) }) } } });
+  for (const agent of [{ status: "idle" }, { status: "running", archivedAt: null }]) {
+    await hooks.get("agent.close.after")({ agent: { id: "run-l" } }, ctx(agent));
+    assert.equal(docker.calls.some((call) => call[1] === "rm"), false, "no container is removed for a stale event");
+  }
+  assert.deepEqual(released, [], "and no slot is released");
+  assert.equal(await browser.activeRuns(), 1);
+  // A failing status read does not block the cleanup.
+  await hooks.get("agent.close.after")({ agent: { id: "run-l" } }, { paseo: { agents: { ref: () => ({ refresh: async () => { throw new Error("down"); } }) } } });
+  assert.deepEqual(released, [["run-l", "number"]]);
+  assert.equal(docker.state.containers.length, 0);
+  docker.state.containers.push(browserContainer("c3c3c3", "run-l", { session: "bp-sb-run-l-t" }));
+  await hooks.get("agent.archive.after")({ agent: { id: "run-l" } }, ctx({ status: "idle", archivedAt: "2026-11-23T00:00:00.000Z" }));
+  assert.equal(docker.state.containers.length, 0, "an archived agent is cleaned up");
   reg.dispose();
 });
 

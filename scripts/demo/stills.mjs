@@ -14,8 +14,8 @@ mkdirSync(OUT, { recursive: true });
 
 const { browser, page, pause, settingsUrl, workspacePage } = await openDemo({ viewport: VIEWPORT, overlay: false });
 const title = () => page.getByText("Check what example.com says", { exact: true }).first();
-/** The card: the nearest ancestor of its title that also holds its buttons. */
-const card = () => title().locator("xpath=ancestor::*[.//*[text()='ChatGPT']][1]");
+/** The card: the nearest ancestor of its title that also holds its quiet row (Copy steps, in every state). */
+const card = () => title().locator("xpath=ancestor::*[.//*[text()='Copy steps']][1]");
 
 /**
  * Scrolls `scroll` (the first part) to the top, then captures the union of the parts' boxes plus
@@ -45,9 +45,21 @@ try {
   // 1. The card, before anything runs.
   await still("card", [card()]);
 
-  // Since 0.24 the Paseo browser is a "Run once in…" row (unless it is the Run default).
+  // The Run split button's chevron: Run once in… with every browser; Change the default… at its end.
   await page.getByRole("button", { name: "Run once in another browser" }).click();
-  await page.getByRole("menuitem", { name: /Run .* in the Paseo browser/ }).click();
+  const menuItem = page.getByRole("menuitem", { name: /Run .* in the Paseo browser/ });
+  await menuItem.waitFor();
+  await pause(500);
+  // The open menu: its header, rows and Change the default….
+  const sheet = [page.getByText("Run once in…", { exact: true }).first(), page.getByText("Change the default…", { exact: true }).first(), ...(await page.getByRole("menuitem").all())];
+  const real = (await Promise.all(sheet.map((item) => item.boundingBox()))).filter(Boolean);
+  const left = Math.max(0, Math.min(...real.map((b) => b.x)) - 40);
+  const top = Math.max(0, Math.min(...real.map((b) => b.y)) - 28);
+  const right = Math.min(VIEWPORT.width, Math.max(...real.map((b) => b.x + b.width)) + 40);
+  const bottom = Math.min(VIEWPORT.height, Math.max(...real.map((b) => b.y + b.height)) + 28);
+  await page.mouse.move(VIEWPORT.width - 4, VIEWPORT.height - 4);
+  await page.screenshot({ path: `${OUT}/run-once.png`, clip: { x: left, y: top, width: right - left, height: bottom - top } });
+  await menuItem.click();
   await page.getByRole("button", { name: "Start the Paseo agent" }).click();
 
   // 3. The browser agent asks the chat; the card waits for the chat's answer.
@@ -56,7 +68,7 @@ try {
   await page.getByText("Waiting for the chat's answer").first().waitFor();
   const bubble = question.locator("xpath=ancestor::*[.//*[text()='Show more']][1]");
   const waiting = page.getByText("Waiting for the chat's answer").first();
-  await still("asking", [card(), bubble], { scroll: waiting, top: waiting, topPad: 10 });
+  await still("asking", [card(), bubble]);
 
   // 2. Running in the background: step progress and a screenshot per step (and 7, the dark theme).
   await page.getByText("Step 3", { exact: true }).first().waitFor({ timeout: 90_000 });
@@ -83,13 +95,13 @@ try {
   await page.getByText(/^Confirm allow/).first().click();
 
   // 5. Done, and the report back in the chat.
-  await page.getByText(/done ✓/).first().waitFor({ timeout: 60_000 });
+  const doneLabel = card().getByText("Done", { exact: true });
+  await doneLabel.waitFor({ timeout: 60_000 });
   const thanks = page.getByText(/^Thanks!/).first();
   await thanks.waitFor();
   const notice = page.getByText(/finished\. Run agent id/).first().locator("xpath=ancestor::*[.//*[text()='Show more']][1]");
   await pause(1000);
-  const doneLabel = page.getByText("Paseo agent done ✓").first();
-  await still("done", [card(), notice, thanks], { scroll: doneLabel, top: doneLabel, topPad: 10 });
+  await still("done", [card(), notice, thanks]);
 
   // 6. Repeated blocks: the same steps three times in another chat. Done on the first card; the
   // second copy opened with Show (full card, "Also shown earlier in this chat"), the third collapsed.
@@ -97,34 +109,41 @@ try {
     await page.goto(workspacePage(process.env.DEMO_REPEAT_WORKSPACE_ID), { waitUntil: "networkidle" });
     await page.getByText("Also shown earlier in this chat").nth(1).waitFor({ timeout: 60_000 });
     await page.getByRole("button", { name: /^Mark .* done$/ }).first().click();
-    await page.getByText("✓ Already done").nth(1).waitFor();
+    await page.getByText("Already done", { exact: true }).nth(1).waitFor();
     await page.getByText("Show", { exact: true }).first().click();
     const hint = page.getByText("Also shown earlier in this chat").first();
     await hint.waitFor();
-    const copy = hint.locator("xpath=ancestor::*[.//*[text()='ChatGPT']][1]");
-    const collapsed = page.getByText("✓ Already done").first().locator("xpath=ancestor::*[.//*[text()='Show']][1]");
+    const copy = hint.locator("xpath=ancestor::*[.//*[text()='Copy steps']][1]");
+    const collapsed = page.getByText("Already done", { exact: true }).first().locator("xpath=ancestor::*[.//*[text()='Show']][1]");
     await still("repeat-done", [copy, collapsed]);
   }
 
-  // 6. The plugin's settings, at their defaults: the run options, then the agent's provider and mode.
+  // 7. The plugin's settings, at their defaults (Advanced open): Run and Send to at the top, then
+  // the Card and Run details groups and the agent's provider and mode under Advanced.
   await openDefaultSettings(page, settingsUrl);
-  const section = page.getByText("Run with Paseo agent", { exact: true }).first();
   const group = (label) => page.getByText(label, { exact: true }).first().locator(`xpath=ancestor::*[.//*[text()='Agent links on cards']][1]`);
-  await still("settings-run", [section, group("Confirm before starting")], {
-    bottom: page.getByText(/^When the agent finishes or fails/).first(),
+  /** The settings card (full width) that holds `label`'s row and `other`'s. */
+  const settingsCard = (label, other) => page.getByText(label, { exact: true }).first().locator(`xpath=ancestor::*[.//*[text()='${other}']][1]`);
+  const runTitle = page.getByText("Run", { exact: true }).first();
+  await still("settings-run", [runTitle, settingsCard("Report back to chat", "The Run button uses"), settingsCard("Claude", "ChatGPT")], {
+    bottom: page.getByText(/^Where .Send to Claude. opens/).first(),
+    bottomPad: 40,
+  });
+  const agentTitle = page.getByText("Agent", { exact: true }).first();
+  await still("settings-agent", [agentTitle, group("Provider")], { scroll: agentTitle });
+  const cardTitle = page.getByText("Card", { exact: true }).first();
+  await still("settings-general", [cardTitle, settingsCard("Done marks", "Collapse repeated blocks that are done"), settingsCard("Show live screenshot", "Open the agent when started")], {
+    bottom: page.getByText(/^The agent takes a screenshot of the visible page/).first(),
     bottomPad: 20,
   });
-  const provider = page.getByText("Provider", { exact: true }).first();
-  await still("settings-agent", [group("Provider")], { scroll: provider, top: provider, topPad: 20 });
-  const general = page.getByText("Browser prompts", { exact: true }).last();
-  const generalGroup = page.getByText("Done marks", { exact: true }).first().locator(
-    "xpath=ancestor::*[.//*[text()='Usual way to start (desktop)']][1]",
-  );
-  await still("settings-general", [general, generalGroup], { scroll: general });
   // A Git install (record.sh with DEMO_PLUGIN_GIT) shows its repository and the consent text.
   const updates = page.getByText("Updates", { exact: true }).last();
   const updatesGroup = page.getByText("Follow branch", { exact: true }).first().locator("xpath=ancestor::*[.//*[text()='Save branch']][1]");
   await still("settings-updates", [updates, updatesGroup], { scroll: updates });
+} catch (error) {
+  // For debugging a failed run: the page as it was (not copied to docs/screenshots).
+  await page.screenshot({ path: "out/error.png" }).catch(() => {});
+  throw error;
 } finally {
   await browser.close();
 }

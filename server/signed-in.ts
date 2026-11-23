@@ -39,7 +39,7 @@ import {
   type StackInput,
   type StackSecrets,
 } from "../shared/signed-in.ts";
-import { contextHash, execRunner, shortError, type Runner, type ServerBrowser } from "./server-browser.ts";
+import { admittedAfter, contextHash, execRunner, nextAdmissionSeq, rememberAdmission, shortError, type Admission, type Runner, type ServerBrowser } from "./server-browser.ts";
 import { SIGNED_IN_BITWARDEN_FILES, SIGNED_IN_FILES } from "./server-browser-files.ts";
 import { stateDir } from "./state-dir.ts";
 
@@ -427,6 +427,8 @@ export function createSignedIn(options: SignedInOptions) {
   const tickets = createTicketStore({ random, now, max: 20 });
   /** Runs admitted by mcpServer whose MCP container may not exist yet: agent id -> until. */
   const starting = new Map<string, number>();
+  /** The latest admission of each run: a close event older than it is about an older session. */
+  const admissions = new Map<string, Admission>();
   let lastActive = now();
   let building: Promise<void> | null = null;
   let buildError: string | null = null;
@@ -1261,15 +1263,24 @@ export function createSignedIn(options: SignedInOptions) {
       });
     },
     consumeTicket: (ticket: string, target: { sourceId: string; cardId: string }) => tickets.consume(ticket, target),
-    /** The MCP server for one session of a signed-in run; refused while another run holds the browser. */
-    /** Frees the browser for the next run when this one was admitted but is stopped or closed before its MCP container came up. */
-    release(agentId: string): void {
+    /**
+     * Frees the browser for the next run when this one was admitted but is stopped or closed before
+     * its MCP container came up. `seenAt` is the admission sequence number when the stop or close was
+     * seen: a run admitted after it is a newer session (a refresh or resume) and keeps the browser.
+     */
+    release(agentId: string, seenAt?: number): void {
+      if (admittedAfter(admissions.get(agentId), seenAt)) return;
       starting.delete(agentId);
     },
+    /** The run's latest admission (sequence number and session name), for the close hook. */
+    admission: (agentId: string): Admission | undefined => admissions.get(agentId),
+    /** The MCP server for one session of a signed-in run; refused while another run holds the browser. */
     async mcpServer(agentId: string): Promise<{ server: StdioServer; session: string } | { refused: "busy" | "unavailable" } | null> {
       const { path, host } = await sb.docker();
       const node = await sb.node();
       if (!path || !node) return null;
+      // This call's own admission: noted at the claim, with its session name once known (below).
+      const admission: Admission = { seq: 0, session: "" };
       const claimed = await admit(async () => {
         let others: number;
         try {
@@ -1279,20 +1290,30 @@ export function createSignedIn(options: SignedInOptions) {
         }
         if (others > 0) return "busy" as const;
         starting.set(agentId, now() + STARTING_WINDOW_MS);
+        admission.seq = nextAdmissionSeq();
+        rememberAdmission(admissions, agentId, admission);
         return null;
       });
       if (claimed) return { refused: claimed };
-      const runtime = await sb.runtime();
-      const nonce = random().slice(0, 12);
-      // With Bitwarden (running, or chosen: the owner's consent alone is enough) the run's takeover
-      // guard fails closed.
-      const config = await options.config();
-      const failClosed = isBitwardenImage(await runningNekoImage()) || consented(config);
-      const plan = signedInPlan(path, { stackId: await stackId(), instance: await sb.instance(), serverImage: sb.image, agentId, nonce, blockedIps: sb.blockedIps(), failClosed });
-      lastActive = now();
-      // A resumed run may find the browser stopped (idle): start it; the launcher waits for it.
-      if (!(await isRunning())) void ensureStarted().catch(() => undefined);
-      return { server: signedInMcpServer(node, runtime.launcher, plan, host), session: signedInAgentName(agentId, nonce) };
+      try {
+        const runtime = await sb.runtime();
+        const nonce = random().slice(0, 12);
+        // With Bitwarden (running, or chosen: the owner's consent alone is enough) the run's takeover
+        // guard fails closed.
+        const config = await options.config();
+        const failClosed = isBitwardenImage(await runningNekoImage()) || consented(config);
+        const plan = signedInPlan(path, { stackId: await stackId(), instance: await sb.instance(), serverImage: sb.image, agentId, nonce, blockedIps: sb.blockedIps(), failClosed });
+        lastActive = now();
+        // A resumed run may find the browser stopped (idle): start it; the launcher waits for it.
+        if (!(await isRunning())) void ensureStarted().catch(() => undefined);
+        const session = signedInAgentName(agentId, nonce);
+        admission.session = session;
+        return { server: signedInMcpServer(node, runtime.launcher, plan, host), session };
+      } catch (error) {
+        // Admitted but not set up: its admission goes (unless a newer one replaced it).
+        if (admissions.get(agentId) === admission) admissions.delete(agentId);
+        throw error;
+      }
     },
     /** A one-time viewer link (ticket in the fragment), starting the browser when needed. */
     async viewerLink(input: { purpose: "login" | "takeover"; portrait: boolean }) {

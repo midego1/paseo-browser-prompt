@@ -247,6 +247,8 @@ export function createServerBrowser(options: ServerBrowserOptions = {}) {
   };
   /** Runs admitted in mcpServer whose browser container may not exist yet: agent id -> until. */
   const starting = new Map<string, number>();
+  /** The latest admission of each run (its sequence number and session name): a close event seen before it is stale. */
+  const admissions = new Map<string, Admission>();
   let runtimeReady: Promise<void> | null = null;
   /** Writes the launcher and the seccomp profile once per process (the directory name carries their hash). */
   function writeRuntime(): Promise<void> {
@@ -442,15 +444,22 @@ export function createServerBrowser(options: ServerBrowserOptions = {}) {
         instance: await instance(),
       });
       starting.set(agentId, now() + STARTING_WINDOW_MS);
-      return { server: serverBrowserMcpServer(node, join(runtimeDir, "launch.mjs"), plan, host), session: sessionNames(agentId, nonce).browser };
+      const session = sessionNames(agentId, nonce).browser;
+      rememberAdmission(admissions, agentId, { seq: nextAdmissionSeq(), session });
+      return { server: serverBrowserMcpServer(node, join(runtimeDir, "launch.mjs"), plan, host), session };
     },
     /**
      * Frees the slot a run took when it was admitted (its container may never have come up): a run
-     * that is stopped or closed right after its start no longer counts toward the cap.
+     * that is stopped or closed right after its start no longer counts toward the cap. `seenAt` is
+     * the admission sequence number when the stop or close was seen (`admissionSeq()`): a run
+     * admitted after it is a newer session (a refresh or resume) and keeps its slot.
      */
-    release(agentId: string): void {
+    release(agentId: string, seenAt?: number): void {
+      if (admittedAfter(admissions.get(agentId), seenAt)) return;
       starting.delete(agentId);
     },
+    /** The run's latest admission (sequence number and session name), for the close hook. */
+    admission: (agentId: string): Admission | undefined => admissions.get(agentId),
     /**
      * Removes this run's containers and networks, except those of session `except` (a backstop: a
      * session's launcher removes them when it ends, but a killed launcher leaves them behind).
@@ -489,6 +498,36 @@ export function createServerBrowser(options: ServerBrowserOptions = {}) {
 
 export type ServerBrowser = ReturnType<typeof createServerBrowser>;
 
+/**
+ * When a run was last admitted a browser, as a sequence number, and the name of that session. One
+ * counter for this module and the signed-in browser (a process has one of each), so an admission
+ * and a close event are ordered without comparing clocks.
+ */
+export interface Admission {
+  seq: number;
+  session: string;
+}
+
+let admissionSeq = 0;
+/** The stamp of the latest admission so far: an event seen now is older than every admission after it. */
+export const currentAdmissionSeq = (): number => admissionSeq;
+/** A new, larger stamp for an admission. */
+export const nextAdmissionSeq = (): number => ++admissionSeq;
+
+const MAX_ADMISSIONS = 1000;
+
+/** Notes an admission, newest last, keeping the map bounded. */
+export function rememberAdmission(admissions: Map<string, Admission>, agentId: string, admission: Admission): void {
+  admissions.delete(agentId);
+  admissions.set(agentId, admission);
+  if (admissions.size > MAX_ADMISSIONS) admissions.delete(admissions.keys().next().value!);
+}
+
+/** Whether a run was admitted after `seenAt` (a stop or close seen earlier is then about an older session). */
+export function admittedAfter(admission: Admission | undefined, seenAt: number | undefined): boolean {
+  return !!admission && seenAt !== undefined && admission.seq > seenAt;
+}
+
 type OpenHandler = (input: { request: PluginSessionOpenRequest }, context: PluginHookContext) => Promise<PluginSessionOpenRequest | undefined>;
 /** The session-open registration the host offers: `addHook("agent.open.before")` or the older `before("agent.session_open")`. */
 export type OpenHookServer = HookServer & {
@@ -498,12 +537,48 @@ export type OpenHookServer = HookServer & {
 
 const MAX_ATTACHED = 1000;
 
+type AgentSnapshot = { agent?: { status?: string; archivedAt?: string | null } | null } | null | undefined;
+
+/**
+ * Whether the daemon shows the agent as live (neither closed nor archived): a close or archive
+ * event about it is then stale, from a session that a refresh or resume replaced. Unknown (no
+ * snapshot, or the read fails) is not live, so the cleanup goes on as before.
+ */
+const LIVE_CHECK_MS = 5000;
+
+async function liveAgain(context: { paseo?: unknown; signal?: AbortSignal } | undefined, agentId: string, timeoutMs = LIVE_CHECK_MS): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  try {
+    const paseo = context?.paseo as { agents?: { ref?: (id: string) => { refresh?: () => Promise<AgentSnapshot> } } } | undefined;
+    const read = paseo?.agents?.ref?.(agentId)?.refresh?.();
+    if (!read) return false;
+    // A slow or hanging read, or an aborted hook, counts as "not live": the cleanup goes on.
+    const gaveUp = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), timeoutMs);
+      (timer as { unref?: () => void }).unref?.();
+      onAbort = () => resolve(null);
+      if (context?.signal?.aborted) resolve(null);
+      else context?.signal?.addEventListener("abort", onAbort, { once: true });
+    });
+    const agent = (await Promise.race([read, gaveUp]))?.agent;
+    return !!agent && agent.status !== "closed" && !agent.archivedAt;
+  } catch {
+    return false;
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (onAbort) context?.signal?.removeEventListener("abort", onAbort);
+  }
+}
+
 /** What the session-open hook needs from the signed-in browser (server/signed-in.ts). */
 export interface SignedInAttach {
   consumeTicket(ticket: string, target: { sourceId: string; cardId: string }): boolean;
   mcpServer(agentId: string): Promise<{ server: StdioServer; session: string } | { refused: "busy" | "unavailable" } | null>;
   /** Frees the browser a run was admitted to before its MCP container came up (it was stopped or closed). */
-  release?(agentId: string): void;
+  release?(agentId: string, seenAt?: number): void;
+  /** The run's latest admission, so a close older than it does not remove the new session's containers. */
+  admission?(agentId: string): Admission | undefined;
 }
 
 /** Whether a card recorded `runId` as a Server browser or signed-in run (any card: the id is the run's). */
@@ -519,7 +594,7 @@ export function registerServerBrowser(
   server: OpenHookServer,
   settings: SettingsReader,
   browser: ServerBrowser,
-  options: { log?: (message: string) => void; sweepEveryMs?: number; signedIn?: SignedInAttach } = {},
+  options: { log?: (message: string) => void; sweepEveryMs?: number; signedIn?: SignedInAttach; liveCheckMs?: number } = {},
 ) {
   const log = options.log ?? ((message: string) => console.log(`[browser-prompt] ${message}`));
   const attached = new Set<string>();
@@ -617,15 +692,30 @@ export function registerServerBrowser(
   // A run that is stopped (archived, for example by the card's Stop) or closed frees its slot at
   // once, and its containers go. Runs attached in this process, and after a daemon restart runs a
   // card recorded as Server browser or signed-in runs; other agents cause no docker call.
-  const cleanup = async (event: { agent: { id: string } }) => {
+  //
+  // The events carry no time or session, so a close of an old session can arrive after a refresh or
+  // resume admitted a new one. An event is stale when the agent is live again (not closed, not
+  // archived), and whatever was admitted after the event was seen keeps its slot and its session's
+  // containers.
+  const cleanup = async (event: { agent: { id: string } }, context?: { paseo?: unknown; signal?: AbortSignal }) => {
     const id = event.agent.id;
-    browser.release(id);
-    options.signedIn?.release?.(id);
-    if (!attached.has(id)) {
+    const seenAt = currentAdmissionSeq();
+    // Only a run this plugin has something for: attached or admitted in this process, or one a card
+    // recorded as a Server browser or signed-in run (after a daemon restart). Other agents cause no
+    // status read and no docker call.
+    const known = attached.has(id) || !!browser.admission(id) || !!options.signedIn?.admission?.(id);
+    if (!known) {
       const state = await settings.read().catch(() => null);
       if (state?.status !== "ready" || !browserRunRecorded(state.values.runs, id)) return;
     }
-    const removed = await browser.removeContainers(id).catch(() => 0);
+    if (await liveAgain(context, id, options.liveCheckMs)) return;
+    browser.release(id, seenAt);
+    options.signedIn?.release?.(id, seenAt);
+    // A session admitted since keeps its containers; only the older ones go.
+    const newer = [browser.admission(id), options.signedIn?.admission?.(id)].filter((a) => admittedAfter(a, seenAt)).sort((a, b) => b!.seq - a!.seq)[0];
+    // (A session still being admitted has no name yet: nothing is removed then.)
+    if (newer && !newer.session) return;
+    const removed = await browser.removeContainers(id, newer?.session).catch(() => 0);
     if (removed) log(`removed ${removed} Server browser container(s) of run ${id}`);
   };
   try {

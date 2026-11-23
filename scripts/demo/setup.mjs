@@ -28,6 +28,8 @@ export async function openDemo({ viewport, overlay = true }) {
       await pause(700);
     }
   };
+  // Since 0.24 the run details and the agent's provider and model are under Advanced.
+  await showAdvanced(page);
   await setSwitch("Show live screenshot", true);
   await page.getByRole("textbox", { name: "Provider", exact: true }).fill("claude-demo");
   await page.getByRole("textbox", { name: "Model", exact: true }).fill("stand-in");
@@ -55,9 +57,20 @@ export async function openDemo({ viewport, overlay = true }) {
   return { browser, page, pause, settingsUrl, workspacePage };
 }
 
+/** Opens the settings' Advanced part (the Show button of its row; it reads Hide once open). */
+export async function showAdvanced(page) {
+  const show = page.getByRole("button", { name: "Show", exact: true });
+  await page.getByRole("button", { name: /^(Show|Hide)$/ }).waitFor();
+  if (await show.count()) {
+    await show.click();
+    await page.waitForTimeout(500);
+  }
+}
+
 /** The plugin's settings, reset to its defaults (not the stand-in provider this recording used). */
 export async function openDefaultSettings(page, settingsUrl) {
   await page.goto(settingsUrl, { waitUntil: "networkidle" });
+  await showAdvanced(page);
   await page
     .getByText("Reset agent settings to default")
     .locator("xpath=ancestor::*[.//*[text()='Reset']][1]")

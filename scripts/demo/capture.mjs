@@ -42,10 +42,10 @@ async function smoothScroll(locator, block = "center") {
   // Once more if the chat jumped back to its bottom meanwhile.
   await locator.evaluate((element, where) => element.scrollIntoView({ behavior: "smooth", block: where }), block);
 }
-const statusLine = () => page.getByText(/^Step \d of 4/).first();
+// The card's title anchors the camera: since 0.24 a panel for the owner sits above "Step N of M".
+const statusLine = () => page.getByText("Check what example.com says", { exact: true }).first();
 /**
- * Camera work, not app behavior: while on, keeps the card's "Step N of 4" line at the top of the
- * chat. The chat follows its bottom whenever the card changes height (a box appears or goes), which
+ * Camera work, not app behavior: while on, keeps the card's title at the top of the chat. The chat follows its bottom whenever the card changes height (a box appears or goes), which
  * would otherwise jump away from the card mid-scene.
  */
 async function pinCard(on) {
@@ -54,7 +54,7 @@ async function pinCard(on) {
     if (!enable) return;
     const find = () =>
       document.evaluate(
-        "(//*[starts-with(normalize-space(text()), 'Step ') and contains(text(), ' of 4')])[1]",
+        "(//*[normalize-space(text())='Check what example.com says'])[1]",
         document,
         null,
         XPathResult.FIRST_ORDERED_NODE_TYPE,
@@ -77,14 +77,20 @@ try {
   await caption("Agents write browser steps as a card");
   await pause(900);
   await pointTo(page.getByText("Read the first paragraph.").last(), { steps: 40 });
-  await pause(1800);
+  await pause(900);
+  await caption("Run, or send the steps to ChatGPT or Claude");
+  await pointTo(page.getByRole("button", { name: /^Start .* in the ChatGPT desktop app$/ }), { steps: 30 });
+  await pause(500);
+  await pointTo(page.getByRole("button", { name: /^Start .* in the Claude desktop app$/ }), { steps: 18 });
+  await pause(900);
 
   film.mark("run");
   await caption("Run them with a Paseo agent, in the background");
   await pause(600);
-  // Since 0.24 the Paseo browser is a "Run once in…" row (unless it is the Run default).
+  // The Run button names its browser; its chevron (Run once in…) offers the others for one run.
   await pointTo(page.getByRole("button", { name: "Run once in another browser" }), { click: true });
-  await pause(500);
+  await caption("Run in your default browser, or pick another for one run");
+  await pause(1500);
   await pointTo(page.getByRole("menuitem", { name: /Run .* in the Paseo browser/ }), { click: true });
   await page.getByRole("button", { name: "Start the Paseo agent" }).waitFor();
   await pause(1300);
@@ -115,6 +121,13 @@ try {
   await smoothScroll(statusLine(), "start");
   await pinCard(true);
   await pause(1700);
+  // While a run is going the card offers Watch and Stop.
+  await caption("Watch it, or stop it any time");
+  await pointTo(page.getByRole("button", { name: /^Open the Paseo agent for / }).first(), { steps: 24 });
+  await pause(500);
+  await pointTo(page.getByRole("button", { name: /^Stop the run of / }), { steps: 14 });
+  await pause(900);
+  await page.mouse.move(1150, 600, { steps: 20 });
 
   film.mark("owner-question");
   const option = page.getByText("Yes, check it").first();
@@ -122,9 +135,12 @@ try {
   await caption("…or ask you, right on the card");
   await smoothScroll(statusLine(), "start");
   await pause(1400);
-  await pointTo(option, { click: true });
+  await pointTo(option);
+  await option.click();
   await pause(900);
-  await pointTo(page.getByText("Send answer").first(), { click: true });
+  const send = page.getByText("Send answer").first();
+  await pointTo(send);
+  await send.click();
 
   film.mark("permission");
   const url = page.getByText("https://www.iana.org/domains/reserved").first();
@@ -134,13 +150,16 @@ try {
   await pause(600);
   await pointTo(url, { steps: 30 });
   await pause(1200);
-  await pointTo(page.getByText("Allow", { exact: true }).first(), { click: true });
+  const allow = page.getByText("Allow", { exact: true }).first();
+  await pointTo(allow);
+  await allow.click();
   const confirm = page.getByText(/^Confirm allow/).first();
   await confirm.waitFor();
   // The box changed height, and the chat may have followed its bottom: back to the card.
   await smoothScroll(statusLine(), "start");
   await pause(900);
-  await pointTo(confirm, { click: true });
+  await pointTo(confirm);
+  await confirm.click();
   await pinCard(false);
 
   film.mark("report");
@@ -152,26 +171,40 @@ try {
   await page.getByText(/^Thanks!/).first().waitFor();
   await pause(1100);
   await smoothScroll(statusLine(), "start");
-  await page.getByText(/done ✓/).first().waitFor();
-  await pause(1600);
+  await caption("Done folds to a summary, with Run again");
+  await page.getByText("Done", { exact: true }).first().waitFor();
+  await pause(1800);
 
   film.mark("settings");
   film.cut();
   await caption("");
   // Show the plugin's own defaults, not the stand-in provider this recording's run used.
   await openDefaultSettings(page, settingsUrl);
-  const section = page.getByText("Run with Paseo agent", { exact: true }).first();
+  const section = page.getByText("Run", { exact: true }).first();
   await section.evaluate((element) => element.scrollIntoView({ block: "start" }));
   await page.mouse.move(1180, 420);
   await pause(600);
   film.resume();
   await caption("Everything is configurable");
   await pause(1100);
-  for (const name of ["Thumbnails", "Talk to the chat", "Report back to chat", "Permission mode"]) {
+  for (const name of ["Report back to chat", "Send to", "Thumbnails", "Talk to the chat", "Permission mode"]) {
     await smoothScroll(page.getByText(name, { exact: true }).first(), "center");
     await pause(900);
   }
   await pause(300);
+} catch (error) {
+  // For debugging a failed run: the page as it was.
+  await page.screenshot({ path: "out/error.png" }).catch(() => {});
+  const probe = await page
+    .evaluate(() => {
+      const nodes = document.evaluate("//*[normalize-space(text())='Check what example.com says']", document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+      return { pin: window.__demoPin ?? null, matches: Array.from({ length: nodes.snapshotLength }, (_, i) => Math.round(nodes.snapshotItem(i).getBoundingClientRect().top)) };
+    })
+    .catch(() => null);
+  console.error("pin probe", JSON.stringify(probe));
+  const text = await page.evaluate(() => document.body.innerText).catch(() => "");
+  console.error(text.split("\n").filter((line) => /needs you|Send answer|Confirm|Allow|Yes, check|URL|Step \d/.test(line)).join("\n"));
+  throw error;
 } finally {
   await film.stop();
   await browser.close();
