@@ -590,8 +590,12 @@ remove them: `docker image ls 'browser-prompt-signed-in'` and `docker image rm <
   keeps the archived run ids, and nothing else, in `archived-runs.json` in the plugin's state directory.
 - Stop on the card (0.24.0) archives the run's agent from your own Paseo app, the same call the mode
   guard uses; it needs no new server permission and keeps the agent's history. It asks for a second
-  press. A run's tool call already under way may still finish; the Server browser's containers are
-  removed with the archived run, and the signed-in browser is free again once the run's session ends.
+  press, and only stops a run one of this chat's cards recorded, never the chat's own agent. A run's
+  tool call already under way may still finish (Paseo's client API has no turn cancel). The archive
+  frees the run's Server browser slot or the signed-in browser at once and removes its containers;
+  after a daemon restart that happens for runs a card recorded as browser runs.
+- The card never makes the signed-in Server browser (your logins) a default you did not choose:
+  without a choice, Run uses the Paseo browser (or the browser you had as your usual way).
 - A Claude in Chrome tab run (the card's Run once in…, or the Run default; Claude in Chrome) runs the agent in your real Chrome, with every account you
   are signed in to, not in the Paseo browser. Its reach is much wider. In Auto mode, its default, a
   model classifier approves browser actions and the extension skips its own check per site, so the
