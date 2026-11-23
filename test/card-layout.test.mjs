@@ -10,7 +10,13 @@ import {
   defaultRunWay,
   DEFAULT_CARD_CHOICES,
   isDarkColor,
+  markRunStopped,
   mixColor,
+  ownerStopState,
+  runStoppedByOwner,
+  STOPPED_RUN_MARKER,
+  stopRecordedRun,
+  stopRefusal,
   progressSegments,
   runMenuItems,
   sentNote,
@@ -98,12 +104,17 @@ test("ended (failed, stopped): Run again is filled again, Send is back, no Stop"
   assert.equal(view.showStop, false);
 });
 
-test("Run's default: the card setting, else a browser usual way, else the signed-in Server browser", () => {
-  assert.equal(defaultRunWay(DEFAULT_CARD_CHOICES, "app", true), "signed-in", "ChatGPT was the usual way: the design's default");
+test("Run's default: the card setting, else a browser usual way, else the Paseo browser; never signed in unless chosen", () => {
+  for (const usual of ["app", "web-agent", "copy-only", "claude-desktop"]) {
+    assert.equal(defaultRunWay(DEFAULT_CARD_CHOICES, usual, true), "paseo", `usual way ${usual}: no credentialed browser by default`);
+  }
   for (const way of ["paseo", "server", "signed-in", "chrome"]) assert.equal(defaultRunWay(DEFAULT_CARD_CHOICES, way, true), way, `usual way ${way} keeps working`);
+  assert.equal(defaultRunWay({ runWay: "signed-in" }, "app", true), "signed-in", "the owner chose it");
   assert.equal(defaultRunWay({ runWay: "server" }, "paseo", true), "server", "the card setting wins");
-  assert.equal(defaultRunWay({ runWay: "chrome" }, "app", false), "signed-in", "no Claude provider: not Chrome");
-  assert.equal(defaultRunWay(DEFAULT_CARD_CHOICES, "chrome", false), "signed-in");
+  assert.equal(defaultRunWay({ runWay: "chrome" }, "app", false), "paseo", "no Claude provider: the Paseo browser, not signed in");
+  assert.equal(defaultRunWay({ runWay: "chrome" }, "signed-in", false), "paseo", "a saved Chrome choice never turns into the signed-in browser");
+  assert.equal(defaultRunWay(DEFAULT_CARD_CHOICES, "chrome", false), "paseo");
+  assert.equal(defaultRunWay({ runWay: "" }, "server", false), "server");
 });
 
 test("Send to ChatGPT: the card setting, else today's usual ChatGPT way; phones never use the app", () => {
@@ -154,4 +165,51 @@ test("theme tints are fixed colors from the theme; unreadable colors fall back t
   assert.notEqual(dark.accentText, colors.accent, "lightened in dark");
   assert.equal(cardTints({ ...colors, surface1: "#f8f8f8" }).accentText, colors.accent, "the accent itself in light");
   for (const value of Object.values(dark)) assert.match(value, /^#[0-9a-f]{6}$/);
+});
+
+test("Stop: the stopped run shows as stopped (an ended card with Run again), not as done", () => {
+  // An archived agent can look idle ("done") or vanish from the cache ("unknown").
+  for (const state of ["done", "unknown", "running", "stopped"]) {
+    const shown = ownerStopState(state, { here: true, recorded: false });
+    assert.equal(shown, "stopped", `pressed here: ${state}`);
+    const phase = cardPhase({ runState: shown, done: false });
+    assert.equal(phase, "ended");
+    const view = cardLayout({ phase, mobile: false, compact: false, expanded: false });
+    assert.equal(view.showStop, false, "no Stop once stopped");
+    assert.equal(view.runLabel, "Run again");
+    assert.equal(view.runPrimary, true);
+  }
+  // After a reload the run record says so; a run the owner resumed in Paseo shows its real state.
+  assert.equal(ownerStopState("done", { here: false, recorded: true }), "stopped");
+  assert.equal(ownerStopState("unknown", { here: false, recorded: true }), "stopped");
+  assert.equal(ownerStopState("running", { here: false, recorded: true }), "running");
+  assert.equal(ownerStopState("needs-input", { here: false, recorded: true }), "needs-input");
+  assert.equal(ownerStopState("done", { here: false, recorded: false }), "done", "not stopped: unchanged");
+  // A done mark still folds a stopped card.
+  assert.equal(cardPhase({ runState: "stopped", done: true }), "done");
+});
+
+test("Stop is recorded on the run's record in place, keeping the server's markers", () => {
+  const runs = [["chat:card", "run-1", "most-recent", "key:k", "browser:server"], ["chat:card", "run-2", "key:k"], ["other:x", "run-3"]];
+  const next = markRunStopped(runs, "run-1");
+  assert.deepEqual(next[0], ["chat:card", "run-1", "most-recent", "key:k", "browser:server", STOPPED_RUN_MARKER], "position 2 stays the fallback marker");
+  assert.deepEqual(next.slice(1), runs.slice(1), "other records untouched, order kept");
+  assert.deepEqual(markRunStopped(next, "run-1"), next, "marked once");
+  assert.equal(runStoppedByOwner(next, "run-1"), true);
+  assert.equal(runStoppedByOwner(next, "run-2"), false);
+  assert.equal(runStoppedByOwner(next, null), false);
+});
+
+test("Stop archives only a run this chat's card recorded, never the chat's own agent", async () => {
+  const runs = [["chat:card", "run-1", "key:k"], ["other-chat:card", "run-9", "key:k"]];
+  const archived = [];
+  const archive = async (id) => void archived.push(id);
+  await assert.rejects(stopRecordedRun(archive, { runId: "chat", sourceAgentId: "chat", runs: [...runs, ["chat:card", "chat"]] }), /chat's own agent/);
+  await assert.rejects(stopRecordedRun(archive, { runId: "run-x", sourceAgentId: "chat", runs }), /not recorded on this card/);
+  await assert.rejects(stopRecordedRun(archive, { runId: "run-9", sourceAgentId: "chat", runs }), /not recorded/, "another chat's run");
+  await assert.rejects(stopRecordedRun(archive, { runId: null, sourceAgentId: "chat", runs }), /no run/);
+  assert.deepEqual(archived, [], "nothing archived on a refusal");
+  await stopRecordedRun(archive, { runId: "run-1", sourceAgentId: "chat", runs });
+  assert.deepEqual(archived, ["run-1"]);
+  assert.equal(stopRefusal({ runId: "run-1", sourceAgentId: "chat", runs }), null);
 });

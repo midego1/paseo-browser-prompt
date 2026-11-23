@@ -10,6 +10,7 @@ import {
   resolveLaunchWith,
   type ResolvedLaunch,
 } from "../shared/agent-prompt";
+import { stopRecordedRun } from "../shared/card-layout";
 import { enforceRunMode, type ModeCheck, type ModeGuardAgent } from "../shared/mode-guard";
 import { runLabels } from "../shared/report-back";
 import { countSteps } from "../shared/steps";
@@ -64,8 +65,12 @@ export function openRunScreen(agentId: string, title: string, autoOpen: boolean)
  * history stays in Paseo; the Server browser's containers go with it (server/server-browser.ts), and
  * the signed-in browser is free for the next run once its session has ended.
  */
-export async function stopRunAgent(paseo: PaseoApi, agentId: string): Promise<void> {
-  await paseo.agents.ref(agentId).archive();
+export async function stopRunAgent(
+  paseo: PaseoApi,
+  input: { runId: string | null; sourceAgentId: string; runs: readonly (readonly string[])[] },
+): Promise<void> {
+  // Never the chat's own agent, and only a run this chat's card recorded (shared/card-layout.ts).
+  await stopRecordedRun((agentId) => paseo.agents.ref(agentId).archive(), input);
 }
 
 export type WorkspaceSource = "card-agent" | "card-agent-refresh" | "most-recent";

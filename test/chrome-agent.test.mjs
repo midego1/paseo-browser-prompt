@@ -202,20 +202,20 @@ test("Run once in… runs once and never changes the default", () => {
   assert.doesNotMatch(onRunPress, /\.save\(/, "a run never saves a default");
 });
 
-test("Stop archives the run (the mode guard's stop), only after a second press", () => {
+test("Stop is wired to the guarded archive, only after a second press, and recorded on the run", () => {
+  // The guard and the archive are tested in card-layout.test.mjs (stopRecordedRun); this checks the wiring.
   const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
   const run = readFileSync(new URL("../client/agent-run.ts", import.meta.url), "utf8");
-  assert.match(run, /export async function stopRunAgent\(paseo: PaseoApi, agentId: string\): Promise<void> \{\n\s+await paseo\.agents\.ref\(agentId\)\.archive\(\);/);
+  assert.match(run, /await stopRecordedRun\(\(agentId\) => paseo\.agents\.ref\(agentId\)\.archive\(\), input\);/);
   const stop = card.slice(card.indexOf("async function stopRun("), card.indexOf("const runVisuals ="));
   assert.match(stop, /if \(!stopArmed\) \{\s+setStopArmed\(true\);\s+return;\s+\}/, "the first press only arms it");
-  assert.match(stop, /await stopRunAgent\(paseo, stopped\);/);
+  assert.match(stop, /await stopRunAgent\(paseo, \{ runId: stopped, sourceAgentId: agentId,/);
+  assert.match(stop, /markRunStopped\(values\.runs, stopped\)/);
+  assert.match(card, /ownerStopState\(archivedRun === runAgentId && mayBeArchived \? "done" : followedState,/, "the shown state follows the stop");
   assert.match(card, /setTimeout\(\(\) => setStopArmed\(false\), STOP_CONFIRM_MS\)/, "and it disarms by itself");
-  assert.match(card, /onPress=\{\(\) => void stopRun\(\)\}/);
-  // Shown for a run that is going (running and needs you), for every browser.
   assert.match(card, /\{phase === "running" \? watchStop\(\) : null\}/);
   const panel = card.slice(card.indexOf("<View style={styles.ask}>"), card.indexOf("{showSteps ? ("));
   assert.match(panel, /\{watchStop\(\)\}/, "in the needs-you panel too");
-  assert.doesNotMatch(card.slice(card.indexOf("function watchStop()")), /runBrowser === "(paseo|server|chrome)"/, "no browser is left out");
 });
 
 test("the confirmation describes the exact provider and mode the run starts with", () => {

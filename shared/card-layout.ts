@@ -26,15 +26,22 @@ export interface CardChoices {
 
 export const DEFAULT_CARD_CHOICES: CardChoices = { runWay: "", chatGpt: "", claude: "claude-desktop" };
 
-/** The default way when neither the card settings nor the usual way name a browser (the design's default). */
-export const FALLBACK_RUN_WAY: RunWay = "signed-in";
+/**
+ * The default way when neither the card settings nor the usual way name a browser, and when Claude in
+ * Chrome cannot start. Never the signed-in browser: that one holds the owner's logins and needs its
+ * own build and consent, so it is the default only when the owner chose it. The Paseo browser needs
+ * nothing installed and none of the server's stored sessions; the clean Server browser needs Docker
+ * and a 2.6 GB build first, so on a new install it would be a button that cannot start.
+ */
+export const FALLBACK_RUN_WAY: RunWay = "paseo";
 
 const isRunWay = (way: string): way is RunWay => (RUN_WAYS as readonly string[]).includes(way);
 
 /**
  * The browser the Run button uses. The card setting wins; until the owner picks one there, a usual way
  * that is a browser keeps working as before, and any other usual way (ChatGPT, Claude, Copy only)
- * falls back to the signed-in Server browser. Claude in Chrome only when its launch would work.
+ * falls back to the Paseo browser. The signed-in browser only when the owner chose it (here or as
+ * the usual way). Claude in Chrome only when its launch would work, else the Paseo browser.
  */
 export function defaultRunWay(choices: Pick<CardChoices, "runWay">, usual: UsualWay, chromeAvailable: boolean): RunWay {
   const pick = choices.runWay || (isRunWay(usual) ? usual : FALLBACK_RUN_WAY);
@@ -242,4 +249,53 @@ export function cardTints(colors: { accent: string; surface1: string; border: st
     warningLine: mixColor(colors.statusWarning, colors.surface1, 0.55),
     successLine: mixColor(colors.statusSuccess, colors.border, 0.45),
   };
+}
+
+/** Marks a card's run record as stopped by the owner (the card's Stop), so it stays stopped after a reload and on other devices. */
+export const STOPPED_RUN_MARKER = "stopped:owner";
+
+/** `runs` with the record(s) of `runId` marked stopped (in place, so their order and the server's markers stay). */
+export function markRunStopped<Entry extends readonly string[]>(runs: readonly Entry[], runId: string): Entry[] {
+  return runs.map((entry) => (entry[1] === runId && !entry.slice(2).includes(STOPPED_RUN_MARKER) ? ([...entry, STOPPED_RUN_MARKER] as unknown as Entry) : entry));
+}
+
+/** Whether the owner stopped `runId` from a card (its record carries the marker). */
+export function runStoppedByOwner(runs: readonly (readonly string[])[], runId: string | null): boolean {
+  return !!runId && runs.some((entry) => entry[1] === runId && entry.slice(2).includes(STOPPED_RUN_MARKER));
+}
+
+/**
+ * The run state the card shows once the owner stopped the run. An archived agent can look idle (and
+ * so "done") or vanish from the app's cache ("unknown"), so a stopped run is shown as stopped:
+ * always for a stop pressed in this session, and for one recorded earlier unless the run works again
+ * (the owner unarchived it and gave it a new turn).
+ */
+export function ownerStopState<State extends string>(state: State, stop: { here: boolean; recorded: boolean }): State | "stopped" {
+  if (stop.here) return "stopped";
+  if (stop.recorded && state !== "running" && state !== "needs-input" && state !== "starting") return "stopped";
+  return state;
+}
+
+/**
+ * Why the card may not stop `runId`, or null when it may: never the chat's own agent, and only a run
+ * one of this chat's cards recorded (the record arrives right after the start).
+ */
+export function stopRefusal(input: { runId: string | null; sourceAgentId: string; runs: readonly (readonly string[])[] }): string | null {
+  const { runId, sourceAgentId, runs } = input;
+  if (!runId) return "There is no run to stop.";
+  if (runId === sourceAgentId) return "The card never stops the chat's own agent.";
+  if (!runs.some((entry) => entry[1] === runId && entry[0]?.startsWith(`${sourceAgentId}:`))) {
+    return "This run is not recorded on this card yet; try again in a moment, or stop it in Paseo.";
+  }
+  return null;
+}
+
+/** Archives `runId` (the card's Stop) only when stopRefusal allows it; throws its reason otherwise. */
+export async function stopRecordedRun(
+  archive: (agentId: string) => Promise<unknown>,
+  input: { runId: string | null; sourceAgentId: string; runs: readonly (readonly string[])[] },
+): Promise<void> {
+  const refusal = stopRefusal(input);
+  if (refusal) throw new Error(refusal);
+  await archive(input.runId!);
 }

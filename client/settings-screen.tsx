@@ -142,7 +142,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
         <SettingsCard>
           <SettingsSelect
             label="The Run button uses"
-            hint="Run on the card starts a Paseo agent in this browser. The card's chevron (Run once in…) offers the others for one run without changing this. Paseo browser works only while the Paseo app on your Mac is open; Claude in Chrome shows only with a Claude provider."
+            hint="Run on the card starts a Paseo agent in this browser. The card's chevron (Run once in…) offers the others for one run without changing this. Without a choice: the browser you had as your usual way, else the Paseo browser (never the signed-in one unless you pick it). Paseo browser works only while the Paseo app on your Mac is open; Claude in Chrome shows only with a Claude provider."
             value={runWay}
             options={runOptions}
             disabled={cardPrefs.status !== "ready"}

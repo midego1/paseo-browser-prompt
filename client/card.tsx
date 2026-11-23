@@ -33,7 +33,11 @@ import {
   cardPhase,
   cardTints,
   chatGptTarget,
+  markRunStopped,
   mixColor,
+  ownerStopState,
+  runStoppedByOwner,
+  stopRefusal,
   defaultRunWay,
   DEFAULT_CARD_CHOICES,
   RUN_WAY_A11Y,
@@ -137,9 +141,10 @@ type Theme = PluginTimelineItemProps["theme"];
  * branch): spacing 4·8·12·16, buttons 40 high in the chat column and at least 44 on a phone,
  * quiet row 32 (44 on a phone). Only flex rows, borders and radii: no CSS-only effects.
  */
-function cardStyles(theme: Theme, compact: boolean) {
+function cardStyles(theme: Theme, compact: boolean, touch: boolean) {
   const tints = cardTints(theme.colors);
-  const h = compact ? 44 : 40;
+  // A touch screen (a phone, or an iPad in the wide layout) never gets a target under 44.
+  const h = compact || touch ? 44 : 40;
   const radius = 8;
   const button = {
     flexDirection: "row" as const,
@@ -189,7 +194,7 @@ function cardStyles(theme: Theme, compact: boolean) {
       alignItems: "center" as const,
       justifyContent: "center" as const,
       gap: 6,
-      minHeight: compact ? 44 : 32,
+      minHeight: compact || touch ? 44 : 32,
       paddingHorizontal: 8,
       borderRadius: radius,
       ...(compact ? { flexGrow: 1 } : null),
@@ -231,7 +236,7 @@ function cardStyles(theme: Theme, compact: boolean) {
       flexDirection: "row" as const,
       alignItems: "center" as const,
       gap: 12,
-      minHeight: compact ? 60 : 52,
+      minHeight: compact || touch ? 60 : 52,
       paddingVertical: 8,
       paddingHorizontal: 10,
       borderRadius: radius,
@@ -290,6 +295,8 @@ export function BrowserPromptCard({
   const [runError, setRunError] = useState<string | null>(null);
   // A run this card started or was handed by the run lock, until its record arrives (see cardRun).
   const [localRun, setLocalRun] = useState<string | null>(null);
+  // The run the owner stopped with this card's Stop in this session (also recorded on the run, see stopRun).
+  const [stoppedRun, setStoppedRun] = useState<string | null>(null);
   // The run this card started in this session: before its first turn an idle snapshot means "starting".
   const [startedHere, setStartedHere] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -368,7 +375,11 @@ export function BrowserPromptCard({
       if (timer) clearTimeout(timer);
     };
   }, [mayBeArchived, followedState, runAgentId]);
-  const observedState = archivedRun === runAgentId && mayBeArchived ? "done" : followedState;
+  // A stopped (archived) run can look idle, so "done", or vanish from the cache: it shows as stopped.
+  const observedState = ownerStopState(archivedRun === runAgentId && mayBeArchived ? "done" : followedState, {
+    here: !!runAgentId && stoppedRun === runAgentId,
+    recorded: runStoppedByOwner(storedRuns ?? [], runAgentId),
+  });
   const totalSteps = useMemo(() => countSteps(text), [text]);
   const showSteps =
     settings.status === "ready" ? settings.values.showStepProgress : DEFAULT_AGENT_SETTINGS.showStepProgress;
@@ -446,7 +457,7 @@ export function BrowserPromptCard({
     if (cardPrefs.status === "ready") rememberChatGptTarget(gptTarget);
   }, [cardPrefs.status, gptTarget]);
 
-  const styles = useMemo(() => cardStyles(theme, layout.compact), [theme, layout.compact]);
+  const styles = useMemo(() => cardStyles(theme, layout.compact, mobile), [theme, layout.compact, mobile]);
 
   function report(result: ActionResult) {
     if (result.ok) toast.show(result.message, { variant: "success", durationMs: 3500 });
@@ -487,6 +498,8 @@ export function BrowserPromptCard({
    */
   async function rememberRun(startedAgentId: string, fallback: boolean, browser: BrowserAgent) {
     setLocalRun(startedAgentId);
+    // A new run: the note about an earlier Send no longer applies.
+    setSentTo(null);
     setStartedHere(startedAgentId);
     setStartedBrowser({ agentId: startedAgentId, browser });
     // Position 2 stays the fallback marker the server reads; the content marker comes after it.
@@ -740,7 +753,6 @@ export function BrowserPromptCard({
   // Stop asks for a second press within STOP_CONFIRM_MS.
   const [stopArmed, setStopArmed] = useState(false);
   const [stopping, setStopping] = useState(false);
-  const [stoppedRun, setStoppedRun] = useState<string | null>(null);
   useEffect(() => {
     if (!stopArmed) return;
     const timer = setTimeout(() => setStopArmed(false), STOP_CONFIRM_MS);
@@ -776,6 +788,12 @@ export function BrowserPromptCard({
    */
   async function stopRun() {
     if (!runAgentId || stopping) return;
+    const refusal = stopRefusal({ runId: runAgentId, sourceAgentId: agentId, runs: storedRuns ?? [] });
+    if (refusal) {
+      setStopArmed(false);
+      toast.error(refusal);
+      return;
+    }
     if (!stopArmed) {
       setStopArmed(true);
       return;
@@ -784,8 +802,11 @@ export function BrowserPromptCard({
     setStopping(true);
     const stopped = runAgentId;
     try {
-      await stopRunAgent(paseo, stopped);
+      await stopRunAgent(paseo, { runId: stopped, sourceAgentId: agentId, runs: newestSettings().values?.runs ?? storedRuns ?? [] });
       setStoppedRun(stopped);
+      setSentTo(null);
+      // Recorded on the run, so the card shows it stopped after a reload and on other devices.
+      void saveWithRetries(newestSettings, (values) => ({ ...values, runs: markRunStopped(values.runs, stopped) }));
       toast.show("Run stopped. The agent is archived; its history stays in Paseo.", { durationMs: 3500 });
     } catch (error) {
       toast.error(`Could not stop the run: ${error instanceof Error ? error.message : String(error)}. Stop it in Paseo.`);
@@ -833,7 +854,7 @@ export function BrowserPromptCard({
     ) : null;
 
   if (view === "collapsed") {
-    return <CollapsedDone title={displayTitle} theme={theme} compact={layout.compact} onShow={() => setExpanded(true)} />;
+    return <CollapsedDone title={displayTitle} theme={theme} compact={layout.compact} onShow={() => setExpanded(true)} touch={mobile} />;
   }
 
   return (
@@ -1139,7 +1160,7 @@ export function BrowserPromptCard({
               setMenuOpen(false);
               openSettingsScreen();
             }}
-            style={({ pressed }) => [styles.menuItem, { minHeight: layout.compact ? 48 : 40 }, pressed ? { backgroundColor: theme.colors.surface2 } : null]}
+            style={({ pressed }) => [styles.menuItem, { minHeight: layout.compact || mobile ? 48 : 40 }, pressed ? { backgroundColor: theme.colors.surface2 } : null]}
           >
             <View style={[styles.menuIcon, { backgroundColor: "transparent" }]}>
               <Icon name="Settings" size={16} color={theme.colors.foregroundMuted} />
@@ -1411,7 +1432,7 @@ function SendButton({
 }
 
 /** A later copy of a block that is done: one line, and Show expands the full card right here. */
-function CollapsedDone({ title, theme, compact, onShow }: { title: string; theme: Theme; compact: boolean; onShow: () => void }) {
+function CollapsedDone({ title, theme, compact, onShow, touch }: { title: string; theme: Theme; compact: boolean; onShow: () => void; touch: boolean }) {
   const tints = cardTints(theme.colors);
   return (
     <View
@@ -1421,7 +1442,7 @@ function CollapsedDone({ title, theme, compact, onShow }: { title: string; theme
         alignSelf: compact ? "stretch" : "flex-start",
         maxWidth: "100%",
         gap: 8,
-        minHeight: compact ? 46 : 36,
+        minHeight: compact || touch ? 46 : 36,
         paddingLeft: 12,
         paddingRight: 4,
         borderRadius: 8,
