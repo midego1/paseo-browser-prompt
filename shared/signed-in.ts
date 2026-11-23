@@ -50,9 +50,10 @@ export function signedInImageTag(contextHash: string): string {
  * (signed-in-bitwarden/bitwarden.json holds the same pin; a test keeps them equal). Downloaded from
  * Bitwarden's GitHub releases at image build time, only after the owner's two-press consent, and
  * refused unless size and SHA-256 match (its files are the same as the Chrome Web Store build of
- * that version; only the store's update_url differs). The image packs it unchanged into a CRX with a
- * key made for that build (so each build has its own extension id) and force-installs it by policy
- * from a local update manifest, so it is never updated behind the pin.
+ * that version; only the store's update_url differs). The image packs it unchanged into a CRX signed
+ * with this install's key (made once by the daemon, so the extension id stays the same across images
+ * and pins) and force-installs it by policy from a local update manifest, so it is never updated
+ * behind the pin.
  */
 export const BITWARDEN = {
   version: "2026.11.0",
@@ -66,6 +67,15 @@ export function bitwardenImageTag(baseTag: string, contextHash: string): string 
   const hash = contextHash.toLowerCase().replace(/[^0-9a-f]/g, "").slice(0, 12);
   if (hash.length < 12 || !baseTag.startsWith(`${SIGNED_IN_IMAGE_REPOSITORY}:`)) throw new Error("The Bitwarden image tag needs the signed-in image and a build context hash.");
   return `${baseTag}-bw${BITWARDEN.version}-${hash}`;
+}
+
+/**
+ * Whether an image tag is a Bitwarden variant of the signed-in image (any pin, any install key, any
+ * plugin version): used to fail closed (lock on release, the run's guard) whenever such an image
+ * runs, also one this daemon would not build now (an older version still running after an update).
+ */
+export function isBitwardenImageTag(tag: string): boolean {
+  return tag.startsWith(`${SIGNED_IN_IMAGE_REPOSITORY}:`) && /-bw\d/.test(tag.slice(SIGNED_IN_IMAGE_REPOSITORY.length + 1));
 }
 
 /** Lock attempts (lock, then reload) before the daemon restarts Chromium to clear every in-memory key. */

@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.23.1 (unreleased)
+
+Follow-ups from the reviews of the Bitwarden work (0.23.0). Fail closed on lock, fail safe on wipe.
+
+- **Restart for a failed lock decided after the checks:** whether Chromium is restarted for a lock
+  that could not be verified is decided only after the lock and reload rounds failed, with the relay
+  asked again then and compared with what it said before: never while a viewer is connected or you
+  hold control, and not when a viewer was used, a takeover began or ended, the relay started again
+  meanwhile, or the relay stopped answering. The run then stays paused and is told you have to act.
+- **Lock backoff forgotten when it no longer applies:** the growing pause after failed locks is reset
+  once nothing is pending and when the relay started again (the relay's status now names its start,
+  `bootId`), so an old pause never delays a lock that is needed now.
+- **Signing key file:** written atomically (a new 0600 file in the same directory, flushed, renamed,
+  the directory flushed; the temp file removed on any failure), read through `O_NOFOLLOW` descriptors
+  (fstat, fchmod: no check-then-read race; a symlinked directory or key is refused; an empty or
+  truncated key is an error, never a reason to make a new key and id),
+  and the file (0600) and its directory (0700) are tightened again on every daemon start, not only
+  when the key is made. A key that is not a regular file of the daemon user is refused; then, like an
+  unreadable key, the browser keeps the image it runs (no switch to "no Bitwarden" on a guess).
+- **Unknown settings keep the vault:** the daemon's view of the settings is one tested function; not
+  ready, invalid, a failed read or a Bitwarden value that is not a boolean count as unknown (keep what
+  runs), only an explicit off turns Bitwarden off and removes its data.
+- **A failed pin probe is never "no Bitwarden":** the daemon reads the installed build from neko's
+  pin file with a probe that reports "no pin file" itself. A docker exec error, a timeout or an
+  unparseable pin keeps the run paused ("cannot read the Bitwarden pin; staying paused") unless the
+  running image is certainly a plain one, and the cleanup of earlier builds then clears nothing (it
+  used to clear the current build's data too). With the relay down, an image name that cannot be
+  read counts as possibly Bitwarden (the vault is locked).
+- **Any Bitwarden image fails closed:** a Bitwarden variant that this daemon would not build now (an
+  older one still running after a plugin update) still gets a relay that locks on release, the lock
+  while the relay is down, and a fail-closed run guard; the owner's consent alone also makes the run
+  guard fail closed.
+- **Start script:** the installed build's id is dropped from `.bp-bitwarden-dbs-cleared`, so its
+  shared extension databases are cleared again if it ever becomes stale later. This changes the
+  signed-in image: after this update, Bitwarden has to be downloaded again (and you log in to it again).
+- **Wording:** the settings, README and SECURITY.md say that a plugin update that changes the browser
+  image (not only a newer Bitwarden pin) can require downloading Bitwarden again and logging in again,
+  and no longer say that each build gets its own extension id.
+
 ## 0.23.0 (unreleased)
 
 - **Bitwarden in the signed-in Server browser (optional, off by default).** Settings › Signed-in
@@ -7,7 +46,7 @@
   download that is not confirmed): the daemon builds a variant of the signed-in image with the
   Bitwarden Password Manager release pinned in `signed-in-bitwarden/bitwarden.json` (2026.11.0 from
   Bitwarden's GitHub releases; size and SHA-256 checked; the same files as the Chrome Web Store
-  build), packed unchanged into a CRX with a key made for that build, and Chromium force-installs it
+  build), packed unchanged into a CRX signed with this install's key, and Chromium force-installs it
   by policy from a local update manifest (it never updates itself; every other extension is blocked,
   developer mode off, the store blocked). Use it while you hold control: unlock it, fill logins from
   the inline menu, toolbar popup or shortcut, and use it for passkeys.
