@@ -5,10 +5,11 @@
 # can reach neither this container's own services (neko, the DevTools port) nor private, tailnet or
 # host addresses. Without a valid BP_PROXY it does not start Chromium at all.
 # Bitwarden (only in the image variant built after the owner's consent, see signed-in-bitwarden/):
-# the variant force-installs it by policy, with an id made for that build. This script records the
-# ids of the Bitwarden builds the profile has seen (.bp-bitwarden-ids) and, on every start, removes
-# what is left of every one not installed now: all of them when Bitwarden is off, the old one after a
-# new pin (data directories, the shared extension databases, preference entries). (Chromium
+# the variant force-installs it by policy, with this install's extension id (the daemon's signing
+# key, kept across images and pins). This script records the ids of the Bitwarden builds the profile
+# has seen (.bp-bitwarden-ids) and, on every start, removes what is left of every one not installed
+# now: all of them when Bitwarden is off, an old one after the id changed (data directories, the
+# shared extension databases, preference entries). (Chromium
 # itself uninstalls a force-installed extension once the policy no longer names it, and the plugin
 # clears the extension origins' storage through DevTools after the start.)
 PROFILE=/home/neko/.config/chromium
@@ -27,6 +28,11 @@ CURRENT=""
 if [ -f "$PIN" ]; then
   CURRENT=$(grep -oE '"id": *"[a-p]{32}"' "$PIN" | grep -oE '[a-p]{32}')
   if [ -n "$CURRENT" ] && ! grep -qx "$CURRENT" "$IDS" 2>/dev/null; then printf '%s\n' "$CURRENT" >> "$IDS"; fi
+  # The installed build is not stale: forget that its shared databases were cleared once, so they are
+  # cleared again if it ever becomes stale later (turned off, a new id).
+  if [ -n "$CURRENT" ] && grep -qx "$CURRENT" "$DBS" 2>/dev/null; then
+    { grep -vx "$CURRENT" "$DBS" || true; } > "$DBS.bp-tmp" && mv -f "$DBS.bp-tmp" "$DBS"
+  fi
 fi
 if [ "$LEGACY_ID" != "$CURRENT" ] && ! grep -qx "$LEGACY_ID" "$IDS" 2>/dev/null; then
   if [ -e "$PROFILE/Default/Local Extension Settings/$LEGACY_ID" ] || grep -q "$LEGACY_ID" "$PROFILE/Default/Preferences" 2>/dev/null; then printf '%s\n' "$LEGACY_ID" >> "$IDS"; fi

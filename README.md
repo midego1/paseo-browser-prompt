@@ -956,8 +956,8 @@ Paseo server (see [SECURITY.md](SECURITY.md#bitwarden-in-the-signed-in-browser))
   `browser-prompt-signed-in:…-bw<version>-<hash>` on top of the signed-in image from
   [`signed-in-bitwarden/`](signed-in-bitwarden/): it downloads the release pinned in `bitwarden.json`
   (version, URL, size, SHA-256) from Bitwarden's GitHub releases (the same files as the Chrome Web
-  Store build of that version), refuses anything else, packs it unchanged into a CRX with a key made
-  for that build (deleted right away; each build gets its own extension id), and Chromium
+  Store build of that version), refuses anything else, packs it unchanged into a CRX signed with this
+  install's key (made once, so the extension id stays the same across images and pins), and Chromium
   force-installs it by policy from a local update manifest, so it never updates itself. An idle
   browser picks it up right away (or at its next start); under a run the settings show **Update
   pending** and the browser switches when the run ends.
@@ -970,7 +970,8 @@ Paseo server (see [SECURITY.md](SECURITY.md#bitwarden-in-the-signed-in-browser))
   in with Bitwarden there, close the tab and release control. **Every time you release control (or
   close the viewer), Bitwarden is locked before the run goes on:** the relay keeps the run paused
   while the daemon calls Bitwarden's own lock through Chromium's DevTools and checks that no account
-  is unlocked (then a reload of the extension, then a browser restart if needed). Only a verified lock
+  is unlocked (then a reload of the extension, then a browser restart if needed, decided only after
+  the checks failed and never while a viewer is connected or you hold control). Only a verified lock
   lets the run continue; otherwise the card and the settings say why and offer **Lock Bitwarden
   now** and **Restart browser**. Unlock again next time.
 - **Recommended Bitwarden settings, first thing after logging in** (Bitwarden has no policy the
@@ -979,9 +980,13 @@ Paseo server (see [SECURITY.md](SECURITY.md#bitwarden-in-the-signed-in-browser))
   on the server's disk and Bitwarden unlocks itself; runs then stay paused); **Unlock with PIN off**,
   no biometrics; Autofill › **Autofill on page load off** (its default) and card and identity
   suggestions in the inline menu off. Log in with your master password and two-step login.
-- **A new pin** (a plugin update with a newer Bitwarden) asks for a new confirmation and download;
-  the extension keeps its id (this install's signing key, kept 0600 in the plugin's state directory
-  and given to the image build only as a BuildKit secret), so Bitwarden's local data stays.
+- **A plugin update that changes the browser image** (a newer Bitwarden pin, or a change to the
+  signed-in browser itself) can require downloading Bitwarden again (a newer pin also asks for a new
+  confirmation). Until then the browser starts without Bitwarden once it is idle, which removes its
+  local data, so you log in to Bitwarden again afterwards. The extension keeps its id (this install's
+  signing key, kept 0600 in the plugin's state directory, its directory 0700, both tightened again on
+  every daemon start, written atomically, and given to the image build only as a BuildKit secret);
+  when you download before the browser switches, Bitwarden's local data stays.
 - **Turn it off:** **Turn Bitwarden off** uninstalls the extension and removes its data (vault cache,
   settings, storage) at the browser's next start (an idle browser restarts right away; under a run or
   with a viewer connected it waits). **Log out of everything** removes it with the whole profile

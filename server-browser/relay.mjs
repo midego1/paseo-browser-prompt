@@ -265,6 +265,8 @@ export async function startRelay(options) {
   const sessions = new Map();
   /** ticket nonces used (or being used) -> expiry (s) */
   const usedNonces = new Map();
+  /** Per relay start: tells the daemon that the relay started again (its lock rounds begin anew). */
+  const bootId = options.bootId ?? randomBytes(8).toString("hex");
   let ownerControl = false;
   let controlKnown = false;
   // Bitwarden: whether the vault must be locked before the run may go on, and which release that is
@@ -518,7 +520,7 @@ export async function startRelay(options) {
         } catch {
           nekoUp = false;
         }
-        return sendJson(res, 200, { viewers, idleMs: Math.max(0, now() - lastActivity), nekoUp, portrait: screenIsPortrait, ownerControl: controlHeld(), lastPeer, lockPending, lockGeneration, lockFailed });
+        return sendJson(res, 200, { viewers, idleMs: Math.max(0, now() - lastActivity), nekoUp, portrait: screenIsPortrait, ownerControl: controlHeld(), lastPeer, lockPending, lockGeneration, lockFailed, bootId });
       }
       if (path === "/bp/locked" && req.method === "POST") {
         // The daemon locked the vault (Bitwarden's own Lock command) for release `generation`.
@@ -798,7 +800,7 @@ export async function startRelay(options) {
     prefix,
     cookieName,
     pollControl,
-    state: () => ({ viewers, sessions: sessions.size, idleMs: now() - lastActivity, portrait: screenIsPortrait, ownerControl: controlHeld(), lockPending, lockGeneration }),
+    state: () => ({ viewers, sessions: sessions.size, idleMs: now() - lastActivity, portrait: screenIsPortrait, ownerControl: controlHeld(), lockPending, lockGeneration, bootId }),
     close: () =>
       new Promise((resolve) => {
         if (landscapeTimer) clearTimeout(landscapeTimer);

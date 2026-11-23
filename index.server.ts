@@ -5,7 +5,7 @@ import { registerModeGuard } from "./server/mode-guard-hook";
 import { createSeenRuns, registerReportBack } from "./server/report-back-hook";
 import { fileReportedStore } from "./server/reported-store";
 import { createServerBrowser, registerServerBrowser, type OpenHookServer } from "./server/server-browser";
-import { createSignedIn } from "./server/signed-in";
+import { createSignedIn, signedInConfigFrom } from "./server/signed-in";
 import { createServerUpdater, currentUpdateStatus } from "./server/updater";
 import { CLAUDE_DESKTOP_LINK_TEMPLATE, DEFAULT_APP_LINK_TEMPLATE } from "./shared/browser-prompt";
 import { createRunLocks, runLockKey } from "./shared/run-lock";
@@ -95,18 +95,9 @@ export default function contribute(server: PluginServerContext) {
       bindHostCache = { at: Date.now(), configured, host };
       return host;
     },
-    config: async () => {
-      const current = await signedInConfig.read().catch(() => null);
-      // Unknown settings stay unknown (bitwarden undefined): the browser never switches images on a guess.
-      if (current?.status !== "ready") return { port: DEFAULT_SIGNED_IN_PORT, httpsBaseUrl: "", bitwarden: undefined, bitwardenConsent: "" };
-      const base = current.values.httpsBaseUrl.trim();
-      return {
-        port: current.values.port,
-        httpsBaseUrl: validateHttpsBase(base) === null ? base : "",
-        bitwarden: current.values.bitwarden === true,
-        bitwardenConsent: current.values.bitwardenConsent,
-      };
-    },
+    // Unknown settings (not ready, invalid, a failed read) stay unknown (bitwarden undefined): the
+    // browser never switches images on a guess, so Bitwarden's data is removed only on an explicit off.
+    config: async () => signedInConfigFrom(await signedInConfig.read().catch(() => null), { port: DEFAULT_SIGNED_IN_PORT, validHttpsBase: (base) => validateHttpsBase(base) === null }),
   });
   signedIn.startIdleChecks();
   const serverBrowserHook = registerServerBrowser(server as unknown as OpenHookServer, settings, serverBrowser, { signedIn });

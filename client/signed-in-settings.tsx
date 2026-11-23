@@ -39,9 +39,9 @@ const BITWARDEN_LABELS: Record<BitwardenState, string> = {
 /** Recommended Bitwarden settings: the extension has no managed policy for them, so the owner sets them once. */
 export const BITWARDEN_RECOMMENDED =
   "First, in Bitwarden in the signed-in browser (Bitwarden has no policy the plugin could force these with): Settings › Account security: Vault timeout 1 minute (or shorter) with action Lock, never “Never” (that stores the key on the server's disk and Bitwarden unlocks itself, so the plugin can never lock it and runs stay paused); Unlock with PIN off; no biometrics. Settings › Autofill: Autofill on page load off (Bitwarden's default), and turn off card and identity suggestions in the inline menu. Log in with your master password plus two-step login.";
-/** A new pin (plugin update) or turning Bitwarden off removes what it kept in the browser. */
+/** A plugin update that changes the browser image, or turning Bitwarden off, can remove what it kept in the browser. */
 export const BITWARDEN_PIN_NOTE =
-  "A plugin update that pins a newer Bitwarden asks you to confirm and download it again; it keeps its extension id (this install's signing key), so Bitwarden's local data stays. Turning Bitwarden off removes it and its data at the browser's next start (right away when the browser is idle); Log out of everything removes it with the whole profile at once.";
+  "A plugin update that changes the browser image (a newer Bitwarden pin, or a change to the signed-in browser itself) can require downloading Bitwarden again (a newer pin also asks you to confirm again). Until you do, the browser starts without Bitwarden once it is idle, which removes Bitwarden's local data, so you log in to Bitwarden again afterwards. Its extension id stays the same (this install's signing key). Turning Bitwarden off removes it and its data at the browser's next start (right away when the browser is idle); Log out of everything removes it with the whole profile at once.";
 
 /**
  * Signed-in Server browser: status, the explicit two-press image download, Log in to sites (the
@@ -206,7 +206,7 @@ export function SignedInSettings({ theme }: Pick<PluginSurfaceProps, "theme">) {
         </Text>
         <SettingsAction
           label={values?.bitwarden ? "Download Bitwarden again" : "Download and enable Bitwarden"}
-          hint={values?.bitwarden ? "Needed after a plugin update pins a newer Bitwarden, or when the download failed." : undefined}
+          hint={values?.bitwarden ? "Needed after a plugin update that changes the browser image (for example a newer Bitwarden pin), or when the download failed." : undefined}
           actionLabel={armed === "bitwarden" ? "Confirm download" : values?.bitwarden ? "Download" : "Download and enable"}
           disabled={
             working ||

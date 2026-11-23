@@ -14,7 +14,8 @@
 //   node bitwarden-lock.mjs cleanup <ids>  -> clears the storage of Bitwarden builds no longer
 //                                             installed (their chrome-extension:// origins)
 //
-// <id> is the extension id of the installed Bitwarden build (made per image build).
+// <id> is the extension id of the installed Bitwarden build (this install's signing key; the same
+// across images and pins).
 // Verification asks Bitwarden's service worker for the authentication status of every account
 // (0 logged out, 1 locked, 2 unlocked) and counts as locked only when it answers and no account is
 // unlocked. It does not depend on keyboard focus, the desktop, or what a page does. A reload also
