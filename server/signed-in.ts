@@ -39,7 +39,7 @@ import {
   type StackInput,
   type StackSecrets,
 } from "../shared/signed-in.ts";
-import { contextHash, execRunner, shortError, type Runner, type ServerBrowser } from "./server-browser.ts";
+import { admittedAfter, contextHash, execRunner, rememberAdmission, shortError, type Admission, type Runner, type ServerBrowser } from "./server-browser.ts";
 import { SIGNED_IN_BITWARDEN_FILES, SIGNED_IN_FILES } from "./server-browser-files.ts";
 import { stateDir } from "./state-dir.ts";
 
@@ -427,6 +427,8 @@ export function createSignedIn(options: SignedInOptions) {
   const tickets = createTicketStore({ random, now, max: 20 });
   /** Runs admitted by mcpServer whose MCP container may not exist yet: agent id -> until. */
   const starting = new Map<string, number>();
+  /** The latest admission of each run: a close event older than it is about an older session. */
+  const admissions = new Map<string, Admission>();
   let lastActive = now();
   let building: Promise<void> | null = null;
   let buildError: string | null = null;
@@ -1261,11 +1263,18 @@ export function createSignedIn(options: SignedInOptions) {
       });
     },
     consumeTicket: (ticket: string, target: { sourceId: string; cardId: string }) => tickets.consume(ticket, target),
-    /** The MCP server for one session of a signed-in run; refused while another run holds the browser. */
-    /** Frees the browser for the next run when this one was admitted but is stopped or closed before its MCP container came up. */
-    release(agentId: string): void {
+    /**
+     * Frees the browser for the next run when this one was admitted but is stopped or closed before
+     * its MCP container came up. `eventAt` is when the stop or close was seen: a run admitted after
+     * it is a newer session (a refresh or resume) and keeps the browser.
+     */
+    release(agentId: string, eventAt?: number): void {
+      if (admittedAfter(admissions.get(agentId), eventAt)) return;
       starting.delete(agentId);
     },
+    /** The run's latest admission (time and session name), for the close hook. */
+    admission: (agentId: string): Admission | undefined => admissions.get(agentId),
+    /** The MCP server for one session of a signed-in run; refused while another run holds the browser. */
     async mcpServer(agentId: string): Promise<{ server: StdioServer; session: string } | { refused: "busy" | "unavailable" } | null> {
       const { path, host } = await sb.docker();
       const node = await sb.node();
@@ -1279,6 +1288,8 @@ export function createSignedIn(options: SignedInOptions) {
         }
         if (others > 0) return "busy" as const;
         starting.set(agentId, now() + STARTING_WINDOW_MS);
+        // Noted at once, with the session name once it is known (below).
+        rememberAdmission(admissions, agentId, { at: now(), session: "" });
         return null;
       });
       if (claimed) return { refused: claimed };
@@ -1292,7 +1303,10 @@ export function createSignedIn(options: SignedInOptions) {
       lastActive = now();
       // A resumed run may find the browser stopped (idle): start it; the launcher waits for it.
       if (!(await isRunning())) void ensureStarted().catch(() => undefined);
-      return { server: signedInMcpServer(node, runtime.launcher, plan, host), session: signedInAgentName(agentId, nonce) };
+      const session = signedInAgentName(agentId, nonce);
+      const admitted = admissions.get(agentId);
+      if (admitted) admitted.session = session;
+      return { server: signedInMcpServer(node, runtime.launcher, plan, host), session };
     },
     /** A one-time viewer link (ticket in the fragment), starting the browser when needed. */
     async viewerLink(input: { purpose: "login" | "takeover"; portrait: boolean }) {

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.24.1 (unreleased)
+
+Follow-ups from the review of the redesigned card (0.24.0).
+
+- **A stale close no longer drops a newer session.** The close and archive events carry no time or
+  session, so a close of an older session could arrive after a refresh or resume admitted a new one
+  for the same run, dropping its slot (the Server browser cap and the signed-in browser's one run at
+  a time were briefly bypassable) and removing its containers. The hook now ignores an event about an
+  agent the daemon shows as live again, keeps the slot of a run admitted after the event was seen,
+  and removes only the older sessions' containers (the new session is kept).
+- **Stop** keeps the card showing the run stopped even if saving that mark fails; it then logs a
+  warning and says so in a short notice (after a reload the card may show the run as going).
+- The README screenshots and tour were re-recorded for the redesigned card.
+
 ## 0.24.0 (unreleased)
 
 - **Redesigned card.** One filled button per state. **Run** is a split button: the main part runs

@@ -1066,6 +1066,28 @@ test("daemon: a signed-in run stopped before its MCP container came up frees the
   assert.equal((await si.prepare({ sourceId: "s", cardId: "c" })).ok, true, "stopped within the window: Run again is not refused");
 });
 
+test("daemon: a stale close of an older signed-in session leaves the new session's admission", async () => {
+  const docker = fakeStackDocker();
+  const { si } = makeSignedIn(docker);
+  const first = await si.prepare({ sourceId: "s", cardId: "c" });
+  assert.equal(si.consumeTicket(first.ticket, { sourceId: "s", cardId: "c" }), true);
+  const mcp = await si.mcpServer("run-a");
+  assert.ok("server" in mcp);
+  const admitted = si.admission("run-a");
+  assert.equal(admitted.session, mcp.session, "the admission names its session");
+  // A close seen before this admission is about an older session: the browser stays held.
+  si.release("run-a", admitted.at - 1);
+  assert.deepEqual(await si.prepare({ sourceId: "s", cardId: "c" }), { ok: false, state: "busy", detail: "" }, "still held");
+  // One seen at or after it releases, and so does a call without a time.
+  si.release("run-a", admitted.at);
+  const again = await si.prepare({ sourceId: "s", cardId: "c" });
+  assert.equal(again.ok, true);
+  assert.equal(si.consumeTicket(again.ticket, { sourceId: "s", cardId: "c" }), true);
+  assert.ok("server" in (await si.mcpServer("run-a")));
+  si.release("run-a");
+  assert.equal((await si.prepare({ sourceId: "s", cardId: "c" })).ok, true);
+});
+
 test("daemon: stop keeps the profile, log out removes it and the keys; rotate restarts only the relay", async () => {
   const docker = fakeStackDocker();
   const { si, dir } = makeSignedIn(docker);
