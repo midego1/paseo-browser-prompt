@@ -2,7 +2,7 @@ import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { openExternalUrl, useAgent, usePaseo, useRpc, useSettings } from "@getpaseo/plugin/client";
 import { Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Platform, Pressable, Text, View } from "react-native";
+import { Platform, Pressable, Text, View, type PressableProps, type StyleProp, type ViewStyle } from "react-native";
 import { z } from "zod";
 import { agentTitle, CHROME_RUN_MARKER, chromeAvailable, DEFAULT_AGENT_SETTINGS, opensAgentOnStart, runBrowserOf, describeLaunch, type BrowserAgent } from "../shared/agent-prompt";
 import { SERVER_BROWSER_STATE_MESSAGES, SERVER_RUN_MARKER, serverRunLabels } from "../shared/server-browser";
@@ -24,22 +24,40 @@ import {
 } from "../shared/repeats";
 import { acquireWithin, endedRun, finishWithRetry } from "../shared/run-lock";
 import { acquireRunLock, finishRunLock } from "../shared/run-lock-rpc";
-import { MAX_DONE, MAX_RUNS, preferences } from "../shared/settings";
+import { cardSettings, MAX_DONE, MAX_RUNS, preferences } from "../shared/settings";
 import { createSettingsMirror, saveWithRetries, withDoneMark, type RetrySettings } from "../shared/settings-save";
 import { stashPrompt } from "../shared/trampoline";
-import { CLAUDE_COLOR, CLAUDE_ICON, OPENAI_COLOR, OPENAI_ICON, PASEO_ICON } from "../shared/brand-icons";
+import { CLAUDE_COLOR, CLAUDE_ICON, OPENAI_COLOR, OPENAI_ICON } from "../shared/brand-icons";
+import {
+  cardLayout,
+  cardPhase,
+  cardTints,
+  chatGptTarget,
+  mixColor,
+  defaultRunWay,
+  DEFAULT_CARD_CHOICES,
+  RUN_WAY_A11Y,
+  RUN_WAY_TITLES,
+  runMenuItems,
+  sentNote,
+  STOP_CONFIRM_MS,
+  type RunWay,
+  type SendTo,
+} from "../shared/card-layout";
 import { archivedAfterSuccess } from "../shared/archive-rpc";
 import {
+  copyForClaude,
   copyPrompt,
   DEFAULT_MODES,
   effectiveMode,
   recordSeenPrompt,
+  rememberChatGptTarget,
   rememberModes,
   startInChatGpt,
   startInClaudeDesktop,
   type ActionResult,
 } from "./launch";
-import { openPluginSettings, openRunScreen, resolveLaunch, startBrowserAgent, type ResolvedLaunch } from "./agent-run";
+import { openPluginSettings, openRunScreen, resolveLaunch, startBrowserAgent, stopRunAgent, type ResolvedLaunch } from "./agent-run";
 import { MessageMarkdown } from "./markdown";
 import { OwnerPromptBox, useOwnerPrompts } from "./owner-prompt";
 import { RUN_LABELS, runVisual, useRunState } from "./run-status";
@@ -112,6 +130,136 @@ export const markdownSchema = z.object({
 
 const MONO = Platform.select({ ios: "Menlo", android: "monospace", default: "ui-monospace, Menlo, monospace" });
 
+type Theme = PluginTimelineItemProps["theme"];
+
+/**
+ * The card's styles for a theme and layout (see design/card-streamline/NOTES.md in the design
+ * branch): spacing 4·8·12·16, buttons 40 high in the chat column and at least 44 on a phone,
+ * quiet row 32 (44 on a phone). Only flex rows, borders and radii: no CSS-only effects.
+ */
+function cardStyles(theme: Theme, compact: boolean) {
+  const tints = cardTints(theme.colors);
+  const h = compact ? 44 : 40;
+  const radius = 8;
+  const button = {
+    flexDirection: "row" as const,
+    alignItems: "center" as const,
+    justifyContent: "center" as const,
+    gap: 8,
+    minHeight: h,
+    paddingHorizontal: 14,
+    borderRadius: radius,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface2,
+  };
+  return {
+    h,
+    tints,
+    card: {
+      borderColor: theme.colors.border,
+      borderWidth: 1,
+      backgroundColor: theme.colors.surface1,
+      borderRadius: 10,
+      padding: compact ? 12 : 16,
+      gap: 12,
+    },
+    cardDone: { borderColor: tints.successLine },
+    header: { flexDirection: "row" as const, alignItems: "center" as const, gap: 8, minHeight: 24 },
+    title: { flex: 1, color: theme.colors.foreground, fontWeight: "600" as const, fontSize: 15 },
+    label: { color: theme.colors.foregroundMuted, fontSize: 12 },
+    gear: { width: 28, height: 28, alignItems: "center" as const, justifyContent: "center" as const, borderRadius: radius, marginRight: -4 },
+    promptBox: {
+      backgroundColor: theme.colors.surface0,
+      borderColor: theme.colors.border,
+      borderWidth: 1,
+      borderRadius: radius,
+      paddingVertical: 10,
+      paddingHorizontal: 12,
+    },
+    prompt: { color: theme.colors.foreground, fontFamily: MONO, fontSize: 13, lineHeight: 20 },
+    actions: { flexDirection: "row" as const, flexWrap: "wrap" as const, alignItems: "center" as const, gap: 8 },
+    primary: { ...button, backgroundColor: theme.colors.accent, borderColor: theme.colors.accent },
+    primaryText: { color: theme.colors.accentForeground, fontWeight: "600" as const, fontSize: 14 },
+    secondary: button,
+    secondaryText: { color: theme.colors.foreground, fontSize: 14, fontWeight: "500" as const },
+    dangerText: { color: theme.colors.statusDanger, fontSize: 14, fontWeight: "500" as const },
+    ghost: {
+      flexDirection: "row" as const,
+      alignItems: "center" as const,
+      justifyContent: "center" as const,
+      gap: 6,
+      minHeight: compact ? 44 : 32,
+      paddingHorizontal: 8,
+      borderRadius: radius,
+      ...(compact ? { flexGrow: 1 } : null),
+    },
+    ghostText: { color: theme.colors.foregroundMuted, fontSize: 13, fontWeight: "500" as const },
+    quiet: {
+      flexDirection: "row" as const,
+      flexWrap: "wrap" as const,
+      alignItems: "center" as const,
+      gap: 4,
+      marginVertical: compact ? -8 : -4,
+      marginLeft: compact ? 0 : -8,
+    },
+    statusRow: { flexDirection: "row" as const, flexWrap: "wrap" as const, alignItems: "center" as const, columnGap: 8, rowGap: 4 },
+    statusText: { color: theme.colors.foreground, fontSize: 14, fontWeight: "600" as const },
+    where: { color: theme.colors.foregroundMuted, fontSize: 13, flexShrink: 1 },
+    link: { color: tints.accentText, fontSize: 13, fontWeight: "600" as const },
+    hint: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 17 },
+    note: { flexDirection: "row" as const, alignItems: "flex-start" as const, gap: 8 },
+    noteText: { flex: 1, color: theme.colors.foregroundMuted, fontSize: 13, lineHeight: 19 },
+    runRow: { flexDirection: "row" as const, flexWrap: "wrap" as const, alignItems: "center" as const, gap: 6 },
+    runBlock: compact ? { gap: 12 } : { flexDirection: "row" as const, alignItems: "flex-start" as const, gap: 16 },
+    runMain: { flex: compact ? undefined : 1, minWidth: 0, gap: 8 },
+    shotBeside: { width: 192 },
+    ask: {
+      borderWidth: 1,
+      borderColor: tints.warningLine,
+      backgroundColor: tints.warningTint,
+      borderRadius: radius,
+      padding: 12,
+      gap: 10,
+    },
+    askHead: { flexDirection: "row" as const, alignItems: "center" as const, gap: 8 },
+    askHeadText: { color: theme.colors.statusWarning, fontWeight: "700" as const, fontSize: 14, flexShrink: 1 },
+    sendCaption: { color: theme.colors.foregroundMuted, fontSize: 13, paddingLeft: 4 },
+    modalText: { color: theme.colors.foreground, fontSize: 14, lineHeight: 20 },
+    modalActions: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 8, justifyContent: "flex-end" as const },
+    menuItem: {
+      flexDirection: "row" as const,
+      alignItems: "center" as const,
+      gap: 12,
+      minHeight: compact ? 60 : 52,
+      paddingVertical: 8,
+      paddingHorizontal: 10,
+      borderRadius: radius,
+    },
+    menuIcon: {
+      width: 32,
+      height: 32,
+      borderRadius: 8,
+      backgroundColor: theme.colors.surface2,
+      alignItems: "center" as const,
+      justifyContent: "center" as const,
+    },
+    menuTitle: { color: theme.colors.foreground, fontSize: 14, fontWeight: "600" as const },
+    menuDetail: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 16 },
+    tag: {
+      borderWidth: 1,
+      borderColor: tints.accentText,
+      borderRadius: 99,
+      paddingHorizontal: 8,
+      paddingVertical: 1,
+    },
+    tagText: { color: tints.accentText, fontSize: 11, fontWeight: "600" as const },
+    separator: { height: 1, backgroundColor: theme.colors.border, marginVertical: 6, marginHorizontal: 4 },
+  };
+}
+
+type CardStyles = ReturnType<typeof cardStyles>;
+
 export function MarkdownSegment({ item, theme }: PluginTimelineItemProps<z.output<typeof markdownSchema>>) {
   return <MessageMarkdown text={item.data.text} theme={theme} />;
 }
@@ -169,9 +317,15 @@ export function BrowserPromptCard({
   const startMode = settings.status === "ready" ? settings.values.startMode : DEFAULT_MODES.startMode;
   const mobileStartMode =
     settings.status === "ready" ? settings.values.mobileStartMode : DEFAULT_MODES.mobileStartMode;
-  // The owner's usual way is highlighted; every way stays one press away.
-  const defaultMode = effectiveMode({ startMode, mobileStartMode });
+  // Today's usual way: until the owner picks in the card settings, it decides Run's browser and
+  // where Send to ChatGPT goes (shared/card-layout.ts), so nothing changes on the update.
+  const usualWay = effectiveMode({ startMode, mobileStartMode });
   const showChrome = chromeAvailable(settings.status === "ready" ? settings.values : DEFAULT_AGENT_SETTINGS);
+  const cardPrefs = useSettings(cardSettings);
+  const choices = cardPrefs.status === "ready" ? cardPrefs.values : DEFAULT_CARD_CHOICES;
+  const runWay = defaultRunWay(choices, usualWay, showChrome);
+  const gptTarget = chatGptTarget(choices, usualWay, mobile);
+  const claudeTarget = choices.claude;
 
   // Copies of a block in this chat share its run: the newest one started from this card's id or for
   // the same content.
@@ -288,64 +442,11 @@ export function BrowserPromptCard({
     if (settings.status === "ready") rememberModes({ startMode, mobileStartMode });
   }, [settings.status, startMode, mobileStartMode]);
 
-  const styles = useMemo(() => {
-    const pad = layout.compact ? 10 : 14;
-    return {
-      card: {
-        borderColor: done ? theme.colors.statusSuccess : theme.colors.border,
-        borderWidth: 1,
-        backgroundColor: theme.colors.surface1,
-        borderRadius: 10,
-        padding: pad,
-        gap: layout.compact ? 8 : 10,
-        opacity: done ? 0.75 : 1,
-      },
-      header: { flexDirection: "row" as const, alignItems: "center" as const, gap: 8 },
-      title: { flex: 1, color: theme.colors.foreground, fontWeight: "600" as const, fontSize: 15 },
-      label: { color: theme.colors.foregroundMuted, fontSize: 12 },
-      promptBox: {
-        backgroundColor: theme.colors.surface0,
-        borderColor: theme.colors.border,
-        borderWidth: 1,
-        borderRadius: 8,
-        padding: layout.compact ? 8 : 10,
-      },
-      prompt: { color: theme.colors.foreground, fontFamily: MONO, fontSize: 13, lineHeight: 19 },
-      actions: { flexDirection: "row" as const, flexWrap: "wrap" as const, alignItems: "center" as const, columnGap: 16, rowGap: 8 },
-      // One group per service: its mark, then a button per way. Groups wrap as a whole.
-      group: { flexDirection: "row" as const, flexWrap: "wrap" as const, alignItems: "center" as const, gap: 6 },
-      groupMark: { flexDirection: "row" as const, alignItems: "center" as const, gap: 5, marginRight: 2 },
-      groupLabel: { color: theme.colors.foreground, fontSize: 13, fontWeight: "600" as const },
-      primary: {
-        flexDirection: "row" as const,
-        alignItems: "center" as const,
-        gap: 6,
-        paddingVertical: 8,
-        paddingHorizontal: 12,
-        borderRadius: 8,
-        backgroundColor: theme.colors.accent,
-      },
-      primaryText: { color: theme.colors.accentForeground, fontWeight: "600" as const, fontSize: 13 },
-      secondary: {
-        flexDirection: "row" as const,
-        alignItems: "center" as const,
-        gap: 6,
-        paddingVertical: 8,
-        paddingHorizontal: 12,
-        borderRadius: 8,
-        borderWidth: 1,
-        borderColor: theme.colors.border,
-        backgroundColor: theme.colors.surface2,
-      },
-      secondaryText: { color: theme.colors.foreground, fontSize: 13 },
-      runRow: { flexDirection: "row" as const, flexWrap: "wrap" as const, alignItems: "center" as const, gap: 6 },
-      runText: { color: theme.colors.foreground, fontSize: 13 },
-      link: { color: theme.colors.accent ?? theme.colors.foreground, fontSize: 13, fontWeight: "600" as const },
-      hint: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 17 },
-      modalText: { color: theme.colors.foreground, fontSize: 14, lineHeight: 20 },
-      modalActions: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 8, justifyContent: "flex-end" as const },
-    };
-  }, [theme, layout.compact, done]);
+  useEffect(() => {
+    if (cardPrefs.status === "ready") rememberChatGptTarget(gptTarget);
+  }, [cardPrefs.status, gptTarget]);
+
+  const styles = useMemo(() => cardStyles(theme, layout.compact), [theme, layout.compact]);
 
   function report(result: ActionResult) {
     if (result.ok) toast.show(result.message, { variant: "success", durationMs: 3500 });
@@ -630,33 +731,127 @@ export function BrowserPromptCard({
     };
   }, [waitingSignedIn]);
 
+  // Run once in…: the sheet (a bottom sheet on a phone) with every browser. A row runs once.
+  const [menuOpen, setMenuOpen] = useState(false);
+  // The folded done card's Show steps.
+  const [stepsOpen, setStepsOpen] = useState(false);
+  // The last Send that worked, for the note that it does not report back.
+  const [sentTo, setSentTo] = useState<SendTo | null>(null);
+  // Stop asks for a second press within STOP_CONFIRM_MS.
+  const [stopArmed, setStopArmed] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [stoppedRun, setStoppedRun] = useState<string | null>(null);
+  useEffect(() => {
+    if (!stopArmed) return;
+    const timer = setTimeout(() => setStopArmed(false), STOP_CONFIRM_MS);
+    return () => clearTimeout(timer);
+  }, [stopArmed]);
+  useEffect(() => {
+    setStopArmed(false);
+  }, [runAgentId]);
+
+  /** Runs once in `way`; the default way is never changed here ("Change the default…" opens the settings). */
+  function runOnceIn(way: RunWay) {
+    setMenuOpen(false);
+    void onRunPress(way);
+  }
+
+  /** Send to ChatGPT or Claude, where the card settings say (a hand-off: it does not report back). */
+  function sendTo(to: SendTo) {
+    void run(async () => {
+      const result =
+        to === "chatgpt"
+          ? await startInChatGpt(title, text, gptTarget, (prompt) => stash({ prompt }))
+          : claudeTarget === "copy-only"
+            ? await copyForClaude(title, text)
+            : await startInClaudeDesktop(title, text, (prompt) => stash({ prompt, target: "claude" }));
+      if (result.ok) setSentTo(to);
+      return result;
+    });
+  }
+
+  /**
+   * Stop: the run is archived, the stop the plugin already uses for a run in a refused mode. It works
+   * for every browser (the Server browser's containers go with it); its history stays in Paseo.
+   */
+  async function stopRun() {
+    if (!runAgentId || stopping) return;
+    if (!stopArmed) {
+      setStopArmed(true);
+      return;
+    }
+    setStopArmed(false);
+    setStopping(true);
+    const stopped = runAgentId;
+    try {
+      await stopRunAgent(paseo, stopped);
+      setStoppedRun(stopped);
+      toast.show("Run stopped. The agent is archived; its history stays in Paseo.", { durationMs: 3500 });
+    } catch (error) {
+      toast.error(`Could not stop the run: ${error instanceof Error ? error.message : String(error)}. Stop it in Paseo.`);
+    } finally {
+      setStopping(false);
+    }
+  }
+
   const runVisuals = shownState === "asking" ? { icon: "CircleAlert", color: theme.colors.statusWarning } : runVisual(runState, theme);
+  const phase = cardPhase({ runState: runAgentId ? shownState : null, done });
+  const shape = cardLayout({ phase, mobile, compact: layout.compact, expanded: stepsOpen });
+  const runDisabled = busy || resolving || runBlocked;
+  const blockedHint = runBlocked ? "A run of these steps is still going; its status shows below" : undefined;
+  const openAgent = () => {
+    if (!runAgentId || !openRunScreen(runAgentId, agentTitle(title, displayTitle), true)) toast.error("Cannot open the agent from here.");
+  };
+  const openSettingsScreen = () => {
+    try {
+      if (!openPluginSettings()) toast.error("Cannot open the settings from here.");
+    } catch {
+      toast.error("Cannot open the settings from here.");
+    }
+  };
+  // A signed-in run's Watch is the owner's viewer (the same link as Take over); any other run's is its agent view.
+  const watchesViewer = runBrowser === "signed-in";
+  const statusLabel =
+    shownState === "asking"
+      ? "Waiting for the chat's answer"
+      : stoppedRun === runAgentId && (runState === "unknown" || runState === "stopped")
+        ? RUN_LABELS.stopped
+        : RUN_LABELS[runState];
+  const headIcon =
+    phase === "needs-you"
+      ? { name: "CircleAlert", color: theme.colors.statusWarning }
+      : phase === "done"
+        ? { name: "CircleCheck", color: theme.colors.statusSuccess }
+        : { name: "Globe", color: theme.colors.foregroundMuted };
+  const latestBeside = !layout.compact && thumbnailMode === "latest";
+  const screenshots_ =
+    runAgentId && showScreenshot ? (
+      <>
+        <ScreenshotStrip shots={screenshots} latestStep={screenshotStep} mode={thumbnailMode} theme={theme} onOpen={openAgent} />
+        {screenshotsBlocked && !screenshot ? <Text style={styles.hint}>{SCREENSHOT_BLOCKED_HINT}</Text> : null}
+      </>
+    ) : null;
 
   if (view === "collapsed") {
-    return <CollapsedDone title={displayTitle} theme={theme} onShow={() => setExpanded(true)} />;
+    return <CollapsedDone title={displayTitle} theme={theme} compact={layout.compact} onShow={() => setExpanded(true)} />;
   }
 
   return (
-    <View style={styles.card}>
+    <View style={[styles.card, phase === "done" ? styles.cardDone : null]}>
       <View style={styles.header}>
-        <Icon name={done ? "CircleCheck" : "Globe"} size={16} color={done ? theme.colors.statusSuccess : theme.colors.foregroundMuted} />
+        <Icon name={headIcon.name} size={18} color={headIcon.color} />
         <Text style={styles.title} selectable numberOfLines={2}>
           {displayTitle}
         </Text>
-        <Text style={styles.label}>{done ? "Done" : "Browser prompt"}</Text>
+        {layout.compact ? null : <Text style={styles.label}>Browser prompt</Text>}
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Browser prompt settings"
           hitSlop={8}
-          onPress={() => {
-            try {
-              if (!openPluginSettings()) toast.error("Cannot open the settings from here.");
-            } catch {
-              toast.error("Cannot open the settings from here.");
-            }
-          }}
+          onPress={openSettingsScreen}
+          style={styles.gear}
         >
-          <Icon name="Settings" size={14} color={theme.colors.foregroundMuted} />
+          <Icon name="Settings" size={16} color={theme.colors.foregroundMuted} />
         </Pressable>
       </View>
       {view === "repeat" ? (
@@ -665,179 +860,142 @@ export function BrowserPromptCard({
           {expanded && done ? (
             <>
               <Text style={styles.hint}>·</Text>
-              <Pressable accessibilityRole="button" accessibilityLabel={`Collapse ${displayTitle}`} onPress={() => setExpanded(false)}>
+              <Pressable accessibilityRole="button" accessibilityLabel={`Collapse ${displayTitle}`} hitSlop={8} onPress={() => setExpanded(false)}>
                 <Text style={styles.link}>Hide</Text>
               </Pressable>
             </>
           ) : null}
         </View>
       ) : null}
-      <View style={styles.promptBox}>
-        <Text selectable style={styles.prompt}>
-          {text}
-        </Text>
-      </View>
-      <View style={styles.actions}>
-        <View style={styles.group} accessibilityRole="toolbar" accessibilityLabel="Paseo">
-          <View style={styles.groupMark} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-            <Icon icon={PASEO_ICON} size={16} color={theme.colors.foreground} />
-            <Text style={styles.groupLabel}>Paseo</Text>
-          </View>
-          <WayButton
-            label={runAgentId ? "Again: Paseo browser" : "Paseo browser"}
-            a11y={`Run ${displayTitle} with a Paseo agent in the Paseo browser`}
-            hint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
-            highlighted={defaultMode === "paseo"}
-            disabled={busy || resolving || runBlocked}
-            styles={styles}
-            onPress={() => void onRunPress("paseo")}
-          />
-          <WayButton
-            label={runAgentId ? "Again: Server browser" : "Server browser"}
-            a11y={`Run ${displayTitle} with a Paseo agent in a browser on the Paseo server, not signed in to your accounts`}
-            hint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
-            highlighted={defaultMode === "server"}
-            disabled={busy || resolving || runBlocked}
-            styles={styles}
-            onPress={() => void onRunPress("server")}
-          />
-          <WayButton
-            label={runAgentId ? "Again: Signed in" : "Server (signed in)"}
-            a11y={`Run ${displayTitle} with a Paseo agent in your signed-in browser on the Paseo server, which you can take over from any device`}
-            hint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
-            highlighted={defaultMode === "signed-in"}
-            disabled={busy || resolving || runBlocked}
-            styles={styles}
-            onPress={() => void onRunPress("signed-in")}
-          />
-        </View>
-        <View style={styles.group} accessibilityRole="toolbar" accessibilityLabel="ChatGPT">
-          <View style={styles.groupMark} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-            <Icon icon={OPENAI_ICON} size={16} color={OPENAI_COLOR} />
-            <Text style={styles.groupLabel}>ChatGPT</Text>
-          </View>
-          {mobile ? null : (
-            <WayButton
-              label="Desktop"
-              a11y={`Start ${displayTitle} in the ChatGPT desktop app`}
-              highlighted={defaultMode === "app"}
-              disabled={busy}
-              styles={styles}
-              onPress={() => void run(() => startInChatGpt(title, text, "app", (prompt) => stash({ prompt })))}
-            />
-          )}
-          <WayButton
-            label="Web"
-            a11y={`Start ${displayTitle} in ChatGPT on the web`}
-            highlighted={defaultMode === "web-agent"}
-            disabled={busy}
-            styles={styles}
-            onPress={() => void run(() => startInChatGpt(title, text, "web-agent", (prompt) => stash({ prompt })))}
-          />
-        </View>
-        {mobile && !showChrome ? null : (
-          <View style={styles.group} accessibilityRole="toolbar" accessibilityLabel="Claude">
-            <View style={styles.groupMark} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-              <Icon icon={CLAUDE_ICON} size={16} color={CLAUDE_COLOR} />
-              <Text style={styles.groupLabel}>Claude</Text>
-            </View>
-            {mobile ? null : (
-              <WayButton
-                label="Desktop"
-                a11y={`Start ${displayTitle} in the Claude desktop app`}
-                highlighted={defaultMode === "claude-desktop"}
-                disabled={busy}
-                styles={styles}
-                onPress={() => void run(() => startInClaudeDesktop(title, text, (prompt) => stash({ prompt, target: "claude" })))}
-              />
-            )}
-            {showChrome ? (
-              <WayButton
-                label={runAgentId ? "Again: Chrome tab" : "Chrome tab"}
-                a11y={`Run ${displayTitle} with a Paseo agent in a tab of your Chrome, through Claude in Chrome`}
-                hint={runBlocked ? "A run of these steps is still going; its status shows below" : undefined}
-                highlighted={defaultMode === "chrome"}
-                disabled={busy || resolving || runBlocked}
-                styles={styles}
-                onPress={() => void onRunPress("chrome")}
-              />
+      {phase === "done" ? (
+        // Done: a summary line, and the steps and Send buttons fold away until Show steps.
+        <View style={{ gap: 2 }}>
+          <View style={styles.statusRow}>
+            <Text style={[styles.statusText, { color: theme.colors.statusSuccess }]}>{runState === "done" ? "Done" : "Marked done"}</Text>
+            <Text style={styles.where} numberOfLines={1}>
+              {runAgentId && runState === "done" ? `· ${RUN_WAY_TITLES[runBrowser]}` : "· by you"}
+            </Text>
+            {runAgentId ? (
+              <Pressable accessibilityRole="link" accessibilityLabel={`Open the Paseo agent for ${displayTitle}`} hitSlop={8} onPress={openAgent}>
+                <Text style={styles.link}>Open</Text>
+              </Pressable>
             ) : null}
           </View>
-        )}
-        <View style={styles.group}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Copy ${displayTitle}`}
-            disabled={busy}
-            onPress={() =>
-              void run(() =>
-                defaultMode === "copy-only"
-                  ? startInChatGpt(title, text, "copy-only", (prompt) => stash({ prompt }))
-                  : copyPrompt(title, text),
-              )
-            }
-            style={defaultMode === "copy-only" ? styles.primary : styles.secondary}
-          >
-            <Icon name="Copy" size={14} color={defaultMode === "copy-only" ? theme.colors.accentForeground : theme.colors.foreground} />
-            <Text style={defaultMode === "copy-only" ? styles.primaryText : styles.secondaryText}>Copy</Text>
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={done ? `Mark ${displayTitle} not done` : `Mark ${displayTitle} done`}
-            accessibilityState={{ checked: done }}
-            onPress={() => void toggleDone()}
-            style={styles.secondary}
-          >
-            <Icon name={done ? "Undo2" : "Check"} size={14} color={done ? theme.colors.statusSuccess : theme.colors.foreground} />
-            <Text style={done ? [styles.secondaryText, { color: theme.colors.statusSuccess }] : styles.secondaryText}>
-              {done ? "Undo done" : "Mark done"}
-            </Text>
-          </Pressable>
-        </View>
-      </View>
-      {runAgentId ? (
-        <View style={styles.runRow}>
-          <Icon name={runVisuals.icon} size={14} color={runVisuals.color} />
-          <Text
-            style={[
-              styles.runText,
-              runState === "done" || runState === "failed" ? { color: runVisuals.color } : null,
-              runState === "needs-input" ? { color: theme.colors.statusWarning, fontWeight: "700" as const } : null,
-            ]}
-          >
-            {shownState === "asking" ? "Waiting for the chat's answer" : RUN_LABELS[runState]}
-          </Text>
-          <Text style={styles.hint}>{BROWSER_NAMES[runBrowser]}</Text>
-          <Text style={styles.hint}>·</Text>
-          <Pressable
-            accessibilityRole="link"
-            accessibilityLabel={`Open the Paseo agent for ${displayTitle}`}
-            onPress={() => {
-              if (!openRunScreen(runAgentId, agentTitle(title, displayTitle), true)) toast.error("Cannot open the agent from here.");
-            }}
-          >
-            <Text style={styles.link}>Open</Text>
-          </Pressable>
-          {runBrowser === "signed-in" && (active || runState === "needs-input" || shownState === "asking") ? (
-            <>
-              <Text style={styles.hint}>·</Text>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={`Take over the signed-in browser for ${displayTitle}`}
-                accessibilityHint="Opens the signed-in browser on the Paseo server, where you can watch, log in or enter a code"
-                disabled={openingViewer}
-                onPress={() => void takeOver()}
-              >
-                <Text style={styles.link}>{openingViewer ? "Opening…" : "Take over"}</Text>
-              </Pressable>
-            </>
+          {runAgentId && runState === "done" ? (
+            <Text style={styles.hint}>{totalSteps === 1 ? "1 step finished." : `${totalSteps} steps finished.`}</Text>
           ) : null}
         </View>
       ) : null}
-      {runAgentId && showSteps ? (
-        <StepProgressRow progress={stepProgress} total={totalSteps} state={shownState} theme={theme} compact={layout.compact} />
+      {shape.showSteps ? (
+        <View style={styles.promptBox}>
+          <Text selectable style={styles.prompt}>
+            {text}
+          </Text>
+        </View>
       ) : null}
-      {runAgentId ? (
+      {runAgentId && phase !== "new" && phase !== "done" ? (
+        // The run's state area: status, step progress, time, then Watch and Stop above the screenshot,
+        // so the buttons do not move when it loads. A run that ended shows the same lines over Run again.
+        <View style={styles.runBlock}>
+          <View style={styles.runMain}>
+            {phase === "needs-you" ? null : (
+              <View style={styles.statusRow} accessibilityRole="text">
+                <Icon name={runVisuals.icon} size={14} color={runVisuals.color} />
+                <Text style={[styles.statusText, runState === "failed" ? { color: runVisuals.color } : null]}>{statusLabel}</Text>
+                <Text style={styles.where} numberOfLines={1}>
+                  · {BROWSER_NAMES[runBrowser]}
+                </Text>
+                {watchesViewer || phase === "ended" ? (
+                  <Pressable accessibilityRole="link" accessibilityLabel={`Open the Paseo agent for ${displayTitle}`} hitSlop={8} onPress={openAgent}>
+                    <Text style={styles.link}>Open</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            )}
+            {phase === "needs-you" ? (
+              <View style={styles.ask}>
+                <View style={styles.askHead}>
+                  <Icon name="CircleAlert" size={16} color={theme.colors.statusWarning} />
+                  <Text style={styles.askHeadText}>{shownState === "asking" ? "Waiting for the chat's answer" : "The agent needs you"}</Text>
+                  <Text style={styles.where} numberOfLines={1}>
+                    · {BROWSER_NAMES[runBrowser]}
+                  </Text>
+                  {watchesViewer ? (
+                    <Pressable accessibilityRole="link" accessibilityLabel={`Open the Paseo agent for ${displayTitle}`} hitSlop={8} onPress={openAgent}>
+                      <Text style={styles.link}>Open</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+                {runBrowser === "signed-in" && (runState === "needs-input" || shownState === "asking") ? (
+                  // The agent waits for the owner (a login, a 2FA code): Take over is the main action here,
+                  // a full-width filled button at the top of the panel.
+                  <>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Take over the signed-in browser for ${displayTitle}`}
+                      accessibilityHint="Opens the signed-in browser on the Paseo server, where you can log in or enter a code in a new tab"
+                      disabled={openingViewer}
+                      accessibilityState={{ disabled: openingViewer }}
+                      onPress={() => void takeOver()}
+                      style={[styles.primary, { minHeight: styles.h + 4, alignSelf: "stretch", opacity: openingViewer ? 0.5 : 1 }]}
+                    >
+                      <Icon name="MousePointer2" size={16} color={theme.colors.accentForeground} />
+                      <Text style={[styles.primaryText, { fontSize: 15 }]}>{openingViewer ? "Opening…" : "Take over the browser"}</Text>
+                    </Pressable>
+                    <Text style={styles.hint}>{SIGNED_IN_TAKEOVER_HELP}</Text>
+                  </>
+                ) : null}
+                {waitingSignedIn && vaultLock?.pending ? (
+                  // The run waits until Bitwarden is locked after a takeover (the daemon does it within seconds).
+                  <View style={{ gap: 6 }}>
+                    <Text style={styles.hint}>
+                      {vaultLock.failed
+                        ? `Bitwarden could not be locked yet, so the run stays paused: ${vaultLock.failed}`
+                        : "Locking Bitwarden after your takeover; the run goes on once it is locked."}
+                    </Text>
+                    <View style={styles.actions}>
+                      <Btn kind="secondary" styles={styles} label={locking ? "Locking…" : "Lock Bitwarden now"} a11y="Lock Bitwarden now" disabled={locking} onPress={() => void lockVault("lock")} />
+                      <Btn kind="secondary" styles={styles} label="Restart browser" a11y="Restart the signed-in browser and lock Bitwarden" disabled={locking} onPress={() => void lockVault("restart-browser")} />
+                    </View>
+                  </View>
+                ) : null}
+                {runState === "needs-input" ? (
+                  <OwnerPromptBox
+                    prompts={owner.prompts}
+                    verified={owner.verified}
+                    theme={theme}
+                    onAnswer={async (prompt, response) => {
+                      try {
+                        await owner.answer(prompt, response);
+                      } catch (error) {
+                        toast.error(`Could not send your answer: ${error instanceof Error ? error.message : String(error)}`);
+                      }
+                    }}
+                    onOpen={openAgent}
+                  />
+                ) : null}
+                {watchStop()}
+              </View>
+            ) : null}
+            {showSteps ? (
+              <StepProgressRow progress={stepProgress} total={totalSteps} state={shownState} theme={theme} compact={layout.compact} accentText={styles.tints.accentText} />
+            ) : null}
+            <RunStatsRow
+              state={shownState}
+              createdAt={runCreatedAt}
+              updatedAt={runUpdatedAt}
+              lastEntryAt={runMeta.lastEntryAt}
+              usage={runMeta.usage}
+              streamSkewMs={runMeta.skewMs}
+              theme={theme}
+              compact={layout.compact}
+            />
+            {phase === "running" ? watchStop() : null}
+          </View>
+          {latestBeside && screenshots_ ? <View style={styles.shotBeside}>{screenshots_}</View> : null}
+        </View>
+      ) : null}
+      {runAgentId && phase === "done" && stepsOpen ? (
         <RunStatsRow
           state={shownState}
           createdAt={runCreatedAt}
@@ -849,73 +1007,55 @@ export function BrowserPromptCard({
           compact={layout.compact}
         />
       ) : null}
-      {runAgentId && runBrowser === "signed-in" && (runState === "needs-input" || shownState === "asking") ? (
-        // The agent waits for the owner (a login, a 2FA code): Take over is the main action here, so
-        // it is a full button right above the question, not only the small link in the status line.
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Take over the signed-in browser for ${displayTitle}`}
-          accessibilityHint="Opens the signed-in browser on the Paseo server, where you can log in or enter a code in a new tab"
-          disabled={openingViewer}
-          accessibilityState={{ disabled: openingViewer }}
-          onPress={() => void takeOver()}
-          style={[styles.primary, { alignSelf: "flex-start", opacity: openingViewer ? 0.5 : 1 }]}
-        >
-          <Icon name="Globe" size={14} color={theme.colors.accentForeground} />
-          <Text style={styles.primaryText}>{openingViewer ? "Opening…" : "Take over the browser"}</Text>
-        </Pressable>
-      ) : null}
-      {runAgentId && runBrowser === "signed-in" && (runState === "needs-input" || shownState === "asking") ? (
-        <Text style={styles.hint}>{SIGNED_IN_TAKEOVER_HELP}</Text>
-      ) : null}
-      {waitingSignedIn && vaultLock?.pending ? (
-        // The run waits until Bitwarden is locked after a takeover (the daemon does it within seconds).
-        <View style={{ gap: 6 }}>
-          <Text style={styles.hint}>
-            {vaultLock.failed
-              ? `Bitwarden could not be locked yet, so the run stays paused: ${vaultLock.failed}`
-              : "Locking Bitwarden after your takeover; the run goes on once it is locked."}
-          </Text>
-          <View style={styles.actions}>
-            <Pressable accessibilityRole="button" accessibilityLabel="Lock Bitwarden now" disabled={locking} onPress={() => void lockVault("lock")} style={[styles.secondary, { opacity: locking ? 0.5 : 1 }]}>
-              <Text style={styles.secondaryText}>{locking ? "Locking…" : "Lock Bitwarden now"}</Text>
-            </Pressable>
-            <Pressable accessibilityRole="button" accessibilityLabel="Restart the signed-in browser and lock Bitwarden" disabled={locking} onPress={() => void lockVault("restart-browser")} style={[styles.secondary, { opacity: locking ? 0.5 : 1 }]}>
-              <Text style={styles.secondaryText}>Restart browser</Text>
-            </Pressable>
-          </View>
+      {!latestBeside && phase !== "new" && (phase !== "done" || stepsOpen) ? screenshots_ : null}
+      {latestBeside && phase === "done" && stepsOpen ? screenshots_ : null}
+      {shape.showRun ? (
+        <View style={styles.actions}>
+          <SplitRun
+            styles={styles}
+            theme={theme}
+            compact={layout.compact}
+            primary={shape.runPrimary}
+            label={shape.runLabel}
+            way={RUN_WAY_TITLES[runWay]}
+            a11y={`${shape.runLabel} ${displayTitle} with a Paseo agent ${RUN_WAY_A11Y[runWay]}`}
+            hint={blockedHint}
+            disabled={runDisabled}
+            onRun={() => void onRunPress(runWay)}
+            onMenu={() => setMenuOpen(true)}
+          />
+          {shape.showSendChatGpt && shape.sendOwnRow ? <Text style={styles.sendCaption}>Send to</Text> : null}
+          {shape.showSendChatGpt ? (
+            <SendButton
+              styles={styles}
+              compact={shape.sendOwnRow}
+              name="ChatGPT"
+              icon={OPENAI_ICON}
+              color={OPENAI_COLOR}
+              a11y={gptTarget === "app" ? `Start ${displayTitle} in the ChatGPT desktop app` : gptTarget === "web-agent" ? `Start ${displayTitle} in ChatGPT on the web` : `Copy ${displayTitle} for ChatGPT`}
+              disabled={busy}
+              onPress={() => sendTo("chatgpt")}
+            />
+          ) : null}
+          {shape.showSendClaude ? (
+            <SendButton
+              styles={styles}
+              compact={shape.sendOwnRow}
+              name="Claude"
+              icon={CLAUDE_ICON}
+              color={CLAUDE_COLOR}
+              a11y={claudeTarget === "claude-desktop" ? `Start ${displayTitle} in the Claude desktop app` : `Copy ${displayTitle} for Claude`}
+              disabled={busy}
+              onPress={() => sendTo("claude")}
+            />
+          ) : null}
         </View>
       ) : null}
-      {runAgentId && runState === "needs-input" ? (
-        <OwnerPromptBox
-          prompts={owner.prompts}
-          verified={owner.verified}
-          theme={theme}
-          onAnswer={async (prompt, response) => {
-            try {
-              await owner.answer(prompt, response);
-            } catch (error) {
-              toast.error(`Could not send your answer: ${error instanceof Error ? error.message : String(error)}`);
-            }
-          }}
-          onOpen={() => {
-            if (!openRunScreen(runAgentId, agentTitle(title, displayTitle), true)) toast.error("Cannot open the agent from here.");
-          }}
-        />
-      ) : null}
-      {runAgentId && showScreenshot ? (
-        <ScreenshotStrip
-          shots={screenshots}
-          latestStep={screenshotStep}
-          mode={thumbnailMode}
-          theme={theme}
-          onOpen={() => {
-            if (!openRunScreen(runAgentId, agentTitle(title, displayTitle), true)) toast.error("Cannot open the agent from here.");
-          }}
-        />
-      ) : null}
-      {runAgentId && showScreenshot && screenshotsBlocked && !screenshot ? (
-        <Text style={styles.hint}>{SCREENSHOT_BLOCKED_HINT}</Text>
+      {sentTo && shape.showSendChatGpt && !done ? (
+        <View style={styles.note} accessibilityLiveRegion="polite">
+          <Icon name="Check" size={14} color={theme.colors.statusSuccess} />
+          <Text style={styles.noteText}>{sentNote(sentTo)}</Text>
+        </View>
       ) : null}
       {runError ? (
         <View style={styles.runRow}>
@@ -923,7 +1063,91 @@ export function BrowserPromptCard({
           <Text style={[styles.hint, { color: theme.colors.statusDanger, flexShrink: 1 }]}>{runError}</Text>
         </View>
       ) : null}
-      {runAgentId && layout.compact ? <Text style={styles.hint}>{HINTS[runBrowser]}</Text> : null}
+      {runAgentId && layout.compact && (phase === "running" || phase === "needs-you") ? <Text style={styles.hint}>{HINTS[runBrowser]}</Text> : null}
+      <View style={styles.quiet}>
+        {shape.showFoldToggle ? (
+          <Btn
+            kind="ghost"
+            styles={styles}
+            icon={stepsOpen ? "ChevronUp" : "ChevronDown"}
+            iconColor={theme.colors.foregroundMuted}
+            label={stepsOpen ? "Hide steps" : "Show steps"}
+            a11y={stepsOpen ? `Hide the steps of ${displayTitle}` : `Show the steps of ${displayTitle}`}
+            expanded={stepsOpen}
+            onPress={() => setStepsOpen((open) => !open)}
+          />
+        ) : null}
+        <Btn
+          kind="ghost"
+          styles={styles}
+          icon="Copy"
+          iconColor={theme.colors.foregroundMuted}
+          label="Copy steps"
+          a11y={`Copy ${displayTitle}`}
+          disabled={busy}
+          onPress={() => void run(() => copyPrompt(title, text))}
+        />
+        <Btn
+          kind="ghost"
+          styles={styles}
+          icon={done ? "Undo2" : "Check"}
+          iconColor={theme.colors.foregroundMuted}
+          label={done ? "Not done" : "Mark done"}
+          a11y={done ? `Mark ${displayTitle} not done` : `Mark ${displayTitle} done`}
+          checked={done}
+          onPress={() => void toggleDone()}
+        />
+      </View>
+      <Modal
+        title="Run once in…"
+        icon={<Icon name="Play" size={18} color={theme.colors.foreground} />}
+        open={menuOpen}
+        onOpenChange={setMenuOpen}
+      >
+        <Modal.Content contentContainerStyle={{ padding: 8, gap: 0 }}>
+          {runMenuItems(runWay, showChrome).map((item) => (
+            <Pressable
+              key={item.way}
+              accessibilityRole="menuitem"
+              accessibilityLabel={`Run ${displayTitle} once ${RUN_WAY_A11Y[item.way]}`}
+              accessibilityHint={blockedHint ?? (item.isDefault ? "The default way" : "Runs once; the default stays")}
+              accessibilityState={{ disabled: runDisabled }}
+              disabled={runDisabled}
+              onPress={() => runOnceIn(item.way)}
+              style={({ pressed }) => [styles.menuItem, pressed ? { backgroundColor: theme.colors.surface2 } : null, runDisabled ? { opacity: 0.5 } : null]}
+            >
+              <View style={styles.menuIcon}>
+                <Icon name={RUN_WAY_ICONS[item.way]} size={16} color={theme.colors.foregroundMuted} />
+              </View>
+              <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
+                <Text style={styles.menuTitle}>{item.title}</Text>
+                <Text style={styles.menuDetail}>{item.detail}</Text>
+              </View>
+              {item.isDefault ? (
+                <View style={styles.tag}>
+                  <Text style={styles.tagText}>Default</Text>
+                </View>
+              ) : null}
+            </Pressable>
+          ))}
+          <View style={styles.separator} />
+          <Pressable
+            accessibilityRole="menuitem"
+            accessibilityLabel="Change the default way to run"
+            accessibilityHint="Opens the Browser prompts settings"
+            onPress={() => {
+              setMenuOpen(false);
+              openSettingsScreen();
+            }}
+            style={({ pressed }) => [styles.menuItem, { minHeight: layout.compact ? 48 : 40 }, pressed ? { backgroundColor: theme.colors.surface2 } : null]}
+          >
+            <View style={[styles.menuIcon, { backgroundColor: "transparent" }]}>
+              <Icon name="Settings" size={16} color={theme.colors.foregroundMuted} />
+            </View>
+            <Text style={[styles.ghostText, { flex: 1 }]}>Change the default…</Text>
+          </Pressable>
+        </Modal.Content>
+      </Modal>
       <Modal
         title="Run with Paseo agent"
         icon={<Icon name="Bot" size={18} color={theme.colors.foreground} />}
@@ -946,15 +1170,13 @@ export function BrowserPromptCard({
           ) : null}
           {layout.compact || pendingBrowser === "server" || pendingBrowser === "signed-in" ? <Text style={styles.hint}>{HINTS[pendingBrowser]}</Text> : null}
           <View style={styles.modalActions}>
-            <Pressable accessibilityRole="button" onPress={() => setConfirmOpen(false)} style={styles.secondary}>
-              <Text style={styles.secondaryText}>Cancel</Text>
-            </Pressable>
+            <Btn kind="secondary" styles={styles} label="Cancel" a11y="Cancel" onPress={() => setConfirmOpen(false)} />
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Start the Paseo agent"
               disabled={!!launchError}
               onPress={() => void launchAgent(pendingLaunch)}
-              style={styles.primary}
+              style={[styles.primary, launchError ? { opacity: 0.5 } : null]}
             >
               <Icon name="Bot" size={14} color={theme.colors.accentForeground} />
               <Text style={styles.primaryText}>Start agent</Text>
@@ -964,65 +1186,264 @@ export function BrowserPromptCard({
       </Modal>
     </View>
   );
+
+  /** Watch and Stop for a run that is going (Stop asks for a second press). */
+  function watchStop() {
+    return (
+      <View style={[styles.actions, { marginTop: 4 }]}>
+        <Btn
+          kind="secondary"
+          styles={styles}
+          icon={watchesViewer ? "Monitor" : "Eye"}
+          iconColor={theme.colors.foreground}
+          label={watchesViewer && openingViewer ? "Opening…" : "Watch"}
+          a11y={watchesViewer ? `Watch or take over the signed-in browser for ${displayTitle}` : `Open the Paseo agent for ${displayTitle}`}
+          hint={watchesViewer ? "Opens the signed-in browser on the Paseo server, where you can watch, log in or enter a code" : undefined}
+          disabled={watchesViewer && openingViewer}
+          grow={layout.compact ? 2 : undefined}
+          onPress={() => (watchesViewer ? void takeOver() : openAgent())}
+        />
+        <Btn
+          kind="danger"
+          styles={styles}
+          icon="Square"
+          iconColor={theme.colors.statusDanger}
+          label={stopping ? "Stopping…" : stopArmed ? "Press again to stop" : "Stop"}
+          a11y={stopArmed ? `Confirm: stop the run of ${displayTitle}` : `Stop the run of ${displayTitle}`}
+          hint="Archives the Paseo agent; its history stays in Paseo"
+          disabled={stopping}
+          grow={layout.compact ? 1 : undefined}
+          onPress={() => void stopRun()}
+        />
+      </View>
+    );
+  }
 }
 
-/** One way to run the steps: highlighted when it is the owner's usual way. */
-function WayButton({
+const RUN_WAY_ICONS: Record<RunWay, string> = {
+  "signed-in": "KeyRound",
+  server: "Server",
+  paseo: "AppWindow",
+  chrome: "Globe",
+};
+
+/** One button of the card: filled (primary), bordered (secondary, danger) or quiet (ghost). */
+function Btn({
+  kind,
+  styles,
   label,
   a11y,
   hint,
-  highlighted,
-  disabled,
-  styles,
+  icon,
+  iconColor,
+  disabled = false,
+  checked,
+  expanded,
+  grow,
   onPress,
 }: {
+  kind: "primary" | "secondary" | "danger" | "ghost";
+  styles: CardStyles;
   label: string;
   a11y: string;
   hint?: string;
-  highlighted: boolean;
+  icon?: string;
+  iconColor?: string;
+  disabled?: boolean;
+  checked?: boolean;
+  expanded?: boolean;
+  grow?: number;
+  onPress: () => void;
+}) {
+  const box = kind === "primary" ? styles.primary : kind === "ghost" ? styles.ghost : styles.secondary;
+  const textStyle = kind === "primary" ? styles.primaryText : kind === "danger" ? styles.dangerText : kind === "ghost" ? styles.ghostText : styles.secondaryText;
+  const state: PressableProps["accessibilityState"] = { disabled, ...(checked === undefined ? null : { checked }), ...(expanded === undefined ? null : { expanded }) };
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={a11y}
+      accessibilityHint={hint}
+      accessibilityState={state}
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }): StyleProp<ViewStyle> => [box, grow ? { flexGrow: grow, flexBasis: 0 } : null, pressed ? { opacity: 0.82 } : null, disabled ? { opacity: 0.5 } : null]}
+    >
+      {icon ? <Icon name={icon} size={15} color={iconColor} /> : null}
+      <Text style={textStyle} numberOfLines={1}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+/**
+ * Run as a split button: the main part runs the default way and names it, the chevron opens "Run
+ * once in…". The divider is the chevron's left border; the chevron is as wide as the button is high.
+ */
+function SplitRun({
+  styles,
+  theme,
+  compact,
+  primary,
+  label,
+  way,
+  a11y,
+  hint,
+  disabled,
+  onRun,
+  onMenu,
+}: {
+  styles: CardStyles;
+  theme: Theme;
+  compact: boolean;
+  primary: boolean;
+  label: string;
+  way: string;
+  a11y: string;
+  hint?: string;
   disabled: boolean;
-  styles: { primary: object; secondary: object; primaryText: object; secondaryText: object };
+  onRun: () => void;
+  onMenu: () => void;
+}) {
+  const box = primary ? styles.primary : styles.secondary;
+  const fg = primary ? theme.colors.accentForeground : theme.colors.foreground;
+  const sub = primary ? theme.colors.accentForeground : theme.colors.foregroundMuted;
+  return (
+    <View
+      style={{
+        flexDirection: "row",
+        borderRadius: 8,
+        overflow: "hidden",
+        minHeight: styles.h,
+        ...(compact ? { flexBasis: "100%", flexGrow: 1 } : { minWidth: 236 }),
+        opacity: disabled ? 0.5 : 1,
+      }}
+    >
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={a11y}
+        accessibilityHint={hint}
+        accessibilityState={{ disabled }}
+        disabled={disabled}
+        onPress={onRun}
+        style={({ pressed }) => [
+          box,
+          { flex: 1, justifyContent: "flex-start", gap: 10, paddingLeft: 12, paddingRight: 14, borderTopRightRadius: 0, borderBottomRightRadius: 0, borderRightWidth: 0 },
+          pressed ? { opacity: 0.82 } : null,
+        ]}
+      >
+        <Icon name="Play" size={16} color={fg} />
+        <View style={{ flexShrink: 1, minWidth: 0 }}>
+          <Text style={[primary ? styles.primaryText : styles.secondaryText, { fontWeight: "700" }]} numberOfLines={1}>
+            {label}
+          </Text>
+          <Text style={{ color: sub, fontSize: 12, opacity: primary ? 0.9 : 1 }} numberOfLines={1}>
+            {way}
+          </Text>
+        </View>
+      </Pressable>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Run once in another browser"
+        accessibilityHint="Opens Run once in…; the default stays"
+        accessibilityState={{ disabled }}
+        disabled={disabled}
+        onPress={onMenu}
+        style={({ pressed }) => [
+          box,
+          {
+            width: styles.h,
+            paddingHorizontal: 0,
+            borderTopLeftRadius: 0,
+            borderBottomLeftRadius: 0,
+            borderLeftWidth: 1,
+            borderLeftColor: primary ? mixColor(theme.colors.accentForeground, theme.colors.accent, 0.32) : theme.colors.border,
+          },
+          pressed ? { opacity: 0.82 } : null,
+        ]}
+      >
+        <Icon name="ChevronDown" size={16} color={fg} />
+      </Pressable>
+    </View>
+  );
+}
+
+/** Send to ChatGPT or Claude: secondary, with the brand mark. On a phone only the name shows. */
+function SendButton({
+  styles,
+  compact,
+  name,
+  icon,
+  color,
+  a11y,
+  disabled,
+  onPress,
+}: {
+  styles: CardStyles;
+  compact: boolean;
+  name: string;
+  icon: { svg: string };
+  color: string;
+  a11y: string;
+  disabled: boolean;
   onPress: () => void;
 }) {
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={a11y}
-      accessibilityHint={hint}
       accessibilityState={{ disabled }}
       disabled={disabled}
       onPress={onPress}
-      style={[highlighted ? styles.primary : styles.secondary, disabled ? { opacity: 0.5 } : null]}
+      style={({ pressed }) => [
+        styles.secondary,
+        compact ? { flexGrow: 1, flexShrink: 1, flexBasis: 96, paddingHorizontal: 10 } : null,
+        pressed ? { opacity: 0.82 } : null,
+        disabled ? { opacity: 0.5 } : null,
+      ]}
     >
-      <Text style={highlighted ? styles.primaryText : styles.secondaryText}>{label}</Text>
+      <Icon icon={icon} size={16} color={color} />
+      <Text style={styles.secondaryText} numberOfLines={1}>
+        {compact ? name : `Send to ${name}`}
+      </Text>
     </Pressable>
   );
 }
 
 /** A later copy of a block that is done: one line, and Show expands the full card right here. */
-function CollapsedDone({ title, theme, onShow }: { title: string; theme: PluginTimelineItemProps["theme"]; onShow: () => void }) {
+function CollapsedDone({ title, theme, compact, onShow }: { title: string; theme: Theme; compact: boolean; onShow: () => void }) {
+  const tints = cardTints(theme.colors);
   return (
     <View
       style={{
         flexDirection: "row",
         alignItems: "center",
-        alignSelf: "flex-start",
+        alignSelf: compact ? "stretch" : "flex-start",
         maxWidth: "100%",
-        gap: 6,
-        paddingVertical: 6,
-        paddingHorizontal: 10,
+        gap: 8,
+        minHeight: compact ? 46 : 36,
+        paddingLeft: 12,
+        paddingRight: 4,
         borderRadius: 8,
         borderWidth: 1,
-        borderColor: theme.colors.statusSuccess,
+        borderColor: tints.successLine,
         backgroundColor: theme.colors.surface1,
       }}
     >
-      <Text style={{ color: theme.colors.statusSuccess, fontSize: 13, fontWeight: "600" }}>✓ Already done</Text>
-      <Text numberOfLines={1} style={{ flexShrink: 1, color: theme.colors.foregroundMuted, fontSize: 13 }}>
-        · {title} ·
+      <Icon name="CircleCheck" size={16} color={theme.colors.statusSuccess} />
+      <Text style={{ color: theme.colors.statusSuccess, fontSize: 13, fontWeight: "600" }}>Already done</Text>
+      <Text numberOfLines={1} style={{ flex: compact ? 1 : undefined, flexShrink: 1, color: theme.colors.foregroundMuted, fontSize: 13 }}>
+        {title}
       </Text>
-      <Pressable accessibilityRole="button" accessibilityLabel={`Show ${title}`} accessibilityHint="Shows the card here" onPress={onShow}>
-        <Text style={{ color: theme.colors.accent, fontSize: 13, fontWeight: "600" }}>Show</Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Show ${title}`}
+        accessibilityHint="Shows the card here"
+        hitSlop={8}
+        onPress={onShow}
+        style={{ alignSelf: "stretch", justifyContent: "center", paddingHorizontal: 12 }}
+      >
+        <Text style={{ color: tints.accentText, fontSize: 13, fontWeight: "600" }}>Show</Text>
       </Pressable>
     </View>
   );

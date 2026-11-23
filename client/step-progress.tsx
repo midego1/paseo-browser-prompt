@@ -2,6 +2,7 @@ import type { PluginHostProps } from "@getpaseo/plugin/client";
 import { usePaseo } from "@getpaseo/plugin/client";
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
+import { progressSegments } from "../shared/card-layout";
 import { liveSubscription, readRunTail, type RunState } from "../shared/agent-prompt";
 import { createRunTracker, type RunTracker, type RunView } from "../shared/run-tracker";
 import { observeSkew, type UsageLike } from "../shared/run-stats";
@@ -216,12 +217,15 @@ export function StepProgressRow({
   state,
   theme,
   compact,
+  accentText,
 }: {
   progress: StepProgress | null;
   total: number;
   state: RunState | "asking";
   theme: PluginHostProps["theme"];
   compact: boolean;
+  /** The accent as a readable foreground (lightened in dark themes); the accent itself when absent. */
+  accentText?: string;
 }) {
   const view = stepProgressView(progress, total, state);
   if (!view) return null;
@@ -232,7 +236,8 @@ export function StepProgressRow({
         ? theme.colors.statusDanger
         : view.tone === "warning"
           ? theme.colors.statusWarning
-          : theme.colors.accent;
+          : (accentText ?? theme.colors.accent);
+  const segments = progressSegments(view.step, total, view.tone === "success");
   return (
     <View
       accessibilityRole="progressbar"
@@ -243,9 +248,26 @@ export function StepProgressRow({
       <Text style={{ color: theme.colors.foregroundMuted, fontSize: compact ? 12 : 13 }} numberOfLines={1}>
         {view.label}
       </Text>
-      <View style={{ height: 4, borderRadius: 2, backgroundColor: theme.colors.border, overflow: "hidden" }}>
-        <View style={{ height: 4, width: `${Math.round(view.fraction * 100)}%`, backgroundColor: color }} />
-      </View>
+      {segments ? (
+        // One segment per step: done, current (half tone) and pending.
+        <View style={{ flexDirection: "row", gap: 3, height: 4 }}>
+          {segments.map((segment, i) => (
+            <View
+              key={i}
+              style={{
+                flex: 1,
+                borderRadius: 2,
+                backgroundColor: segment === "pending" ? theme.colors.border : color,
+                opacity: segment === "current" ? 0.5 : 1,
+              }}
+            />
+          ))}
+        </View>
+      ) : (
+        <View style={{ height: 4, borderRadius: 2, backgroundColor: theme.colors.border, overflow: "hidden" }}>
+          <View style={{ height: 4, width: `${Math.round(view.fraction * 100)}%`, backgroundColor: color }} />
+        </View>
+      )}
     </View>
   );
 }

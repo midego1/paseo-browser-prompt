@@ -137,6 +137,16 @@ export async function startInClaudeDesktop(title: string, body: string, stash: S
   return { ok: true, message: copied ? "Opening the Claude app (prompt also copied)." : "Opening the Claude app." };
 }
 
+/** Send to Claude with "Copy only": the Claude prompt (Claude in Chrome header) on the clipboard. */
+export async function copyForClaude(title: string, body: string): Promise<ActionResult> {
+  try {
+    await copyText(composePrompt(title, body, CLAUDE_DESKTOP_HEADER));
+    return { ok: true, message: CLAUDE_PASTE_HINT };
+  } catch {
+    return { ok: false, message: "Could not copy. Select the prompt text and copy it manually." };
+  }
+}
+
 export async function copyPrompt(title: string, body: string): Promise<ActionResult> {
   try {
     await copyText(composePrompt(title, body));
@@ -156,6 +166,7 @@ export interface SeenPrompt {
 
 let lastSeen: SeenPrompt | null = null;
 let lastModes: ModeSettings = DEFAULT_MODES;
+let lastChatGpt: StartMode | null = null;
 
 /** Cards remember the host's modes so the Command Center item can follow them. */
 export function rememberModes(modes: ModeSettings): void {
@@ -164,6 +175,16 @@ export function rememberModes(modes: ModeSettings): void {
 
 export function getRememberedModes(): ModeSettings {
   return lastModes;
+}
+
+/** Cards remember where Send to ChatGPT goes (the card settings), so the Command Center item goes there too. */
+export function rememberChatGptTarget(target: StartMode): void {
+  lastChatGpt = target;
+}
+
+/** Where the Command Center opens ChatGPT: as the cards' Send to ChatGPT, else from the usual way. */
+export function commandCenterChatGptMode(): StartMode {
+  return lastChatGpt ?? chatGptMode(effectiveMode(getRememberedModes()));
 }
 
 export function recordSeenPrompt(prompt: SeenPrompt): void {

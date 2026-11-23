@@ -45,7 +45,9 @@ try {
   // 1. The card, before anything runs.
   await still("card", [card()]);
 
-  await page.getByRole("button", { name: /Run .* in the Paseo browser/ }).click();
+  // Since 0.24 the Paseo browser is a "Run once in…" row (unless it is the Run default).
+  await page.getByRole("button", { name: "Run once in another browser" }).click();
+  await page.getByRole("menuitem", { name: /Run .* in the Paseo browser/ }).click();
   await page.getByRole("button", { name: "Start the Paseo agent" }).click();
 
   // 3. The browser agent asks the chat; the card waits for the chat's answer.

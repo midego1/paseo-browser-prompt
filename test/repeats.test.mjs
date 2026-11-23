@@ -179,7 +179,7 @@ test("a repeat starts its own run only while the shared run is not going; the fi
   const card = read("client/card.tsx");
   assert.match(card, /const runBlocked = !canStartRun\(\{ repeat: isRepeat, runState: runAgentId \? shownState : null \}\);/);
   assert.match(card, /if \(busy \|\| resolving \|\| runBlocked\) return;/);
-  assert.match(card, /disabled=\{busy \|\| resolving \|\| runBlocked\}/);
+  assert.match(card, /const runDisabled = busy \|\| resolving \|\| runBlocked;/);
   assert.match(card, /const runKey = `\$\{agentId\}:\$\{cardId\}`;/, "runs stay keyed by the card's own id (the server checks it)");
   assert.match(card, /runKey,\n\s+startedAgentId,\n\s+\.\.\.\(fallback \? \[MOST_RECENT_FALLBACK\] : \[\]\),\n\s+runKeyMarker\(key\),/);
 });
@@ -188,9 +188,10 @@ test("no scrolling to the first card, no toast; a collapsed copy expands in plac
   const card = read("client/card.tsx");
   assert.doesNotMatch(card, /scrollIntoView|scrollToFirst|nativeID|Scroll up to the first card|Same step as above|flashFirst/);
   assert.match(card, /Also shown earlier in this chat/);
-  assert.match(card, /✓ Already done/);
+  assert.match(card, />Already done</);
   assert.match(card, /onShow=\{\(\) => setExpanded\(true\)\}/);
   assert.match(card, /setExpanded\(false\)\}>\n\s+<Text style=\{styles\.link\}>Hide<\/Text>/);
+  assert.match(card, /<CollapsedDone title=\{displayTitle\} theme=\{theme\} compact=\{layout\.compact\} onShow=/);
   assert.doesNotMatch(read("client/chat-index.ts"), /flash/i);
   assert.match(read("client/settings-screen.tsx"), /label="Collapse repeated blocks that are done"/);
 });

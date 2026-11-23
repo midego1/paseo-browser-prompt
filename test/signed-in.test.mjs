@@ -1408,7 +1408,9 @@ test("card and settings: Take over opens a one-time link from the daemon, and do
   const card = readFileSync(new URL("../client/card.tsx", import.meta.url), "utf8");
   assert.match(card, /viewerLink\(\{ purpose: "takeover", portrait: mobile \}\)/);
   assert.match(card, /await openExternalUrl\(link\.url\);/);
-  assert.match(card, /runBrowser === "signed-in" && \(active \|\| runState === "needs-input" \|\| shownState === "asking"\)/);
+  // Watch on a signed-in run opens the same viewer (Take over) while the run is going or waits.
+  assert.match(card, /const watchesViewer = runBrowser === "signed-in";/);
+  assert.match(card, /onPress=\{\(\) => \(watchesViewer \? void takeOver\(\) : openAgent\(\)\)\}/);
   assert.match(card, /prepareSignedIn\(\{ sourceAgentId: agentId, cardId \}\), SIGNED_IN_RPC_TIMEOUT_MS/);
   assert.doesNotMatch(card, /signedInStatus\(\{ build: true \}\)|signedInState\(\{ build: true \}\)/, "the card never builds");
   const settings = readFileSync(new URL("../client/signed-in-settings.tsx", import.meta.url), "utf8");

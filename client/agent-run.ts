@@ -59,6 +59,15 @@ export function openRunScreen(agentId: string, title: string, autoOpen: boolean)
   return true;
 }
 
+/**
+ * The card's Stop: archives the run, the same stop the mode guard uses (shared/mode-guard.ts). Its
+ * history stays in Paseo; the Server browser's containers go with it (server/server-browser.ts), and
+ * the signed-in browser is free for the next run once its session has ended.
+ */
+export async function stopRunAgent(paseo: PaseoApi, agentId: string): Promise<void> {
+  await paseo.agents.ref(agentId).archive();
+}
+
 export type WorkspaceSource = "card-agent" | "card-agent-refresh" | "most-recent";
 
 export interface StartedAgent {
