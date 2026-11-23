@@ -11,7 +11,7 @@ import { CLAUDE_DESKTOP_LINK_TEMPLATE, DEFAULT_APP_LINK_TEMPLATE } from "./share
 import { createRunLocks, runLockKey } from "./shared/run-lock";
 import { acquireRunLock, finishRunLock } from "./shared/run-lock-rpc";
 import { prepareServerBrowserRun, serverBrowserStatus } from "./shared/server-browser-rpc";
-import { preferences, signedInSettings } from "./shared/settings";
+import { cardSettings, preferences, signedInSettings } from "./shared/settings";
 import { BITWARDEN, DEFAULT_SIGNED_IN_PORT, SIGNED_IN_STATE_MESSAGES, validateHttpsBase } from "./shared/signed-in";
 import { prepareSignedInRun, signedInBitwarden, signedInControl, signedInStatus, signedInViewerLink } from "./shared/signed-in-rpc";
 import { chooseTrampolineHost } from "./shared/trampoline-host";
@@ -80,6 +80,8 @@ export default function contribute(server: PluginServerContext) {
   // at a time and the owner watches or takes over through the relay on this host's Tailscale address
   // (see server/signed-in.ts). Started on demand, stopped after 30 minutes without use.
   const signedInConfig = server.registerSettings(signedInSettings);
+  // The card's Run default and Send to targets (0.24.0); the server only keeps the document.
+  server.registerSettings(cardSettings);
   // The launcher's bind address: the setting (127.0.0.1 or this host's Tailscale IPv4), else
   // Tailscale; asked at most every 30 seconds (it runs `tailscale ip -4`).
   let bindHostCache: { at: number; configured: string; host: string | null } | null = null;
