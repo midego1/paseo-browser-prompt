@@ -20,7 +20,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { startCdpFilter } from "./cdp-filter.mjs";
-import { createCallTracker, createControlGuard, createControlPoller, createRunFilter, lineSplitter } from "./mcp-filter.mjs";
+import { CONTROL_POLL, createControlGuard, createControlPoller, createRunFilter, lineSplitter, MAX_CLIENT_LINE, MAX_SERVER_LINE } from "./mcp-filter.mjs";
 import { BLOCKED_HOST_SUFFIXES, normalizeAddress } from "./proxy.mjs";
 
 const require = createRequire(import.meta.url);
@@ -137,22 +137,20 @@ if (signedIn && !(await waitForCdp())) {
   process.exit(1);
 }
 
-// Signed-in: the owner's takeover state, polled every second (never two polls at once). See
+// Signed-in: the owner's takeover state, polled every 500 ms (never two polls at once). See
 // createControlGuard: it starts held, opens only on a valid `ownerControl: false` from the relay, and
-// holds again on a failed poll, an invalid status, or a release older than 3 s. The first poll ends
-// before Playwright MCP starts and before any message from the agent is read. The clean Server
-// browser has no guard (no owner can take it over).
-const guard = signedIn ? createControlGuard({ maxAgeMs: 3000 }) : null;
-const calls = createCallTracker();
-const filter = createRunFilter({ signedIn, guard, calls });
+// holds again on a failed poll, an invalid status, or a release older than CONTROL_MAX_AGE_MS (from
+// the relay's read of neko). The first poll ends before Playwright MCP starts and before any message
+// from the agent is read. Results of calls in flight while the state was unknown are buffered until
+// it is confirmed (createCallTracker). The clean Server browser has no guard (no owner can take it over).
+const guard = signedIn ? createControlGuard() : null;
+const filter = createRunFilter({ signedIn, guard, log, emit: (line) => process.stdout.write(`${line}\n`) });
 if (guard) {
-  const poll = createControlPoller({ guard, calls, url: controlUrl, log });
+  const poll = createControlPoller({ guard, url: controlUrl, timeoutMs: CONTROL_POLL.timeoutMs, log, onPoll: () => filter.sync() });
   await poll();
-  setInterval(() => void poll(), 1000).unref();
-  // A release that went stale between polls also marks the calls on their way.
-  setInterval(() => {
-    if (guard.held()) calls.markHeld();
-  }, 250).unref();
+  setInterval(() => void poll(), CONTROL_POLL.intervalMs).unref();
+  // A release that went stale between polls, and buffered results that waited too long.
+  setInterval(() => filter.sync(), 250).unref();
 }
 
 // Signed-in: Playwright MCP talks to the owner's Chromium only through the DevTools filter, which
@@ -179,12 +177,12 @@ const fromAgent = lineSplitter((line) => {
   const verdict = filter.client(line);
   if ("reply" in verdict) process.stdout.write(`${verdict.reply}\n`);
   else if ("forward" in verdict) child.stdin.write(`${verdict.forward}\n`);
-});
+}, { maxLength: MAX_CLIENT_LINE, onOverflow: () => filter.overflowFromClient() });
 const fromServer = lineSplitter((line) => {
   // Signed-in: a result that comes back while held, or whose call overlapped a held period, is withheld.
   const kept = filter.server(line);
   if (kept !== null) process.stdout.write(`${kept}\n`);
-});
+}, { maxLength: MAX_SERVER_LINE, onOverflow: () => filter.overflowFromServer() });
 process.stdin.setEncoding("utf8");
 child.stdout.setEncoding("utf8");
 process.stdin.on("data", (chunk) => fromAgent.push(chunk));

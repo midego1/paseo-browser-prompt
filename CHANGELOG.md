@@ -18,12 +18,34 @@ Plugin registry review of 0.24.1: the signed-in browser's takeover guard now fai
   always fail closed), and the signed-in MCP container and its launcher refuse to start without the
   relay's takeover address. The relay's `GET /control` already returns an explicit boolean
   `ownerControl`. The clean Server browser has no takeover guard and is unchanged.
+- **Release counted from the relay's read, on a monotonic clock.** The relay's `GET /control` now
+  also returns `sampledAgoMs` (age of its last read of neko), `bootId` and a control `epoch`
+  (grows at every held period and lock request); a release without them is invalid. Its 3 s
+  lifetime (poll timeout + 2 poll intervals + 1 relay read interval) counts from the relay's read,
+  with `performance.now()`; a clock that goes backwards holds. The relay reads neko and the run reads
+  the relay every 500 ms (was 1 s), and the relay reads again right after a control request it
+  forwards.
+- **neko's host counts without a viewer, and control is not taken over REST without one.** The relay
+  holds whenever neko last reported a host (until a reset or a new read clears it), and refuses a
+  REST control take, request or hand-over from a session without its own viewer WebSocket.
+- **Request ids are tracked strictly.** Ids must be strings or numbers; a request whose id is in flight
+  (or was cancelled) is refused before Playwright MCP sees it, so a reused id can no longer clear the
+  mark of a call that overlapped a takeover; answers to untracked ids, second answers and answers
+  without an id are dropped. Requests other than initialize, ping, tools/list, tools/call and
+  logging/setLevel are refused. Lines over 8 MB (32 MB from Playwright MCP) are dropped whole.
+- **A relay blip no longer looks like a takeover.** Calls in flight while the status is only
+  unavailable are *unconfirmed*: a result that arrives then is buffered for up to 5 s and released
+  when the next valid release has the same relay start and epoch; otherwise it is withheld with "the
+  browser status could not be confirmed while this call ran… take a snapshot before you repeat it".
+  Only a real `ownerControl: true` (or a moved epoch) withholds with the owner-control text.
 - The poll and both directions of the stdio filter moved into `mcp-filter.mjs`
   (`createControlPoller`, `createRunFilter`) and have behavioural tests.
 - **A failed signed-in setup gives back what it replaced.** When the MCP server setup of a signed-in
   run fails after its claim, the admission and starting window the claim replaced (an earlier session
   of the same run) are restored instead of dropped; with none to restore, its starting entry goes as
-  well, so the browser is no longer reported busy for up to 2 minutes.
+  well, so the browser is no longer reported busy for up to 2 minutes. With two setups of the same
+  run failing at once, the nearest earlier admission whose setup did not fail comes back (never a
+  failed one), and a release that happened during the setup is not undone.
 
 ## 0.24.1 (unreleased)
 
