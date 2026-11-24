@@ -428,7 +428,8 @@ No browser extension runs in the signed-in browser, and none can be added: its p
 extension (`ExtensionInstallBlocklist: ["*"]`), forces none (`ExtensionInstallForcelist: []`),
 allows no install sources and no external extensions, keeps developer mode off
 (`ExtensionDeveloperModeSettings: 1`) and blocks the Chrome Web Store and `chrome-extension://*`
-pages. As defense in depth the run's DevTools filter hides every `chrome-extension://` target,
+pages. As defense in depth the run's DevTools filter hides every `chrome-extension://` target (also a
+target or frame of the run that turns into an extension page after it was attached),
 refuses navigation to extension pages and the whole `Extensions.*` domain, and the MCP filter refuses
 tool calls that name an extension page. Use a password manager on your own device and type or paste
 into the viewer while you hold control.
@@ -440,21 +441,31 @@ update to 0.25.0:
 - The stored `bitwarden` / `bitwardenConsent` settings are ignored.
 - A browser still running the Bitwarden image is never handed to a new run or session; it is
   started again with the plain image as soon as no run holds it (also with a viewer connected; your
-  logins are kept). A run that held it through the update finishes on it; its own (older) filter
-  still keeps the agent off the extension, but the plugin no longer locks the vault after a takeover.
-- A relay started with the vault lock (from before 0.25.0) would keep a run paused forever: the
-  plugin starts that relay again without it once no viewer is connected (neko keeps running; the
-  run's guard fails closed across the relay restart as always).
+  logins are kept). A run that held it through the update keeps it while nothing happens; its own
+  (older) relay and filter keep pausing it after a takeover and keep the agent off the extension.
+- **The pause after a takeover is never lifted on that browser.** Its relay is never started again
+  alone (not for a lock it still waits for, a changed address or port, a lost relay, or a new viewer
+  key), because a new relay would let the run go on against a vault that may be unlocked in
+  Chromium's memory. Once that relay waits for a vault lock (after a takeover) and no viewer is
+  connected, or when its relay is gone, or on a new viewer key, the plugin restarts the **whole**
+  signed-in browser on the plain image: the run's MCP container is removed first (**the run loses its
+  browser**, as with Restart browser, and its calls never reach the old browser again), then neko is
+  stopped gracefully (logins kept, every in-memory key gone). A browser whose image cannot be read
+  counts as possibly Bitwarden. With a viewer connected the run stays paused until the viewer
+  leaves. A relay from before 0.25.0 on a plain browser (no vault) is started again alone, without
+  the lock.
 - The plugin removes this install's Bitwarden signing key (`signed-in/bitwarden-key.pem` and any
   temp file of it) and the variant's build contexts from its state directory, and the
-  `browser-prompt-signed-in:*-bw*` images (`docker rmi` without force, retried while a container
-  still uses one; on a Docker shared with another plugin install that still runs such an image, that
-  image stays).
+  `browser-prompt-signed-in:*-bw*` images (`docker rmi` without force). Each file, folder and image
+  is its own step (one that fails does not stop the others); what is left is retried at the idle
+  checks, at most 5 rounds per daemon start. An image a container still uses stays (also on a Docker
+  shared with another plugin install that still runs it).
 - At the browser's next start its start script removes what every Bitwarden build the profile
   recorded (`.bp-bitwarden-ids`) left: its extension data directories (Local, Sync and Managed
   Extension Settings, `Storage/ext`, `Extensions`, its IndexedDB and File System entries), the shared
-  extension databases (Extension State, Rules, Scripts) and its preference entries; then it forgets
-  every id nothing in the profile names any more, and the file with the last one. Site logins,
+  extension databases (Extension State, Rules, Scripts) and its preference entries. After the first
+  pass whose preference cleanup succeeded (at most 3 passes otherwise) the file and its markers go
+  and the cleanup never runs again (a leftover mention cannot make it repeat). Site logins,
   cookies and other sites' data are never touched. What Chromium keeps per origin in shared
   databases (for example the extension's service-worker registration or `localStorage` entries) is
   not removed one by one; Bitwarden keeps its vault in `chrome.storage.local` (Local Extension

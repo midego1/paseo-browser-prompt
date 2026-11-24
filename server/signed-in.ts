@@ -391,9 +391,19 @@ export function createSignedIn(options: SignedInOptions) {
       let input = await stackInput(bindHost);
       const names = stackNames(input.stackId);
       let containers = await stackContainers();
+      // A neko that may still hold an unlocked Bitwarden vault (its image from before 0.25.0, or an
+      // image that cannot be read): a relay of its own (started with the vault lock) keeps a run paused
+      // after a takeover, and a new relay would lift that pause, so its relay is never replaced alone.
+      // Without its relay the whole stack starts again on the plain image (runs lose the browser).
+      const nekoRunning = containers.get(names.neko) === "running";
+      const runningImage = nekoRunning ? await runningNekoImage() : "";
+      const oldVault = nekoRunning && (runningImage === "" || isLegacyBitwardenImageTag(runningImage));
+      let replaceOldVault = false;
       // neko runs but its proxy or relay stopped (their 7-day lifetime, a crash): start only those;
       // neko and the owner's sessions stay as they are.
-      if (containers.get(names.neko) === "running" && (containers.get(names.proxy) !== "running" || containers.get(names.relay) !== "running")) {
+      if (nekoRunning && oldVault && containers.get(names.relay) !== "running") {
+        replaceOldVault = true;
+      } else if (nekoRunning && (containers.get(names.proxy) !== "running" || containers.get(names.relay) !== "running")) {
         try {
           if (containers.get(names.proxy) !== "running") {
             await docker(["rm", "-f", names.proxy], 30_000).catch(() => undefined);
@@ -409,19 +419,25 @@ export function createSignedIn(options: SignedInOptions) {
         }
         containers = await stackContainers();
       }
-      let allRunning = [names.neko, names.relay, names.proxy].every((name) => containers.get(name) === "running");
+      let allRunning = !replaceOldVault && [names.neko, names.relay, names.proxy].every((name) => containers.get(name) === "running");
       if (allRunning) {
         // A plugin update changed the image: neko starts again with the new one, but never under a
         // run (it would lose its browser); that run's next start or the idle check does it.
-        const running = (await docker(["inspect", "--format", "{{.Config.Image}}", names.neko], 15_000)).stdout.trim();
-        if (running && running !== input.nekoImage) {
+        const running = runningImage;
+        // The image cannot be read: no change on a guess (and no relay restart, see oldVault).
+        if (!running) throw Object.assign(new Error("could not read the signed-in browser's image; try again in a moment"), { state: "failed" as const });
+        if (running !== input.nekoImage) {
           // Never while a viewer is connected either (the owner would lose the browser mid-use),
           // except for an image with Bitwarden from before 0.25.0: it goes as soon as no run holds it.
-          const legacy = isLegacyBitwardenImageTag(running);
-          const viewers = legacy ? 0 : ((await relayAnswer(input, await loadKeys(keysFile)))?.viewers ?? 0);
+          const viewers = oldVault ? 0 : ((await relayAnswer(input, await loadKeys(keysFile)))?.viewers ?? 0);
           if ((await holders().catch(() => 1)) === 0 && viewers === 0) {
-            log(legacy ? "starting the signed-in browser again without Bitwarden (removed in 0.25.0; logins kept)" : "starting the signed-in browser again with its new image");
+            log(oldVault ? "starting the signed-in browser again without Bitwarden (removed in 0.25.0; logins kept)" : "starting the signed-in browser again with its new image");
             allRunning = false;
+          } else if (oldVault) {
+            // A run holds the old Bitwarden browser: keep it and its own relay exactly as they are
+            // (never a relay-only restart, which would lift a pause after a takeover).
+            lastActive = now();
+            return { input: { ...input, nekoImage: running } };
           } else {
             // Keep what runs, and a relay that matches it.
             input = { ...input, nekoImage: running };
@@ -445,6 +461,10 @@ export function createSignedIn(options: SignedInOptions) {
       }
       startingStack = true;
       try {
+        if (replaceOldVault) {
+          log("the signed-in browser with Bitwarden (from before 0.25.0) lost its relay: starting it again on the plain image (logins kept; a run using it loses the browser)");
+          await removeAgents();
+        }
         await createStack(input);
         startError = null;
         // What plugin versions before 0.25.0 left for Bitwarden (best effort, never fails the start).
@@ -547,14 +567,18 @@ export function createSignedIn(options: SignedInOptions) {
     return viewerLink(input.origins.at(-1)!, ticket, portrait);
   }
 
+  /** Runs lose the browser: their MCP containers go (and the admitted ones not up yet no longer hold it). */
+  async function removeAgents(): Promise<void> {
+    const agents = await sb.listResources("container", [`label=${CONTAINER_LABEL}=${SIGNED_IN_AGENT_ROLE}`, `label=${INSTANCE_LABEL}=${await sb.instance()}`], []).catch(() => []);
+    if (agents.length) await docker(["rm", "-f", ...agents.map(([cid]) => cid!)], 30_000).catch(() => undefined);
+    starting.clear();
+  }
+
   async function stopStack(wipe: boolean): Promise<void> {
     await serial(async () => {
       const id = await stackId();
       // Runs lose the browser: their MCP containers go first.
-      const agents = await sb.listResources("container", [`label=${CONTAINER_LABEL}=${SIGNED_IN_AGENT_ROLE}`, `label=${INSTANCE_LABEL}=${await sb.instance()}`], []).catch(() => []);
-      if (agents.length) await docker(["rm", "-f", ...agents.map(([cid]) => cid!)], 30_000).catch(() => undefined);
-      // Those runs no longer hold the browser, also the ones admitted but not up yet.
-      starting.clear();
+      await removeAgents();
       await removeStack({ stackId: id }, !wipe);
       if (wipe) {
         const result = await docker(["volume", "rm", stackNames(id).volume], 60_000);
@@ -620,20 +644,38 @@ export function createSignedIn(options: SignedInOptions) {
   /**
    * Migration from before 0.25.0: a relay started with Bitwarden (BP_LOCK_ON_RELEASE) keeps a run
    * paused after every takeover until the daemon confirms a vault lock, which nothing does any more.
-   * When the running relay still reports such a pending lock and no viewer is connected, it is
-   * started again without it (neko and the owner's logins keep running; the run's guard fails closed
-   * across the relay restart as always). With a viewer connected the run stays paused until the
-   * viewer leaves; the next check does it then. True when the relay was started again.
+   * When it reports such a pending lock and no viewer is connected:
+   * - neko still runs the Bitwarden image (or its image cannot be read): the vault may be unlocked in
+   *   Chromium's memory, so the pause is never lifted with a relay alone. The whole stack starts again
+   *   on the plain image (a graceful stop, logins kept, every in-memory key gone); a run using it loses
+   *   the browser (its MCP container goes first), so none of its calls reach the old browser again.
+   * - otherwise: only the relay starts again, without the lock (neko keeps running; the run's guard
+   *   fails closed across the relay restart as always).
+   * With a viewer connected the run stays paused until the viewer leaves; the next check does it
+   * then. True when something was started again.
    */
   async function legacyRelayCheck(): Promise<boolean> {
     const relay = await relayNow().catch(() => null);
     if (relay?.lockPending !== true || relay.viewers > 0) return false;
+    const running = await runningNekoImage();
+    if (running === "" || isLegacyBitwardenImageTag(running)) {
+      log("the relay still waits for a Bitwarden lock (from before 0.25.0) and the browser may hold the vault: restarting the whole signed-in browser on the plain image (logins kept; a run using it loses the browser)");
+      try {
+        await stopStack(false);
+        await ensureStarted();
+      } catch (error) {
+        log(`could not restart the signed-in browser: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return true;
+    }
     log("the relay still waits for a Bitwarden lock (from before 0.25.0): starting it again without; the browser keeps running");
     await serial(async () => {
       const bindHost = await options.bindHost();
       if (!bindHost || !bindHostAllowed(bindHost) || !(await isRunning())) return;
-      const running = await runningNekoImage();
-      const input = { ...(await stackInput(bindHost)), ...(running ? { nekoImage: running } : {}) };
+      const current = await runningNekoImage();
+      // Checked again inside the stack lock: never a relay alone for a Bitwarden browser.
+      if (current === "" || isLegacyBitwardenImageTag(current)) return;
+      const input = { ...(await stackInput(bindHost)), nekoImage: current };
       await docker(["rm", "-f", stackNames(input.stackId).relay], 30_000).catch(() => undefined);
       await waitForNeko(input, await startRelay(input, await loadKeys(keysFile)));
     }).catch((error: unknown) => log(`could not start the relay again: ${error instanceof Error ? error.message : String(error)}`));
@@ -644,42 +686,57 @@ export function createSignedIn(options: SignedInOptions) {
    * Migration from before 0.25.0 (Bitwarden removed), best effort and never throwing: removes the
    * Bitwarden signing key (and any temp file of it) from the state directory, the build contexts of
    * the Bitwarden image variants, and those images themselves (`docker rmi` without force, so an image
-   * a container still uses stays until a later check). Done once nothing is left. The Bitwarden data
-   * in the browser profile is removed by the image's start script (signed-in/chromium-start.sh).
+   * a container still uses stays until a later check). Every file, folder and image is its own step:
+   * one that fails never stops the others. Done once nothing is left; after LEGACY_MAX_ROUNDS rounds
+   * that left something, it stops until the next daemon start (logged once). The Bitwarden data in
+   * the browser profile is removed by the image's start script (signed-in/chromium-start.sh).
    */
+  const LEGACY_MAX_ROUNDS = 5;
   let legacyDone = false;
+  let legacyRounds = 0;
   let legacyRunning: Promise<void> | null = null;
   function removeLegacyBitwarden(): Promise<void> {
-    if (legacyDone) return Promise.resolve();
-    legacyRunning ??= (async () => {
+    if (legacyDone || legacyRounds >= LEGACY_MAX_ROUNDS) return Promise.resolve();
+    const step = async (what: string, task: () => Promise<unknown>): Promise<boolean> => {
       try {
-        const keyDir = dirname(legacyKeyFile);
-        const keyName = legacyKeyFile.slice(keyDir.length + 1);
-        for (const name of await readdir(keyDir).catch(() => [] as string[])) {
-          if (name === keyName || (name.startsWith(`${keyName}.`) && name.endsWith(".tmp"))) {
-            await rm(join(keyDir, name), { force: true });
-            log("removed the Bitwarden signing key (Bitwarden was removed in 0.25.0)");
-          }
-        }
-        const buildRoot = options.buildRoot ?? join(stateDir(), "signed-in");
-        for (const name of await readdir(buildRoot).catch(() => [] as string[])) {
-          if (isLegacyBitwardenImageTag(`${SIGNED_IN_IMAGE_REPOSITORY}:${name}`)) await rm(join(buildRoot, name), { recursive: true, force: true });
-        }
-        const listed = await docker(["image", "ls", "--filter", `reference=${SIGNED_IN_IMAGE_REPOSITORY}:*`, "--format", "{{.Repository}}:{{.Tag}}"], 15_000);
-        if (listed.code !== 0) return;
-        let left = 0;
+        await task();
+        return true;
+      } catch (error) {
+        if (legacyRounds === 0) log(`could not remove ${what} (Bitwarden was removed in 0.25.0): ${error instanceof Error ? error.message : String(error)}`);
+        return false;
+      }
+    };
+    legacyRunning ??= (async () => {
+      let left = 0;
+      const keyDir = dirname(legacyKeyFile);
+      const keyName = legacyKeyFile.slice(keyDir.length + 1);
+      for (const name of await readdir(keyDir).catch(() => [] as string[])) {
+        if (name !== keyName && !(name.startsWith(`${keyName}.`) && name.endsWith(".tmp"))) continue;
+        // Only a file: a directory (or anything else) at that path is not ours to remove.
+        if (await step(`the Bitwarden signing key ${name}`, () => rm(join(keyDir, name), { force: true }))) log(`removed the Bitwarden signing key ${name} (Bitwarden was removed in 0.25.0)`);
+        else left++;
+      }
+      const buildRoot = options.buildRoot ?? join(stateDir(), "signed-in");
+      for (const name of await readdir(buildRoot).catch(() => [] as string[])) {
+        if (!isLegacyBitwardenImageTag(`${SIGNED_IN_IMAGE_REPOSITORY}:${name}`)) continue;
+        if (!(await step(`the build context ${name}`, () => rm(join(buildRoot, name), { recursive: true, force: true })))) left++;
+      }
+      const listed = await docker(["image", "ls", "--filter", `reference=${SIGNED_IN_IMAGE_REPOSITORY}:*`, "--format", "{{.Repository}}:{{.Tag}}"], 15_000).catch(() => ({ code: 1, stdout: "" }));
+      if (listed.code !== 0) left++;
+      else {
         for (const tag of listed.stdout.split("\n").map((line) => line.trim()).filter(isLegacyBitwardenImageTag)) {
           const removed = await docker(["rmi", tag], 60_000).catch(() => ({ code: 1 }));
           if (removed.code === 0) log(`removed the old Bitwarden image ${tag}`);
           else left++;
         }
-        if (left === 0) legacyDone = true;
-      } catch {
-        // tried again at the next check
       }
-    })().finally(() => {
-      legacyRunning = null;
-    });
+      if (left === 0) legacyDone = true;
+      else if (++legacyRounds >= LEGACY_MAX_ROUNDS) log(`${left} thing(s) Bitwarden left (from before 0.25.0) could not be removed after ${LEGACY_MAX_ROUNDS} tries; the next daemon start tries again`);
+    })()
+      .catch(() => undefined)
+      .finally(() => {
+        legacyRunning = null;
+      });
     return legacyRunning;
   }
 
@@ -823,6 +880,15 @@ export function createSignedIn(options: SignedInOptions) {
         const bindHost = await options.bindHost();
         if (!bindHost || !(await isRunning())) return;
         const input = await stackInput(bindHost);
+        const running = await runningNekoImage();
+        if (running === "" || isLegacyBitwardenImageTag(running)) {
+          // A browser that may hold a Bitwarden vault (from before 0.25.0) never gets a relay alone
+          // (it would lift a run's pause after a takeover): the whole stack starts again on the plain image.
+          log("rotating the viewer key: the signed-in browser still has Bitwarden (from before 0.25.0), so it starts again on the plain image (logins kept)");
+          await removeAgents();
+          await createStack(input);
+          return;
+        }
         await docker(["rm", "-f", stackNames(input.stackId).relay], 30_000).catch(() => undefined);
         await waitForNeko(input, await startRelay(input, next));
         log("rotated the signed-in browser's viewer key");

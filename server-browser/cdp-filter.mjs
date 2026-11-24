@@ -6,7 +6,8 @@
 // restored after a restart, tabs the owner opens, service workers, tab targets) is hidden:
 // Playwright never attaches to it, and commands that target it are refused, as are closing the
 // browser and reading or clearing every cookie. No extension can be installed in this browser (its
-// policy blocks them all); as defense in depth, extension targets are hidden too, and the run can
+// policy blocks them all); as defense in depth, extension targets are hidden too (also one of the
+// run's targets or frames that turns into an extension page after it was attached), and the run can
 // neither open chrome-extension:// pages nor call Extensions.*. Node's standard library plus the
 // `ws` WebSocket implementation Playwright bundles.
 import { createServer, get as httpGet } from "node:http";
@@ -85,6 +86,8 @@ export function createTargetFilter({ held = () => false } = {}) {
   const windowCalls = new Set();
   /** Events about unknown top-level targets held back while a create is on its way. */
   let queue = [];
+  /** Visible sessions: session -> { targetId, parent } (parent: the session it was attached on). */
+  const sessionInfo = new Map();
   let internal = INTERNAL_ID_BASE;
 
   /**
@@ -120,10 +123,22 @@ export function createTargetFilter({ held = () => false } = {}) {
   function decide(message) {
     const out = { deliver: [], toBrowser: [] };
     if (message.sessionId && hiddenSessions.has(message.sessionId)) return out;
+    // A frame of one of the run's sessions that navigates to an extension page after it was attached:
+    // its own root frame is taken away from the run; any other frame's navigation is not delivered.
+    if (message.method === "Page.frameNavigated" && message.sessionId && visibleSessions.has(message.sessionId) && (isExtensionUrl(message.params?.frame?.url) || isExtensionUrl(message.params?.frame?.unreachableUrl))) {
+      const own = sessionInfo.get(message.sessionId)?.targetId;
+      if (own && (message.params?.frame?.id === own || !message.params?.frame?.parentId)) revoke(own, out);
+      return out;
+    }
     if (TARGET_EVENTS.has(message.method)) {
       const id = message.params?.targetInfo?.targetId ?? message.params?.targetId;
       if (message.method === "Target.targetDestroyed" || message.method === "Target.targetCrashed") {
         if (visible.has(id)) out.deliver.push(message);
+        return out;
+      }
+      if (visible.has(id) && isExtensionUrl(message.params?.targetInfo?.url)) {
+        // One of the run's targets turned into an extension page: it is gone for the run.
+        revoke(id, out);
         return out;
       }
       if (isVisible(message.params?.targetInfo, message.sessionId)) out.deliver.push(message);
@@ -133,6 +148,7 @@ export function createTargetFilter({ held = () => false } = {}) {
       const { sessionId, targetInfo, waitingForDebugger } = message.params ?? {};
       if (isVisible(targetInfo, message.sessionId)) {
         visibleSessions.add(sessionId);
+        sessionInfo.set(sessionId, { targetId: targetInfo.targetId, parent: message.sessionId });
         out.deliver.push(message);
         return out;
       }
@@ -148,6 +164,7 @@ export function createTargetFilter({ held = () => false } = {}) {
         return out;
       }
       visibleSessions.delete(sessionId);
+      sessionInfo.delete(sessionId);
       out.deliver.push(message);
       return out;
     }
@@ -158,6 +175,21 @@ export function createTargetFilter({ held = () => false } = {}) {
     }
     out.deliver.push(message);
     return out;
+  }
+
+  /** Hides a visible target from now on: the run sees it detached and destroyed; Chromium detaches its sessions. */
+  function revoke(targetId, out) {
+    visible.delete(targetId);
+    hidden.add(targetId);
+    for (const [sessionId, info] of [...sessionInfo]) {
+      if (info.targetId !== targetId) continue;
+      visibleSessions.delete(sessionId);
+      sessionInfo.delete(sessionId);
+      hiddenSessions.add(sessionId);
+      out.deliver.push({ ...(info.parent ? { sessionId: info.parent } : {}), method: "Target.detachedFromTarget", params: { sessionId, targetId } });
+      out.toBrowser.push({ id: internal++, ...(info.parent ? { sessionId: info.parent } : {}), method: "Target.detachFromTarget", params: { sessionId } });
+    }
+    out.deliver.push({ method: "Target.targetDestroyed", params: { targetId } });
   }
 
   const error = (id, message, sessionId) => ({ id, ...(sessionId ? { sessionId } : {}), error: { code: -32000, message } });

@@ -24,8 +24,9 @@ relay) stays as it was.
   owner's control.
 - **The card's** Lock Bitwarden now / Restart browser panel and its Bitwarden takeover hint.
 - **Bitwarden-only filtering:** the DevTools filter's click, tap and keyboard checks on extension
-  frames, the take-away of a frame that turns into an extension page, and hiding extension
-  content-script worlds. Kept as generic hardening: extension targets stay hidden, navigation to
+  frames and hiding extension content-script worlds. Kept as generic hardening: extension targets
+  stay hidden (also a target or frame of the run that turns into an extension page after it was
+  attached: it is taken away from the run), navigation to
   `chrome-extension://` pages and the whole `Extensions.*` domain stay refused, and the MCP filter
   still refuses tool calls that name an extension page.
 - **The agent prompt's** password-manager paragraph, and the smoke test's Bitwarden checks.
@@ -47,20 +48,25 @@ relay) stays as it was.
 - **A browser still on the Bitwarden image** is never handed to a new run or session (Run says the
   browser is in use; a new session of a run gets none), and it starts again with the plain image as
   soon as no run holds it, also with a viewer connected (logins kept). A run that held it through the
-  update finishes on it.
-- **A relay that still waits for a vault lock** (started before 0.25.0 with Bitwarden) would keep a
-  paused run waiting forever: the daemon starts that relay again without the lock, at its start and
-  at every idle check, once no viewer is connected (neko keeps running; the run's guard fails closed
-  across the relay restart as always).
+  update keeps it while nothing happens (its old relay still pauses it after a takeover).
+- **The pause is never lifted on that browser with a relay alone** (its vault may be unlocked in
+  memory): when its relay waits for a vault lock and no viewer is connected (checked at the daemon's
+  start and every idle check), when its relay is gone, or on a new viewer key, the whole signed-in
+  browser restarts on the plain image. The run's MCP container goes first, so **that run loses its
+  browser** (as with Restart browser; start it again) and none of its calls reach the old browser;
+  neko stops gracefully (logins kept, in-memory keys gone). An unreadable image counts as Bitwarden.
+  A pre-0.25.0 relay on a plain browser is restarted alone, without the lock.
 - **State directory:** the signing key (`signed-in/bitwarden-key.pem`, also a temp file of it) and
   the variant's build contexts are deleted; the `browser-prompt-signed-in:*-bw*` images are removed
-  with `docker rmi` (no force: an image a container still uses stays until a later check). Best
-  effort, retried at every idle check until nothing is left; it never fails a start.
+  with `docker rmi` (no force: an image a container still uses stays until a later check). Every
+  file, folder and image is its own best-effort step; what is left is retried at the idle checks, at
+  most 5 rounds per daemon start; it never fails a start.
 - **Profile:** at the browser's next start its start script removes what every recorded Bitwarden
   build (`.bp-bitwarden-ids`, plus the first 0.23.0 store id where it left traces) left in the
   profile: extension data directories, IndexedDB and File System entries, the shared extension
-  databases and its preference entries. It then forgets every id nothing names any more and removes
-  `.bp-bitwarden-ids` and `.bp-bitwarden-dbs-cleared` with the last one. Site logins and cookies are
+  databases and its preference entries. After the first pass whose preference cleanup succeeded (at
+  most 3 passes otherwise) it removes `.bp-bitwarden-ids` and its markers and never runs again.
+  Site logins and cookies are
   never touched. (The DevTools clearing of the extension origins' storage is gone with the lock tool;
   Bitwarden's vault cache lives in Local Extension Settings, which the script removes.)
 

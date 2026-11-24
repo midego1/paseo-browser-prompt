@@ -2694,7 +2694,7 @@ test("0.25.0 chromium-start.sh: every recorded Bitwarden build's data and prefer
     keep: "https://example.com",
   });
   assert.deepEqual(JSON.parse(readFileSync(join(dir, "profile", "Default", "Secure Preferences"), "utf8")), { protection: { macs: { extensions: { settings: { other: "m" } } } } });
-  assert.equal(existsSync(join(dir, "profile", ".bp-bitwarden-ids")), false, "nothing names them any more: the ids file goes");
+  assert.equal(existsSync(join(dir, "profile", ".bp-bitwarden-ids")), false, "one successful pass: the ids file goes");
   assert.equal(existsSync(join(dir, "profile", ".bp-bitwarden-dbs-cleared")), false);
   assert.equal(existsSync(join(dir, "profile", ".bp-bitwarden-ids.bp-tmp")), false);
   // The next start finds nothing to do and touches nothing.
@@ -2703,36 +2703,67 @@ test("0.25.0 chromium-start.sh: every recorded Bitwarden build's data and prefer
   assert.equal(existsSync(join(dir, "profile", "Default", "Extension State")), true, "no ids file: the shared databases are left alone");
 });
 
-test("0.25.0 chromium-start.sh: an id that still leaves a trace stays recorded (tried again next start); the old store id counts where it left traces; a forged ids file removes nothing else", () => {
+test("0.25.0 chromium-start.sh: one successful pass ends the cleanup (also with a leftover trace); the old store id counts only until then; a forged ids file removes nothing else", () => {
   const dir = mkdtempSync(join(tmpdir(), "bp-bw-gone2-"));
   const a = "a".repeat(32);
   const legacy = "nngceckbapebfimnlniiiahkandclblb";
   mkdirSync(join(dir, "profile", "Default", "Local Extension Settings", legacy), { recursive: true });
-  // A file the cleanup does not know still names `a`.
+  // A file the cleanup does not know still names `a`: it does not make the cleanup repeat.
   mkdirSync(join(dir, "profile", "Default", "Service Worker", `x-${a}`), { recursive: true });
   writeFileSync(join(dir, "profile", ".bp-bitwarden-ids"), `${a}\n`);
   let result = runStartScript(dir);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(existsSync(join(dir, "profile", "Default", "Local Extension Settings", legacy)), false, "the old store id's data goes too");
-  assert.equal(readFileSync(join(dir, "profile", ".bp-bitwarden-ids"), "utf8"), `${a}\n`, "a still has a trace; the store id is forgotten");
-  rmSync(join(dir, "profile", "Default", "Service Worker"), { recursive: true });
-  result = runStartScript(dir);
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(join(dir, "profile", ".bp-bitwarden-ids")), false, "done after the first successful pass");
+  assert.equal(existsSync(join(dir, "profile", ".bp-bitwarden-cleaned")), true);
+  // A leftover mention of the old store id later does not start it again.
+  writeFileSync(join(dir, "profile", "Default", "Preferences"), JSON.stringify({ note: legacy }));
+  mkdirSync(join(dir, "profile", "Default", "Extension State"), { recursive: true });
+  assert.equal(runStartScript(dir).status, 0);
   assert.equal(existsSync(join(dir, "profile", ".bp-bitwarden-ids")), false);
+  assert.equal(existsSync(join(dir, "profile", "Default", "Extension State")), true, "nothing removed again");
   // A forged ids file cannot point the removal elsewhere.
   mkdirSync(join(dir, "profile", "Default", "Local Extension Settings", "other"), { recursive: true });
-  mkdirSync(join(dir, "profile", "Default", "Extension State"), { recursive: true });
   writeFileSync(join(dir, "profile", ".bp-bitwarden-ids"), "../../etc\n*\n");
   assert.equal(runStartScript(dir).status, 0);
   assert.equal(existsSync(join(dir, "profile", "Default", "Local Extension Settings", "other")), true);
   assert.equal(existsSync(join(dir, "profile", "Default", "Extension State")), true, "no valid id: nothing removed");
   assert.equal(existsSync(join(dir, "profile", ".bp-bitwarden-ids")), false, "and the forged file is dropped");
-  // A profile that never had Bitwarden: nothing recorded, nothing removed.
+  // A profile that never had Bitwarden: nothing recorded, nothing removed, no marker.
   const clean = mkdtempSync(join(tmpdir(), "bp-bw-gone3-"));
   mkdirSync(join(clean, "profile", "Default", "Extension State"), { recursive: true });
   assert.equal(runStartScript(clean).status, 0);
   assert.equal(existsSync(join(clean, "profile", ".bp-bitwarden-ids")), false);
+  assert.equal(existsSync(join(clean, "profile", ".bp-bitwarden-cleaned")), false);
   assert.equal(existsSync(join(clean, "profile", "Default", "Extension State")), true);
+});
+
+test("0.25.0 chromium-start.sh: without a working preference cleanup (no python3) the pass is repeated, at most 3 times", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bp-bw-gone4-"));
+  // A PATH with the script's tools but no python3.
+  const bin = join(dir, "bin");
+  mkdirSync(bin);
+  for (const tool of ["sed", "grep", "sort", "rm", "mv", "find", "head", "cat", "wc", "echo"]) {
+    const found = ["/usr/bin", "/bin"].map((d) => join(d, tool)).find((path) => existsSync(path));
+    symlinkSync(found, join(bin, tool));
+  }
+  const a = "a".repeat(32);
+  const start = () =>
+    spawnSync("/bin/sh", ["-c", `sed -e "s|^PROFILE=.*|PROFILE=$T/profile|" -e "s|exec /usr/bin/chromium|exec echo|" "$0" | /bin/sh`, new URL("../signed-in/chromium-start.sh", import.meta.url).pathname], {
+      env: { PATH: bin, BP_PROXY: "http://bp-si-0a1b2c3d-proxy:3128", T: dir },
+      encoding: "utf8",
+    });
+  mkdirSync(join(dir, "profile", "Default", "Local Extension Settings", a), { recursive: true });
+  writeFileSync(join(dir, "profile", ".bp-bitwarden-ids"), `${a}\n`);
+  for (const pass of [1, 2]) {
+    const result = start();
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(join(dir, "profile", ".bp-bitwarden-ids")), true, `pass ${pass}: tried again next start`);
+  }
+  assert.equal(existsSync(join(dir, "profile", "Default", "Local Extension Settings", a)), false, "the data directories went on the first pass");
+  assert.equal(start().status, 0);
+  assert.equal(existsSync(join(dir, "profile", ".bp-bitwarden-ids")), false, "the third pass ends it");
+  assert.equal(existsSync(join(dir, "profile", ".bp-bitwarden-passes")), false);
 });
 
 test("0.25.0: Bitwarden is gone from the image, the prompt, the card, the settings, the filters and the RPCs (only the migration remembers it)", () => {
@@ -2764,4 +2795,118 @@ test("0.25.0 daemon: Restart browser stops the stack gracefully (logins kept) an
   assert.equal(nekoRuns(), before + 1);
   assert.ok(docker.calls.some((args) => args[0] === "stop" && args[1] === "-t"), "a graceful stop (cookies are written)");
   assert.ok(!docker.calls.some((args) => args[0] === "volume" && args[1] === "rm"), "the profile stays");
+});
+
+/** A signed-in daemon whose running neko has the Bitwarden image of a version before 0.25.0, held by a run. */
+async function legacyHeldRig(relay = { viewers: 0, idleMs: 0, nekoUp: true, portrait: false, lockPending: true }) {
+  const docker = fakeStackDocker();
+  const state = { relay };
+  const logs = [];
+  const rig = makeSignedIn(docker, { relayStatus: async () => state.relay, log: (m) => logs.push(m) });
+  await rig.si.viewerLink({ purpose: "login", portrait: false });
+  docker.state.nekoImage = LEGACY_BW_TAG;
+  docker.state.legacyTags.add(LEGACY_BW_TAG);
+  docker.state.agents = [{ id: "c1c1c1c1", agent: "held-run" }];
+  docker.calls.length = 0;
+  const runs = (role) => docker.calls.filter((args) => args[0] === "run" && new RegExp(`-${role}$`).test(value(args, "--name")[0] ?? ""));
+  return { ...rig, docker, state, logs, runs };
+}
+
+test("0.25.0 review: a held run on the old Bitwarden browser whose relay waits for the lock gets a full restart on the plain image, never a relay alone; its calls never reach the old browser", async () => {
+  const { si, docker, runs, logs } = await legacyHeldRig();
+  assert.equal(await si.legacyRelayCheck(), true);
+  const calls = docker.calls.map((args) => args.join(" "));
+  const agentGone = calls.findIndex((c) => c === "rm -f c1c1c1c1");
+  const nekoGone = calls.findIndex((c) => /^stop -t 45 bp-si-[0-9a-f]{8}-neko$/.test(c));
+  const firstRelay = calls.findIndex((c) => c.startsWith("run ") && / --name bp-si-[0-9a-f]{8}-relay /.test(c));
+  assert.ok(agentGone >= 0, "the run's MCP container is removed (the run loses the browser)");
+  assert.ok(nekoGone > agentGone, "then the old neko is stopped gracefully (logins kept, in-memory keys gone)");
+  assert.ok(firstRelay > nekoGone, "a new relay only after the old browser is gone");
+  assert.equal(runs("neko").length, 1, "neko started again");
+  assert.equal(runs("neko")[0].at(-1), si.image, "on the plain image");
+  assert.equal(docker.state.nekoImage, si.image);
+  assert.ok(!docker.calls.some((args) => args[0] === "volume" && args[1] === "rm"), "the profile stays");
+  assert.ok(logs.some((m) => /restarting the whole signed-in browser on the plain image/.test(m)));
+  // A viewer is connected: nothing yet (the run stays paused by the old relay).
+  const viewing = await legacyHeldRig({ viewers: 1, idleMs: 0, nekoUp: true, portrait: false, lockPending: true });
+  assert.equal(await viewing.si.legacyRelayCheck(), false);
+  assert.equal(viewing.runs("relay").length + viewing.runs("neko").length, 0);
+  // The image cannot be read: treated as possibly Bitwarden (full restart, never a relay alone).
+  const unknown = await legacyHeldRig();
+  unknown.docker.state.inspectFails = true;
+  await unknown.si.legacyRelayCheck();
+  unknown.docker.state.inspectFails = false;
+  const order = unknown.docker.calls.map((args) => args.join(" "));
+  assert.ok(order.includes("rm -f c1c1c1c1"), "the run loses the browser");
+  assert.ok(!order.some((c, i) => c.startsWith("run ") && / --name bp-si-[0-9a-f]{8}-relay /.test(c) && !order.slice(0, i).some((x) => /^stop -t 45 bp-si-[0-9a-f]{8}-neko$/.test(x))), "no relay before neko was stopped");
+});
+
+test("0.25.0 review: with a run on the old Bitwarden browser, no other path starts its relay alone (changed settings, a lost relay, a new viewer key)", async () => {
+  // A changed address or port (the relay's config tag differs): the old relay and neko are kept.
+  const changed = await legacyHeldRig({ viewers: 0, idleMs: 0, nekoUp: true, portrait: false });
+  changed.docker.state.relayTag = "something-else";
+  await changed.si.ensureStarted();
+  assert.equal(changed.runs("relay").length, 0, "no relay alone under a held Bitwarden browser");
+  assert.equal(changed.docker.state.nekoImage, LEGACY_BW_TAG, "and the run keeps its browser");
+  await changed.si.idleCheck();
+  assert.equal(changed.runs("relay").length, 0);
+  // The relay is gone: the whole stack starts again on the plain image (the run loses the browser).
+  const lost = await legacyHeldRig();
+  lost.docker.state.containers.set([...lost.docker.state.containers.keys()].find((name) => name.endsWith("-relay")), "exited");
+  await lost.si.ensureStarted();
+  assert.ok(lost.docker.calls.some((args) => args.join(" ") === "rm -f c1c1c1c1"));
+  assert.equal(lost.runs("neko").length, 1);
+  assert.equal(lost.docker.state.nekoImage, lost.si.image);
+  // A new viewer key: the same (never a relay alone).
+  const rotated = await legacyHeldRig();
+  await rotated.si.rotateKey();
+  assert.ok(rotated.docker.calls.some((args) => args.join(" ") === "rm -f c1c1c1c1"));
+  assert.equal(rotated.runs("neko").length, 1);
+  assert.equal(rotated.docker.state.nekoImage, rotated.si.image);
+});
+
+test("0.25.0 review: one failing cleanup step does not stop the others, and the retries stop after 5 rounds until the next daemon start", async () => {
+  const docker = fakeStackDocker();
+  docker.state.legacyTags = new Set([LEGACY_BW_TAG]);
+  const logs = [];
+  const { si, dir } = makeSignedIn(docker, { log: (m) => logs.push(m) });
+  // The key path is a directory: not removable as a file.
+  mkdirSync(join(dir, "bitwarden-key.pem"));
+  writeFileSync(join(dir, "bitwarden-key.pem.ab12.tmp"), "partial");
+  mkdirSync(join(dir, "build", "neko3.2.0-0123456789ab-bw2026.11.0-fedcba987654"), { recursive: true });
+  await si.removeLegacyBitwarden();
+  assert.equal(existsSync(join(dir, "bitwarden-key.pem.ab12.tmp")), false, "the temp file still goes");
+  assert.equal(existsSync(join(dir, "build", "neko3.2.0-0123456789ab-bw2026.11.0-fedcba987654")), false, "the build context still goes");
+  assert.deepEqual(docker.state.removed, [LEGACY_BW_TAG], "the image is still removed");
+  assert.equal(existsSync(join(dir, "bitwarden-key.pem")), true, "a directory is not ours to remove");
+  for (let i = 0; i < 10; i++) await si.removeLegacyBitwarden();
+  assert.equal(docker.calls.filter((args) => args[0] === "image" && args[1] === "ls").length, 5, "five rounds, then it waits for the next daemon start");
+  assert.ok(logs.some((m) => /could not be removed after 5 tries/.test(m)));
+});
+
+test("0.25.0 review: DevTools filter takes away a target or frame of the run that turns into an extension page after it was attached", () => {
+  const filter = createTargetFilter();
+  const attached = (info, sessionId) => ({ method: "Target.attachedToTarget", ...(sessionId ? { sessionId } : {}), params: { sessionId: `S-${info.targetId}`, targetInfo: info, waitingForDebugger: false } });
+  filter.fromClient({ id: 1, method: "Target.createTarget", params: { url: "about:blank" } });
+  filter.fromBrowser(attached({ targetId: "P", type: "page", url: "about:blank" }));
+  filter.fromBrowser({ id: 1, result: { targetId: "P" } });
+  filter.fromBrowser(attached({ targetId: "F", type: "iframe", url: "about:blank" }, "S-P"));
+  // The frame target commits to an extension page on its own session: taken away, nothing about it delivered.
+  const frame = filter.fromBrowser({ sessionId: "S-F", method: "Page.frameNavigated", params: { frame: { id: "F", url: "chrome-extension://dyn/overlay/menu.html" } } });
+  assert.deepEqual(frame.deliver.map((m) => m.method), ["Target.detachedFromTarget", "Target.targetDestroyed"]);
+  assert.deepEqual(frame.toBrowser.map((m) => m.method), ["Target.detachFromTarget"]);
+  assert.ok(filter.fromClient({ id: 2, sessionId: "S-F", method: "Runtime.evaluate", params: {} }).reply, "its session is gone for the run");
+  // A child frame of the page that navigates to one: not delivered, the page stays.
+  assert.equal(filter.fromBrowser({ sessionId: "S-P", method: "Page.frameNavigated", params: { frame: { id: "child", parentId: "P", url: "chrome-extension://x/a.html" } } }).deliver.length, 0);
+  assert.equal(filter.isVisible("P"), true);
+  // The page itself becomes an extension page (target info): taken away.
+  const page = filter.fromBrowser({ method: "Target.targetInfoChanged", params: { targetInfo: { targetId: "P", type: "page", url: "chrome-extension://x/popup.html" } } });
+  assert.deepEqual(page.deliver.map((m) => m.method), ["Target.detachedFromTarget", "Target.targetDestroyed"]);
+  assert.equal(filter.isVisible("P"), false);
+  assert.ok(filter.fromClient({ id: 3, sessionId: "S-P", method: "Runtime.evaluate", params: {} }).reply);
+  // An ordinary navigation is delivered as before.
+  filter.fromClient({ id: 4, method: "Target.createTarget", params: { url: "about:blank" } });
+  filter.fromBrowser(attached({ targetId: "Q", type: "page", url: "about:blank" }));
+  filter.fromBrowser({ id: 4, result: { targetId: "Q" } });
+  assert.equal(filter.fromBrowser({ sessionId: "S-Q", method: "Page.frameNavigated", params: { frame: { id: "Q", url: "https://example.com/" } } }).deliver.length, 1);
 });

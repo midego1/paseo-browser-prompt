@@ -7,13 +7,16 @@
 # Migration from before 0.25.0, when the plugin could put Bitwarden into this browser (an image
 # variant, removed in 0.25.0; no extension can be installed now, see policies.json): the profile
 # recorded the ids of the Bitwarden builds it had seen (.bp-bitwarden-ids). While that file exists,
-# every start removes what those builds left (their extension data directories, IndexedDB and file
-# system entries, Chromium's shared extension databases, their preference entries), then forgets
-# every id nothing in the profile names any more, and the file with the last one. Site logins and
-# cookies are never touched.
+# a start removes what those builds left (their extension data directories, IndexedDB and file
+# system entries, Chromium's shared extension databases, their preference entries); after the first
+# pass whose preference cleanup succeeded (at most 3 passes otherwise) the file and its marker go, so
+# the cleanup does not repeat on every start. Site logins and cookies are never touched.
 PROFILE=/home/neko/.config/chromium
 IDS="$PROFILE/.bp-bitwarden-ids"
 DBS="$PROFILE/.bp-bitwarden-dbs-cleared"
+PASSES="$PROFILE/.bp-bitwarden-passes"
+# Written when the cleanup finished: the old store id below is then never looked for again.
+DONE="$PROFILE/.bp-bitwarden-cleaned"
 # The first 0.23.0 builds loaded Bitwarden with its store id: a stale build where it left traces.
 LEGACY_ID=nngceckbapebfimnlniiiahkandclblb
 rm -f "$PROFILE/SingletonLock" "$PROFILE/SingletonCookie" "$PROFILE/SingletonSocket"
@@ -22,7 +25,7 @@ if ! printf '%s' "${BP_PROXY:-}" | grep -Eq '^http://(bp-si-[0-9a-f]{8}-proxy|[0
   sleep 10
   exit 1
 fi
-if ! grep -qx "$LEGACY_ID" "$IDS" 2>/dev/null; then
+if [ ! -e "$DONE" ] && ! grep -qx "$LEGACY_ID" "$IDS" 2>/dev/null; then
   if [ -e "$PROFILE/Default/Local Extension Settings/$LEGACY_ID" ] || grep -q "$LEGACY_ID" "$PROFILE/Default/Preferences" 2>/dev/null; then printf '%s\n' "$LEGACY_ID" >> "$IDS"; fi
 fi
 if [ -f "$IDS" ]; then
@@ -43,7 +46,9 @@ if [ -f "$IDS" ]; then
     done
   fi
   # Their entries in Chromium's preferences (settings, uninstall records, shortcuts, MACs), before Chromium reads them.
-  if [ -n "$STALE" ] && command -v python3 >/dev/null 2>&1; then
+  PREFS_OK=1
+  if [ -n "$STALE" ] && ! command -v python3 >/dev/null 2>&1; then PREFS_OK=0; fi
+  if [ -n "$STALE" ] && [ "$PREFS_OK" = 1 ]; then
     python3 -I -c '
 import json, os, sys
 stale = set(sys.argv[2:])
@@ -74,17 +79,16 @@ for root, dirs, files in os.walk(sys.argv[1]):
             with open(path + ".bp-tmp", "w") as out:
                 json.dump(cleaned, out)
             os.replace(path + ".bp-tmp", path)
-' "$PROFILE" $STALE || true
+' "$PROFILE" $STALE || PREFS_OK=0
   fi
-  # Forget an id once nothing in the profile names it (a file name, or the preferences); the file goes with the last one.
-  KEEP=""
-  for id in $STALE; do
-    if [ -n "$(find "$PROFILE" -name "*$id*" 2>/dev/null | head -1)" ] || grep -qs "$id" "$PROFILE"/*/Preferences "$PROFILE"/*/"Secure Preferences"; then KEEP="$KEEP $id"; fi
-  done
-  if [ -n "$KEEP" ]; then
-    printf '%s\n' $KEEP > "$IDS.bp-tmp" && mv -f "$IDS.bp-tmp" "$IDS"
+  # Done after the first pass whose preference cleanup succeeded; otherwise tried again, at most 3 passes.
+  COUNT=1
+  [ -f "$PASSES" ] && COUNT=$(( $(wc -l < "$PASSES") + 1 ))
+  if [ "$PREFS_OK" = 1 ] || [ "$COUNT" -ge 3 ]; then
+    rm -f "$IDS" "$DBS" "$PASSES"
+    : > "$DONE"
   else
-    rm -f "$IDS" "$DBS"
+    printf 'x\n' >> "$PASSES"
   fi
 fi
 exec /usr/bin/chromium "$@" --proxy-server="$BP_PROXY" --proxy-bypass-list="<-loopback>"
