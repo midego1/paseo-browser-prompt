@@ -369,28 +369,32 @@ export function validRequestId(id) {
  * - The status was unavailable (a failed, invalid or stale poll) or the relay started again while it
  *   ran: UNCONFIRMED_TEXT. A later release does not prove that nobody took over meanwhile.
  *
- * A request with no answer within `maxCallMs` gets an error (NO_ANSWER_TEXT, through `emit`); its id,
- * like a cancelled one, stays retired for `retireMs` (a late answer is dropped, the id is not reused).
+ * A request with no answer within `maxCallMs` gets an error (NO_ANSWER_TEXT, through `emit`); its id
+ * stays retired until Playwright MCP answers it (that late answer is dropped). A cancelled id stays
+ * retired for `retireMs`. A retired id is not reused; with `maxRetired` of them new requests are refused.
  */
 export function createCallTracker({ now = () => performance.now(), maxPending = 256, maxRetired = 1000, maxCallMs = 10 * 60_000, retireMs = 10 * 60_000, emit = () => {} } = {}) {
   /** JSON of the id -> { id, call, confirm, mark, startedAt } */
   const pending = new Map();
-  /** Ids given up on (cancelled by the agent, or no answer in time) -> when; dropped only by age. */
+  /**
+   * Ids given up on -> { at, untilAnswered }. Cancelled by the agent: dropped by age (`retireMs`). No
+   * answer in time (the call may still run): kept until Playwright MCP answers it, never by age.
+   */
   const retired = new Map();
   const refusal = (id, mark) => JSON.stringify({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: MARK_TEXT[mark] }], isError: true } });
   const raise = (entry, mark) => {
     if (mark > entry.mark) entry.mark = mark;
   };
-  const retire = (key) => {
+  const retire = (key, untilAnswered = false) => {
     pending.delete(key);
-    retired.set(key, now());
+    retired.set(key, { at: now(), untilAnswered });
   };
   const expire = () => {
     const t = now();
-    for (const [key, at] of retired) if (t - at > retireMs || t < at) retired.delete(key);
+    for (const [key, { at, untilAnswered }] of retired) if (!untilAnswered && (t - at > retireMs || t < at)) retired.delete(key);
     for (const [key, entry] of pending) {
       if (t - entry.startedAt <= maxCallMs && t >= entry.startedAt) continue;
-      retire(key);
+      retire(key, true);
       emit(JSON.stringify({ jsonrpc: "2.0", id: entry.id, error: { code: -32000, message: NO_ANSWER_TEXT } }));
     }
   };
@@ -429,7 +433,11 @@ export function createCallTracker({ now = () => performance.now(), maxPending = 
       if (!message || message.method !== undefined || !validRequestId(message.id)) return null;
       const key = JSON.stringify(message.id);
       const entry = pending.get(key);
-      if (!entry) return null;
+      if (!entry) {
+        // The late answer of a call given up on: dropped, and its id is free again.
+        if (retired.get(key)?.untilAnswered) retired.delete(key);
+        return null;
+      }
       pending.delete(key);
       if (!entry.call) return line;
       tracker.sync(guard);
@@ -439,7 +447,9 @@ export function createCallTracker({ now = () => performance.now(), maxPending = 
     /** The request with this id got an answer that cannot be passed on: no longer in flight. Whether it was. */
     settle(id) {
       if (!validRequestId(id)) return false;
-      return pending.delete(JSON.stringify(id));
+      const key = JSON.stringify(id);
+      if (retired.get(key)?.untilAnswered) retired.delete(key);
+      return pending.delete(key);
     },
     size: () => pending.size,
     retiredCount: () => retired.size,
@@ -449,7 +459,8 @@ export function createCallTracker({ now = () => performance.now(), maxPending = 
 
 /**
  * One poll of the relay's takeover state into `guard` (signed-in runs; never two at once: a call
- * while one runs does nothing), then `onPoll()`. A response that is not 2xx, not JSON, or not a
+ * while one runs does nothing). `onPoll()` runs right before the result is applied (so a release that
+ * went stale meanwhile is seen before a new one replaces it) and again after it. A response that is not 2xx, not JSON, or not a
  * valid status, a timeout or an unreachable relay all count as a failed poll: held. `fetchImpl` and
  * `log` are for tests.
  */
@@ -466,10 +477,14 @@ export function createControlPoller({ guard, url, fetchImpl = fetch, timeoutMs =
         await response.body?.cancel?.().catch?.(() => undefined);
         throw new Error(`status ${response.status}`);
       }
-      guard.result(seq, await response.json());
+      const body = await response.json();
+      // The state up to now (perhaps a release gone stale meanwhile) is seen before the new one.
+      onPoll();
+      guard.result(seq, body);
       if (guard.unavailable()) throw new Error("not a valid takeover state");
       warned = false;
     } catch {
+      onPoll();
       guard.failure(seq);
       if (!warned) log("could not read a valid takeover state from the relay; browser tools are paused");
       warned = true;
@@ -522,9 +537,9 @@ export function createRunFilter({ signedIn = false, guard = null, now = () => pe
       calls.sync(guard);
       if (request) {
         if (!validRequestId(message.id)) return rpcError(null, -32600, "Invalid request: the id must be a string or a number.");
+        if (calls.known(message.id)) return rpcError(message.id, -32600, "A request with this id is still in flight or was given up on; use a new id.");
         if (LOCAL_CLIENT_METHODS.has(message.method)) return { reply: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }) };
         if (!SIGNED_IN_CLIENT_METHODS.has(message.method)) return rpcError(message.id, -32601, "Not available in the signed-in browser.");
-        if (calls.known(message.id)) return rpcError(message.id, -32600, "A request with this id is still in flight or was given up on; use a new id.");
         if (calls.full()) return rpcError(message.id, -32000, "Too many requests in flight; wait for the earlier ones.");
       }
       if (message.method === "notifications/cancelled") calls.cancel(message.params?.requestId);

@@ -270,6 +270,10 @@ async function fakeNeko() {
       if (state.controlFails) return res.writeHead(500).end("{}");
       return res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ has_host: state.hasHost }));
     }
+    if (req.url === "/api/room/control/take" && state.takeDelayMs) {
+      setTimeout(() => res.writeHead(200, { "Content-Type": "application/json" }).end("{}"), state.takeDelayMs);
+      return;
+    }
     if (req.url === "/api/room/control/reset") {
       if (state.failReset) return res.writeHead(500).end("{}");
       state.resets = (state.resets ?? 0) + 1;
@@ -1951,8 +1955,44 @@ test("run filter (signed-in): retired ids age out only by time and block new req
   assert.ok("reply" in filter.client(toolCall(2)), "the first cancelled id was never evicted");
   clock.t += 10 * 60_000 + 1;
   status(release());
-  assert.deepEqual(filter.client(toolCall(2)), { forward: toolCall(2) }, "aged out: the id may be used again");
+  assert.deepEqual(filter.client(toolCall(2)), { forward: toolCall(2) }, "a cancelled id ages out: it may be used again");
+  assert.equal(filter.server(toolResult(2)), toolResult(2));
+  // L2: the id of a call given up on (no answer) never ages out while that call may still run.
   assert.equal(filter.calls.retiredCount(), 0);
+  assert.deepEqual(filter.client(toolCall(77)), { forward: toolCall(77) });
+  clock.t += 10 * 60_000 + 1;
+  status(release());
+  assert.equal(JSON.parse(emitted.at(-1)).id, 77, "given up on");
+  clock.t += 60 * 60_000;
+  status(release());
+  assert.equal(filter.calls.retiredCount(), 1);
+  assert.ok("reply" in filter.client(toolCall(77)), "an hour later: still retired");
+  assert.equal(filter.server(toolResult(77, "late")), null, "its late answer is dropped");
+  assert.equal(filter.calls.retiredCount(), 0, "answered: the id is free");
+  assert.deepEqual(filter.client(toolCall(77)), { forward: toolCall(77) });
+});
+
+test("run filter (signed-in): a stale gap before a fresh release marks calls in flight unconfirmed (L1), and a duplicate id is refused before logging/setLevel is answered (L3)", async () => {
+  const { guard, filter, clock } = runRig();
+  const answers = [];
+  const fetchImpl = async () => {
+    clock.t += 10; // the relay answers 10 ms later
+    const body = answers.shift();
+    return { ok: true, status: 200, json: async () => body };
+  };
+  const poll = createControlPoller({ guard, url: "u", fetchImpl, onPoll: () => filter.sync() });
+  clock.t = 0;
+  answers.push(release());
+  await poll();
+  assert.deepEqual(filter.client(toolCall(1)), { forward: toolCall(1) }, "call at t = 0");
+  clock.t = 3050; // stale (no fresh sample for > 3 s), and no 250 ms tick ran
+  answers.push(release());
+  await poll(); // the fresh release is applied at 3060
+  assert.equal(guard.held(), false);
+  assert.equal(textOf(filter.server(toolResult(1))), UNCONFIRMED_TEXT, "the stale gap was seen before the fresh release");
+  assert.deepEqual(filter.client(toolCall(2)), { forward: toolCall(2) });
+  const level = filter.client(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "logging/setLevel", params: { level: "info" } }));
+  assert.equal(JSON.parse(level.reply).error.code, -32600, "an id in flight is refused, even for a request answered here");
 });
 
 test("run filter (signed-in): the poller treats errors, timeouts, non-2xx (body cancelled), garbage and invalid bodies as failures, and logs once", async () => {
@@ -1981,7 +2021,7 @@ test("run filter (signed-in): the poller treats errors, timeouts, non-2xx (body 
   }
   assert.equal(cancelled, 2, "the body of a non-2xx answer is cancelled");
   assert.equal(logs.length, 1, "logged once while it keeps failing");
-  assert.equal(polls, 7, "onPoll after every poll");
+  assert.ok(polls >= 14, "onPoll before the result is applied and after every poll");
   answers.push(respond(200, release()));
   await poll();
   assert.equal(guard.held(), false);
@@ -2269,6 +2309,15 @@ test("relay: neko's host counts with or without a viewer, a release carries the 
     const epochViewer = (await raw()).epoch;
     assert.ok(epochViewer > epoch1, "a viewer WebSocket that opens is a new epoch");
     neko.state.hasHost = false;
+    // L4: while a control request is forwarded, and until a read of neko that began after it, held.
+    neko.state.takeDelayMs = 300;
+    const slowTake = take();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal((await raw()).ownerControl, true, "a take on its way: held before neko reports anything");
+    assert.equal((await slowTake).status, 200);
+    neko.state.takeDelayMs = 0;
+    for (let i = 0; i < 100 && (await raw()).ownerControl; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal((await raw()).ownerControl, false, "a read after it saw no host: released");
     assert.equal((await take()).status, 200, "with its viewer: forwarded");
     const epochTake = (await raw()).epoch;
     assert.ok(epochTake >= epochViewer + 2, "a forwarded control request is a new epoch before and after it");

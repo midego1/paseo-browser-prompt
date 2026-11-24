@@ -291,6 +291,13 @@ export async function startRelay(options) {
   let controlEpoch = 0;
   /** When (clock) the last successful read of neko's control state was asked for; -Infinity: never. */
   let lastSampleAt = -Infinity;
+  /**
+   * Control requests (take, request, give) being forwarded now; the last read of neko issued when
+   * the last one ended (a successful read issued after it clears it), and the last successful read.
+   */
+  let controlRequests = 0;
+  let controlRequestEndSeq = -1;
+  let sampleSeq = 0;
   /** After a takeover ends (released, reset, or the viewer gone): the run waits for the lock. */
   function requireLock(reason) {
     if (!lockOnRelease) return;
@@ -616,10 +623,19 @@ export async function startRelay(options) {
         }
         // A control request is a new epoch before and after it (a run's call in flight then is
         // withheld), and the new state is read right away, not at the next poll.
+        // While it is forwarded, and until a read of neko that began after it ends, the run is paused
+        // as if control were held.
         controlEpoch++;
+        controlRequests++;
+        noteControl();
         res.on("close", () => {
           controlEpoch++;
-          void pollControl();
+          controlRequests--;
+          controlRequestEndSeq = pollIssued;
+          // A read already under way began before the request ended: read once more after it.
+          void pollControl().finally(() => {
+            if (sampleSeq <= controlRequestEndSeq) void pollControl();
+          });
         });
       }
       touch();
@@ -767,6 +783,7 @@ export async function startRelay(options) {
         ownerControl = result.body.has_host === true;
         controlKnown = true;
         lastSampleAt = askedAt;
+        sampleSeq = seq;
       }
     } catch {
       if (seq > pollApplied) {
@@ -787,7 +804,11 @@ export async function startRelay(options) {
    * release older than a few seconds.
    */
   function controlHeld() {
-    return ownerControl || (viewers > 0 && !controlKnown);
+    return ownerControl || controlRequestPending() || (viewers > 0 && !controlKnown);
+  }
+  /** A control request is being forwarded, or no read of neko began after the last one ended. */
+  function controlRequestPending() {
+    return controlRequests > 0 || sampleSeq <= controlRequestEndSeq;
   }
   async function resetControl() {
     try {

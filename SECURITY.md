@@ -301,7 +301,8 @@ internal network (not published, not on the outward network).
   treats as unavailable, not as a takeover), and while the vault waits to be locked (Bitwarden,
   below). A control left held without a viewer is reset (retried at every read). A control request
   over neko's REST API is forwarded only for a session whose own viewer WebSocket is open; without
-  one it is refused. (This does not make the relay see every takeover: the viewer takes control
+  one it is refused. While such a request is being forwarded, and until a read of neko that began
+  after it ended, `ownerControl` is true. (This does not make the relay see every takeover: the viewer takes control
   over its WebSocket.)
 - `sampledAgoMs` is the age of the relay's last successful read of neko, on its monotonic clock
   (`null` before the first read).
@@ -353,9 +354,12 @@ are dropped.
 Request ids must be strings or numbers, and an id may be in flight only once: a second request with
 an id still in flight, or one that was given up on, is refused before it reaches Playwright MCP. A
 request is given up on when the agent cancels it or when Playwright MCP has not answered within 10
-minutes (the agent then gets an error saying the call may have been carried out). Such an id stays
-retired for 10 minutes, whatever else happens; with 1000 retired ids, new requests are refused
-instead of forgetting old ones. An answer from Playwright MCP passes only when it answers a tracked
+minutes (the agent then gets an error saying the call may have been carried out). A cancelled id
+stays retired for 10 minutes; the id of a call given up on stays retired until Playwright MCP answers
+it (that late answer is dropped), never by age. With 1000 retired ids, new requests are refused
+instead of forgetting old ones. The run checks its in-flight calls against the state it had right
+before it applies each new read of the relay, so a release that went stale in between is never
+skipped. An answer from Playwright MCP passes only when it answers a tracked
 request; a second answer to the same id, an answer to an id never asked for or given up on, and an
 answer without an id are dropped. A line longer than 8 MB from the agent (32 MB from Playwright MCP)
 is dropped whole, never passed on in part; it is answered with an error when its id can be read
@@ -390,8 +394,10 @@ more, plus the answer time). A call that starts and finishes within that second,
 of a takeover, can return what the page showed in that moment, including what you began to type.
 If the relay's reads of neko stall, that window is up to 3 seconds (a release stays good for 3
 seconds after the relay's last read). Actions the agent starts in the window can still reach the
-browser. A takeover that begins and ends between two of the relay's 500 ms reads over a viewer
-WebSocket that was already open is not seen at all (the viewer takes control over that WebSocket,
+browser. A control request over neko's REST API pauses the run from the moment the relay forwards
+it, so only takeovers over the viewer's WebSocket have this window. A takeover that begins and ends
+between two of the relay's 500 ms reads over a viewer WebSocket that was already open is not seen at
+all (the viewer takes control over that WebSocket,
 which the relay passes on without reading). The agent is also told
 never to type credentials and to wait for your answer. Release control (the mouse icon again, or
 close the viewer) before you answer "done".

@@ -47,6 +47,11 @@ Plugin registry review of 0.24.1: the signed-in browser's takeover guard now fai
   the login before them give up after 1.5 s (were 10 s). Over-long lines are answered with an error
   when their id can be read (start of the agent's message, end of Playwright MCP's answer), in the
   clean Server browser too.
+- **Last review round.** The run compares its in-flight calls with the state right before it applies
+  each new relay read (a release that went stale in between is no longer skipped). The id of a call
+  given up on stays retired until Playwright MCP answers it, never by age. A duplicate id is refused
+  before `logging/setLevel` is answered. The relay reports `ownerControl: true` while it forwards a
+  control request and until a read of neko that began after it.
 - **Notifications and methods.** A `tools/call` without an id is dropped; of the agent's
   notifications only initialized, cancelled and roots/list_changed pass; from Playwright MCP only
   tools/list_changed, cancelled, roots/list and ping (progress and log messages are dropped).
