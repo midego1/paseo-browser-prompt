@@ -29,15 +29,30 @@ Plugin registry review of 0.24.1: the signed-in browser's takeover guard now fai
   holds whenever neko last reported a host (until a reset or a new read clears it), and refuses a
   REST control take, request or hand-over from a session without its own viewer WebSocket.
 - **Request ids are tracked strictly.** Ids must be strings or numbers; a request whose id is in flight
-  (or was cancelled) is refused before Playwright MCP sees it, so a reused id can no longer clear the
-  mark of a call that overlapped a takeover; answers to untracked ids, second answers and answers
-  without an id are dropped. Requests other than initialize, ping, tools/list, tools/call and
-  logging/setLevel are refused. Lines over 8 MB (32 MB from Playwright MCP) are dropped whole.
-- **A relay blip no longer looks like a takeover.** Calls in flight while the status is only
-  unavailable are *unconfirmed*: a result that arrives then is buffered for up to 5 s and released
-  when the next valid release has the same relay start and epoch; otherwise it is withheld with "the
-  browser status could not be confirmed while this call ran… take a snapshot before you repeat it".
-  Only a real `ownerControl: true` (or a moved epoch) withholds with the owner-control text.
+  (or was given up on) is refused before Playwright MCP sees it, so a reused id can no longer clear
+  the mark of a call that overlapped a takeover; answers to untracked ids, second answers and answers
+  without an id are dropped. Requests other than initialize, ping, tools/list and tools/call are
+  refused. Lines over 8 MB (32 MB from Playwright MCP) are dropped whole.
+- **A relay blip no longer looks like a takeover, and its results are never released.** The result
+  of a call that was in flight while the status was unavailable or stale (or while the relay
+  restarted) is always withheld with "the browser status could not be confirmed while this call
+  ran… take a snapshot before you repeat it", never released later. Only a real `ownerControl:
+  true`, or an epoch that moved between two good polls, withholds with the owner-control text; the
+  relay's epoch also moves for every viewer WebSocket that opens or closes and before and after
+  every control request it forwards.
+- **Unsure is not a takeover; neko reads are short.** When the relay cannot read neko while a viewer
+  is connected it still pauses the run, but reports `known: false`: the run treats that as
+  unavailable (results of calls in flight are withheld with the unconfirmed text, not "the owner
+  has taken over"), and it does not move the epoch. The relay's reads of neko's control state and
+  the login before them give up after 1.5 s (were 10 s). Over-long lines are answered with an error
+  when their id can be read (start of the agent's message, end of Playwright MCP's answer), in the
+  clean Server browser too.
+- **Notifications and methods.** A `tools/call` without an id is dropped; of the agent's
+  notifications only initialized, cancelled and roots/list_changed pass; from Playwright MCP only
+  tools/list_changed, cancelled, roots/list and ping (progress and log messages are dropped).
+  `logging/setLevel` is answered by the filter. A request without an answer in 10 minutes gets an
+  error; its id, like a cancelled one, stays retired for 10 minutes (never evicted early; at 1000
+  retired ids new requests are refused).
 - The poll and both directions of the stdio filter moved into `mcp-filter.mjs`
   (`createControlPoller`, `createRunFilter`) and have behavioural tests.
 - **A failed signed-in setup gives back what it replaced.** When the MCP server setup of a signed-in

@@ -175,12 +175,18 @@ export const MAX_SERVER_LINE = 32 * 1024 * 1024;
 
 /**
  * Splits a byte stream into lines and calls `onLine` for each complete one. A line longer than
- * `maxLength` is dropped whole (its start is never passed on, the rest up to the next newline is
- * skipped) and `onOverflow` is called once for it.
+ * `maxLength` is dropped whole (no part of it is passed on); when it ends, `onOverflow({ head, tail })`
+ * gets its first 4096 and last 256 characters, to answer it by its id.
  */
 export function lineSplitter(onLine, { maxLength = MAX_CLIENT_LINE, onOverflow = () => {} } = {}) {
   let buffer = "";
-  let skipping = false;
+  /** While skipping an over-long line: its start and its last characters so far. */
+  let skipped = null;
+  const finishSkip = () => {
+    const info = { head: skipped.head, tail: skipped.tail };
+    skipped = null;
+    onOverflow(info);
+  };
   return {
     push(chunk) {
       let text = String(chunk);
@@ -188,31 +194,58 @@ export function lineSplitter(onLine, { maxLength = MAX_CLIENT_LINE, onOverflow =
       while ((index = text.indexOf("\n")) >= 0) {
         const piece = text.slice(0, index);
         text = text.slice(index + 1);
-        if (skipping) {
-          skipping = false;
-          buffer = "";
+        if (skipped) {
+          skipped.tail = (skipped.tail + piece).slice(-256);
+          finishSkip();
           continue;
         }
         const line = buffer + piece;
         buffer = "";
-        if (line.length > maxLength) onOverflow();
+        if (line.length > maxLength) onOverflow({ head: line.slice(0, 4096), tail: line.slice(-256) });
         else onLine(line);
       }
-      if (skipping) return;
+      if (skipped) {
+        skipped.tail = (skipped.tail + text).slice(-256);
+        return;
+      }
       buffer += text;
       if (buffer.length > maxLength) {
+        skipped = { head: buffer.slice(0, 4096), tail: buffer.slice(-256) };
         buffer = "";
-        skipping = true;
-        onOverflow();
       }
     },
     end() {
-      if (buffer && !skipping) onLine(buffer);
+      if (skipped) finishSkip();
+      else if (buffer) onLine(buffer);
       buffer = "";
-      skipping = false;
     },
   };
 }
+
+const ID_VALUE = String.raw`("(?:[^"\\]|\\.){0,200}"|-?\d{1,16})`;
+/** `{"jsonrpc":"2.0","id":…` or `{"id":…` at the start of a message. */
+const ID_AT_START = new RegExp(String.raw`^\s*\{\s*(?:"jsonrpc"\s*:\s*"2\.0"\s*,\s*)?"id"\s*:\s*${ID_VALUE}\s*[,}]`);
+/** `…,"id":…}` at the end of a message (the MCP SDK writes the id last). */
+const ID_AT_END = new RegExp(String.raw`[,{]\s*"id"\s*:\s*${ID_VALUE}\s*\}\s*$`);
+
+/** The JSON-RPC id of an over-long message from its start or end, or undefined when it cannot be read. */
+export function idOfDroppedLine({ head = "", tail = "" } = {}) {
+  for (const match of [ID_AT_START.exec(head), ID_AT_END.exec(tail)]) {
+    if (!match) continue;
+    try {
+      const id = JSON.parse(match[1]);
+      if (validRequestId(id)) return id;
+    } catch {
+      // not an id
+    }
+  }
+  return undefined;
+}
+
+/** What the agent gets for a message of its own that was too long. */
+export const TOO_LONG_REQUEST_TEXT = "This message is too long for the browser-prompt Server browser (more than 8 MB) and was not sent.";
+/** What the agent gets for a call whose answer from Playwright MCP was too long. */
+export const TOO_LONG_RESULT_TEXT = "The browser's answer to this call was too large and was dropped. The call may have been carried out: take a snapshot before you repeat it.";
 
 /**
  * The signed-in run's polling of the relay's takeover state. A release is good for
@@ -229,7 +262,8 @@ function parseStatus(body, askedAt) {
   if (body === null || typeof body !== "object" || Array.isArray(body) || typeof body.ownerControl !== "boolean") return null;
   const bootId = typeof body.bootId === "string" && /^[0-9a-f]{1,64}$/.test(body.bootId) ? body.bootId : null;
   const epoch = Number.isSafeInteger(body.epoch) && body.epoch >= 0 ? body.epoch : null;
-  if (body.ownerControl) return { ownerControl: true, securing: body.securing === true, lockFailed: body.lockFailed === true, bootId, epoch, sampledAt: askedAt };
+  // Held with `known: false`: the relay could not read neko (a viewer is connected), not a takeover it saw.
+  if (body.ownerControl) return { ownerControl: true, unsure: body.known === false, securing: body.securing === true, lockFailed: body.lockFailed === true, bootId, epoch, sampledAt: askedAt };
   const ago = body.sampledAgoMs;
   if (bootId === null || epoch === null || typeof ago !== "number" || !Number.isFinite(ago) || ago < 0) return null;
   return { ownerControl: false, securing: false, lockFailed: false, bootId, epoch, sampledAt: askedAt - ago };
@@ -241,6 +275,8 @@ function parseStatus(body, askedAt) {
  * missing.
  *
  * - It starts held: nothing reaches the browser before the first valid status.
+ * - `ownerControl: true` with `known: false` (the relay holds because it cannot read neko while a
+ *   viewer is connected) holds as unavailable, not as a takeover.
  * - A status is valid only when the body is a JSON object whose `ownerControl` is a boolean; a
  *   release (`ownerControl` strictly `false`) also needs the relay's `bootId`, control `epoch` and
  *   `sampledAgoMs` (the age of its read of neko). `true` holds; anything else (missing, not a
@@ -272,7 +308,8 @@ export function createControlGuard({ now = () => performance.now(), maxAgeMs = C
     applied = seq;
     return at;
   };
-  const reason = () => (fresh() ? "released" : status?.ownerControl ? (status.lockFailed ? "lockFailed" : status.securing ? "securing" : "owner") : "unavailable");
+  const reason = () =>
+    fresh() ? "released" : !status?.ownerControl ? "unavailable" : status.lockFailed ? "lockFailed" : status.securing ? "securing" : status.unsure ? "unavailable" : "owner";
   return {
     /** Sequence number for the next poll (its start time is kept for the release's age). */
     next() {
@@ -305,9 +342,13 @@ export function createControlGuard({ now = () => performance.now(), maxAgeMs = C
   };
 }
 
-/** How bad what happened while a call ran is: its result is passed, buffered, or replaced by the text. */
-const MARK = Object.freeze({ none: 0, unconfirmed: 1, lost: 2, owner: 3, lockFailed: 4 });
-const MARK_TEXT = [null, UNCONFIRMED_TEXT, UNCONFIRMED_TEXT, OWNER_CONTROL_TEXT, LOCK_FAILED_TEXT];
+/** How bad what happened while a call ran is: its result is passed, or replaced by the text. */
+const MARK = Object.freeze({ none: 0, unconfirmed: 1, owner: 2, lockFailed: 3 });
+const MARK_TEXT = [null, UNCONFIRMED_TEXT, OWNER_CONTROL_TEXT, LOCK_FAILED_TEXT];
+
+/** What a request gets when Playwright MCP does not answer it within the maximum call time. */
+export const NO_ANSWER_TEXT =
+  "No answer from the browser within 10 minutes, so this call was given up. It may have been carried out: take a snapshot before you repeat it.";
 
 /** Whether a JSON-RPC id may be used for a request here: a string or a finite number. */
 export function validRequestId(id) {
@@ -319,92 +360,89 @@ export function validRequestId(id) {
  * flight once (a second request with it is refused before it is forwarded), and an answer from
  * Playwright MCP passes only when it answers a tracked request (anything else is dropped). For each
  * tool call it keeps the relay start and control epoch it began under and the worst thing seen while
- * it ran (`sync`, after every poll and before every decision):
+ * it ran (`sync`, after every poll and before every decision). Its result passes only when nothing
+ * was seen; otherwise it is withheld, never released later:
  *
- * - The owner held control, or the vault was being locked (a real `ownerControl: true`), or the
- *   epoch or relay start changed (a takeover began and ended between two polls, or the relay
- *   restarted): its result is withheld (OWNER_CONTROL_TEXT, LOCK_FAILED_TEXT, UNCONFIRMED_TEXT).
- * - The status was only unavailable (a failed, invalid or stale poll): the call is *unconfirmed*. A
- *   result that arrives then is buffered for at most `bufferMs`; the next valid release under the
- *   same relay start and epoch confirms that no takeover happened and lets it (and the call's later
- *   result) through; otherwise it is replaced with UNCONFIRMED_TEXT.
+ * - The owner held control or the vault was being locked (a real `ownerControl: true`), or the
+ *   epoch moved between two good polls (a takeover, a viewer, a control request): OWNER_CONTROL_TEXT.
+ * - The vault could not be locked: LOCK_FAILED_TEXT.
+ * - The status was unavailable (a failed, invalid or stale poll) or the relay started again while it
+ *   ran: UNCONFIRMED_TEXT. A later release does not prove that nobody took over meanwhile.
+ *
+ * A request with no answer within `maxCallMs` gets an error (NO_ANSWER_TEXT, through `emit`); its id,
+ * like a cancelled one, stays retired for `retireMs` (a late answer is dropped, the id is not reused).
  */
-export function createCallTracker({ now = () => performance.now(), bufferMs = 5000, maxPending = 256, maxBuffered = 16, emit = () => {} } = {}) {
-  /** JSON of the id -> { id, call, confirm, mark, buffered } */
+export function createCallTracker({ now = () => performance.now(), maxPending = 256, maxRetired = 1000, maxCallMs = 10 * 60_000, retireMs = 10 * 60_000, emit = () => {} } = {}) {
+  /** JSON of the id -> { id, call, confirm, mark, startedAt } */
   const pending = new Map();
-  /** Cancelled ids (the agent gave up on them): a late answer is dropped, the id is not reused meanwhile. */
-  const retired = new Set();
-  let buffered = 0;
+  /** Ids given up on (cancelled by the agent, or no answer in time) -> when; dropped only by age. */
+  const retired = new Map();
   const refusal = (id, mark) => JSON.stringify({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: MARK_TEXT[mark] }], isError: true } });
   const raise = (entry, mark) => {
     if (mark > entry.mark) entry.mark = mark;
   };
-  const settle = (key, entry, line) => {
+  const retire = (key) => {
     pending.delete(key);
-    if (entry.buffered) buffered--;
-    entry.buffered = null;
-    return line;
+    retired.set(key, now());
+  };
+  const expire = () => {
+    const t = now();
+    for (const [key, at] of retired) if (t - at > retireMs || t < at) retired.delete(key);
+    for (const [key, entry] of pending) {
+      if (t - entry.startedAt <= maxCallMs && t >= entry.startedAt) continue;
+      retire(key);
+      emit(JSON.stringify({ jsonrpc: "2.0", id: entry.id, error: { code: -32000, message: NO_ANSWER_TEXT } }));
+    }
   };
   const tracker = {
-    /** Whether this id is in flight (or cancelled and maybe still running). */
+    /** Whether this id is in flight, or retired and maybe still running. */
     known: (id) => pending.has(JSON.stringify(id)) || retired.has(JSON.stringify(id)),
-    full: () => pending.size >= maxPending,
+    /** No room for another request (in flight, or retired ids that have not aged out). */
+    full: () => pending.size >= maxPending || retired.size >= maxRetired,
     /** A request that was forwarded (`confirm`: the guard's confirmation then). */
     started(message, confirm) {
-      pending.set(JSON.stringify(message.id), { id: message.id, call: message.method === "tools/call", confirm, mark: MARK.none, buffered: null });
+      pending.set(JSON.stringify(message.id), { id: message.id, call: message.method === "tools/call", confirm, mark: MARK.none, startedAt: now() });
     },
     /** The agent cancelled a request: Playwright MCP may never answer it. */
     cancel(id) {
       if (!validRequestId(id)) return;
       const key = JSON.stringify(id);
-      const entry = pending.get(key);
-      if (!entry) return;
-      settle(key, entry, null);
-      retired.add(key);
-      if (retired.size > 1000) retired.delete(retired.keys().next().value);
+      if (pending.has(key)) retire(key);
     },
-    /** Updates every tool call with the guard's state, and releases or replaces buffered results. */
+    /** Updates every tool call with the guard's state, and gives up on requests that took too long. */
     sync(guard) {
+      expire();
       const reason = guard.reason();
       const confirm = guard.confirmation();
-      for (const [key, entry] of pending) {
+      for (const entry of pending.values()) {
         if (!entry.call) continue;
         if (reason === "owner" || reason === "securing") raise(entry, MARK.owner);
         else if (reason === "lockFailed") raise(entry, MARK.lockFailed);
         else if (reason === "unavailable") raise(entry, MARK.unconfirmed);
-        else if (!entry.confirm || !confirm || confirm.bootId !== entry.confirm.bootId) raise(entry, MARK.lost);
+        else if (!entry.confirm || !confirm || confirm.bootId !== entry.confirm.bootId) raise(entry, MARK.unconfirmed);
         else if (confirm.epoch !== entry.confirm.epoch) raise(entry, MARK.owner);
-        else if (entry.mark === MARK.unconfirmed) entry.mark = MARK.none;
-        if (!entry.buffered) continue;
-        if (entry.mark === MARK.none) emit(settle(key, entry, entry.buffered.line));
-        else if (entry.mark >= MARK.lost) emit(settle(key, entry, refusal(entry.id, entry.mark)));
-        else if (now() - entry.buffered.at > bufferMs || now() < entry.buffered.at) emit(settle(key, entry, refusal(entry.id, MARK.unconfirmed)));
       }
     },
-    /** An answer from Playwright MCP: the line to pass on now, or null (dropped, or buffered for `sync`). */
+    /** An answer from Playwright MCP: the line to pass on, or null (dropped). */
     finish(line, guard) {
       const message = parseObject(line);
-      if (!message) return null;
-      if (message.method !== undefined) return line;
-      if (!validRequestId(message.id)) return null;
+      if (!message || message.method !== undefined || !validRequestId(message.id)) return null;
       const key = JSON.stringify(message.id);
       const entry = pending.get(key);
-      if (!entry) {
-        retired.delete(key);
-        return null;
-      }
-      if (entry.buffered) return null;
-      if (!entry.call) return settle(key, entry, line);
+      if (!entry) return null;
+      pending.delete(key);
+      if (!entry.call) return line;
       tracker.sync(guard);
-      if (entry.mark === MARK.none && !guard.held()) return settle(key, entry, line);
-      if (entry.mark >= MARK.lost) return settle(key, entry, refusal(entry.id, entry.mark));
-      if (buffered >= maxBuffered) return settle(key, entry, refusal(entry.id, MARK.unconfirmed));
-      entry.buffered = { line, at: now() };
-      buffered++;
-      return null;
+      if (entry.mark === MARK.none && !guard.held()) return line;
+      return refusal(entry.id, entry.mark === MARK.none ? MARK.unconfirmed : entry.mark);
+    },
+    /** The request with this id got an answer that cannot be passed on: no longer in flight. Whether it was. */
+    settle(id) {
+      if (!validRequestId(id)) return false;
+      return pending.delete(JSON.stringify(id));
     },
     size: () => pending.size,
-    bufferedCount: () => buffered,
+    retiredCount: () => retired.size,
   };
   return tracker;
 }
@@ -442,8 +480,15 @@ export function createControlPoller({ guard, url, fetchImpl = fetch, timeoutMs =
   };
 }
 
-/** Requests a signed-in run may send (none of them but tools/call touches the browser). */
-const SIGNED_IN_CLIENT_METHODS = new Set(["initialize", "ping", "tools/list", "tools/call", "logging/setLevel"]);
+/** Requests a signed-in run may send to Playwright MCP (none of them but tools/call touches the browser). */
+const SIGNED_IN_CLIENT_METHODS = new Set(["initialize", "ping", "tools/list", "tools/call"]);
+/** Requests answered here with an empty result (never forwarded). */
+const LOCAL_CLIENT_METHODS = new Set(["logging/setLevel"]);
+/** Notifications a signed-in run may send. */
+const SIGNED_IN_CLIENT_NOTIFICATIONS = new Set(["notifications/initialized", "notifications/cancelled", "notifications/roots/list_changed"]);
+/** What Playwright MCP may send on its own in a signed-in run: these notifications and requests (progress and log messages could carry page content and are dropped). */
+const SIGNED_IN_SERVER_NOTIFICATIONS = new Set(["notifications/tools/list_changed", "notifications/cancelled"]);
+const SIGNED_IN_SERVER_REQUESTS = new Set(["roots/list", "ping"]);
 
 const rpcError = (id, code, message) => ({ reply: JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }) });
 
@@ -451,16 +496,18 @@ const rpcError = (id, code, message) => ({ reply: JSON.stringify({ jsonrpc: "2.0
  * The stdio filter of one run, both directions. `guard` is the signed-in run's takeover guard (null
  * for the clean Server browser, which no owner can take over: its filter is as before).
  *
- * Signed-in: `client(line)` refuses requests with an id that is not a string or number, an id still
- * in flight, and methods other than SIGNED_IN_CLIENT_METHODS; then filterClientLine decides with the
- * guard's state; a forwarded request is tracked (createCallTracker). `server(line)` returns the line
- * to pass on now or null; answers to untracked ids are dropped, and a tool result is passed,
- * buffered (`emit` gets it later) or replaced as the tracker decides. Call `sync()` after each poll
- * and on a short timer.
+ * Signed-in, from the agent: requests need a string or number id that is not in flight or retired,
+ * and one of SIGNED_IN_CLIENT_METHODS (logging/setLevel is answered here); notifications other than
+ * SIGNED_IN_CLIENT_NOTIFICATIONS (a tools/call without an id included) are dropped; then
+ * filterClientLine decides with the guard's state, and a forwarded request is tracked
+ * (createCallTracker). From Playwright MCP: answers to untracked ids are dropped, a tool result passes
+ * or is withheld as the tracker decides, and only SIGNED_IN_SERVER_NOTIFICATIONS and
+ * SIGNED_IN_SERVER_REQUESTS pass on their own. Call `sync()` after each poll and on a short timer;
+ * `emit` gets the errors for requests that were given up on.
  */
-export function createRunFilter({ signedIn = false, guard = null, now = () => performance.now(), emit = () => {}, bufferMs = 5000, log = () => {} } = {}) {
+export function createRunFilter({ signedIn = false, guard = null, now = () => performance.now(), emit = () => {}, log = () => {}, maxCallMs, retireMs } = {}) {
   if (signedIn && !guard) throw new Error("a signed-in run needs the takeover guard");
-  const calls = guard ? createCallTracker({ now, bufferMs, emit }) : null;
+  const calls = guard ? createCallTracker({ now, emit, ...(maxCallMs ? { maxCallMs } : {}), ...(retireMs ? { retireMs } : {}) }) : null;
   const state = () => (guard ? { ownerControl: guard.held(), securing: guard.securing(), lockFailed: guard.lockFailed(), unavailable: guard.unavailable() } : { ownerControl: false });
   return {
     calls,
@@ -468,15 +515,19 @@ export function createRunFilter({ signedIn = false, guard = null, now = () => pe
       if (!guard) return filterClientLine(line, { ownerControl: false, signedIn });
       const message = parseObject(line);
       if (!message) return { drop: true };
-      const request = typeof message.method === "string" && message.id !== undefined;
+      const hasMethod = message.method !== undefined;
+      const request = hasMethod && message.id !== undefined;
+      if (hasMethod && typeof message.method !== "string") return { drop: true };
+      if (hasMethod && !request && !SIGNED_IN_CLIENT_NOTIFICATIONS.has(message.method)) return { drop: true };
+      calls.sync(guard);
       if (request) {
         if (!validRequestId(message.id)) return rpcError(null, -32600, "Invalid request: the id must be a string or a number.");
+        if (LOCAL_CLIENT_METHODS.has(message.method)) return { reply: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }) };
         if (!SIGNED_IN_CLIENT_METHODS.has(message.method)) return rpcError(message.id, -32601, "Not available in the signed-in browser.");
-        if (calls.known(message.id)) return rpcError(message.id, -32600, "A request with this id is still in flight; use a new id.");
+        if (calls.known(message.id)) return rpcError(message.id, -32600, "A request with this id is still in flight or was given up on; use a new id.");
         if (calls.full()) return rpcError(message.id, -32000, "Too many requests in flight; wait for the earlier ones.");
       }
       if (message.method === "notifications/cancelled") calls.cancel(message.params?.requestId);
-      calls.sync(guard);
       const verdict = filterClientLine(line, { ...state(), signedIn });
       if ("forward" in verdict && request) calls.started(message, guard.confirmation());
       return verdict;
@@ -484,17 +535,36 @@ export function createRunFilter({ signedIn = false, guard = null, now = () => pe
     server(line) {
       const kept = filterServerLine(line, { signedIn });
       if (kept === null || !guard) return kept;
+      const message = parseObject(kept);
+      if (message?.method !== undefined) {
+        const allowed = message.id === undefined ? SIGNED_IN_SERVER_NOTIFICATIONS : SIGNED_IN_SERVER_REQUESTS;
+        return allowed.has(message.method) ? kept : null;
+      }
       return calls.finish(kept, guard);
     },
     sync() {
       if (guard) calls.sync(guard);
     },
-    /** An over-long line from the agent (dropped whole, never forwarded in part). */
-    overflowFromClient() {
+    /**
+     * An over-long line from the agent (dropped whole, never forwarded in part): the error answer
+     * for its id (read from its start or end), or null when no id can be read or the id is in use.
+     */
+    overflowFromClient(info) {
       log("dropped an over-long message from the agent");
+      const id = idOfDroppedLine(info);
+      if (id === undefined || calls?.known(id)) return null;
+      return JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32600, message: TOO_LONG_REQUEST_TEXT } });
     },
-    overflowFromServer() {
+    /**
+     * An over-long line from Playwright MCP (dropped whole): an error answer for the request it
+     * answered (its id read from its end), or null. Signed-in, only for a tracked request; one that
+     * cannot be matched gets the no-answer error after the maximum call time.
+     */
+    overflowFromServer(info) {
       log("dropped an over-long message from Playwright MCP");
+      const id = idOfDroppedLine(info);
+      if (id === undefined || (calls && !calls.settle(id))) return null;
+      return JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message: TOO_LONG_RESULT_TEXT } });
     },
   };
 }

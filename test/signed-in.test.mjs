@@ -85,6 +85,9 @@ import {
   MAX_CLIENT_LINE,
   MAX_SERVER_LINE,
   RELAY_CONTROL_POLL_MS,
+  idOfDroppedLine,
+  TOO_LONG_REQUEST_TEXT,
+  TOO_LONG_RESULT_TEXT,
   UNAVAILABLE_TEXT,
   UNCONFIRMED_TEXT,
   LOCK_FAILED_TEXT,
@@ -109,6 +112,7 @@ import {
   parseCookies,
   parseOrigins,
   SESSION_COOKIE,
+  NEKO_CONTROL_TIMEOUT_MS,
   startRelay,
   TICKET_MAX_TTL_S,
   verifyTicket,
@@ -262,6 +266,7 @@ async function fakeNeko() {
     if (req.url === "/health") return res.writeHead(200).end("true");
     if (req.headers.authorization !== "Bearer neko-token" && req.headers.authorization !== "Bearer user-token") return res.writeHead(401).end("{}");
     if (req.url === "/api/room/control") {
+      if (state.controlHangs) return;
       if (state.controlFails) return res.writeHead(500).end("{}");
       return res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ has_host: state.hasHost }));
     }
@@ -539,7 +544,7 @@ test("relay: a ticket counts as used only once neko let the owner in", async () 
   }
 });
 
-test("relay: takeover state follows neko's control only while a viewer is connected, unsure counts as held then, and the last viewer leaving resets control", async () => {
+test("relay: takeover state follows neko's control (its host counts with or without a viewer), unsure while a viewer is connected counts as held (known: false), and the last viewer leaving resets control", async () => {
   const neko = await fakeNeko();
   const relay = await relayFor(neko, { controlPollMs: 60_000, log: () => {} });
   const port = await relay.startControl("127.0.0.1", 0);
@@ -1831,65 +1836,123 @@ test("run filter (signed-in): JSON-RPC ids are strings or numbers, one request p
   clock.t += 1;
 });
 
-test("run filter (signed-in): a transient poll failure only makes calls in flight unconfirmed; the next release under the same epoch lets the result through (M1, M2)", () => {
+test("run filter (signed-in): a call in flight while the status was not confirmed is always withheld, never released later (N1)", () => {
   const { filter, status, fail, emitted, clock } = runRig();
   status(release(0, 3));
+  // A failure while it runs, the result during the outage: withheld at once (nothing buffered).
   assert.deepEqual(filter.client(toolCall(1)), { forward: toolCall(1) });
   fail();
-  // The result arrives while the status is unavailable: buffered, not refused.
-  assert.equal(filter.server(toolResult(1)), null);
-  assert.equal(filter.calls.bufferedCount(), 1);
-  clock.t += 400;
+  assert.equal(textOf(filter.server(toolResult(1))), UNCONFIRMED_TEXT);
+  assert.match(UNCONFIRMED_TEXT, /may have been carried out: take a snapshot before you repeat it/);
+  // A 4 s outage with the epoch unchanged afterwards: still withheld (the epoch proves nothing then).
   status(release(0, 3));
-  assert.deepEqual(emitted, [toolResult(1)], "same relay start, same epoch, released: the buffered result goes out");
-  assert.equal(filter.calls.size(), 0);
-  // A failure, then a release, then the result: passed, nobody took over.
   assert.deepEqual(filter.client(toolCall(2)), { forward: toolCall(2) });
   fail();
+  clock.t += 4000;
   status(release(0, 3));
-  assert.equal(filter.server(toolResult(2)), toolResult(2), "not refused with the owner text");
-  // A failure, then a release with a new epoch (a takeover began and ended in between): withheld.
+  assert.equal(textOf(filter.server(toolResult(2))), UNCONFIRMED_TEXT, "not the owner text, and not released");
+  assert.deepEqual(emitted, [], "nothing is sent later");
+  // A stale release while it runs (no poll for > 3 s): withheld.
   assert.deepEqual(filter.client(toolCall(3)), { forward: toolCall(3) });
-  fail();
-  status(release(0, 4));
-  assert.equal(textOf(filter.server(toolResult(3))), OWNER_CONTROL_TEXT);
-  // The epoch moved between two good polls (a takeover seen by the relay only): withheld as well.
-  assert.deepEqual(filter.client(toolCall(4)), { forward: toolCall(4) });
-  status(release(0, 5));
-  assert.equal(textOf(filter.server(toolResult(4))), OWNER_CONTROL_TEXT);
-  // The relay started again (another bootId): unconfirmed for good.
-  assert.deepEqual(filter.client(toolCall(5)), { forward: toolCall(5) });
-  fail();
-  assert.equal(filter.server(toolResult(5)), null);
-  status(release(0, 0, "def456"));
-  assert.equal(textOf(emitted.at(-1)), UNCONFIRMED_TEXT);
-  assert.match(UNCONFIRMED_TEXT, /may have been carried out: take a snapshot before you repeat it/);
-  // No confirmation within 5 s: withheld with the unconfirmed text, not the owner text.
-  assert.deepEqual(filter.client(toolCall(6)), { forward: toolCall(6) });
-  fail();
-  assert.equal(filter.server(toolResult(6)), null);
-  clock.t += 5001;
-  filter.sync();
-  assert.equal(JSON.parse(emitted.at(-1)).id, 6);
-  assert.equal(textOf(emitted.at(-1)), UNCONFIRMED_TEXT);
-  // A stale release (no poll for > 3 s) at the result: buffered, then confirmed.
-  status(release(0, 0, "def456"));
-  assert.deepEqual(filter.client(toolCall(7)), { forward: toolCall(7) });
   clock.t += 3001;
-  assert.equal(filter.server(toolResult(7)), null, "stale when the result arrives: buffered");
-  assert.equal(textOf(filter.client(toolCall(8)).reply), UNAVAILABLE_TEXT);
+  filter.sync();
+  status(release(0, 3));
+  assert.equal(textOf(filter.server(toolResult(3))), UNCONFIRMED_TEXT);
+  // Stale exactly when the result arrives: withheld too.
+  assert.deepEqual(filter.client(toolCall(4)), { forward: toolCall(4) });
+  clock.t += 3001;
+  assert.equal(textOf(filter.server(toolResult(4))), UNCONFIRMED_TEXT);
+  assert.equal(textOf(filter.client(toolCall(5)).reply), UNAVAILABLE_TEXT);
+  // The relay started again while it ran: withheld.
+  status(release(0, 3));
+  assert.deepEqual(filter.client(toolCall(6)), { forward: toolCall(6) });
   status(release(0, 0, "def456"));
-  assert.equal(emitted.at(-1), toolResult(7));
-  // A real ownerControl: true while the call runs: withheld with the owner text, even after a release.
-  assert.deepEqual(filter.client(toolCall(9)), { forward: toolCall(9) });
+  assert.equal(textOf(filter.server(toolResult(6))), UNCONFIRMED_TEXT);
+  // The epoch moved between two good polls (a viewer, a control request, a takeover): owner text.
+  assert.deepEqual(filter.client(toolCall(7)), { forward: toolCall(7) });
+  status(release(0, 1, "def456"));
+  assert.equal(textOf(filter.server(toolResult(7))), OWNER_CONTROL_TEXT);
+  // A real ownerControl: true while it runs: owner text, also after a failure and a release.
+  assert.deepEqual(filter.client(toolCall(8)), { forward: toolCall(8) });
   fail();
   status({ ownerControl: true });
-  status(release(0, 1, "def456"));
-  assert.equal(textOf(filter.server(toolResult(9))), OWNER_CONTROL_TEXT);
+  status(release(0, 2, "def456"));
+  assert.equal(textOf(filter.server(toolResult(8))), OWNER_CONTROL_TEXT, "the worst mark wins");
   // The vault lock failed while it ran: the owner has to act.
-  assert.deepEqual(filter.client(toolCall(10)), { forward: toolCall(10) });
+  assert.deepEqual(filter.client(toolCall(9)), { forward: toolCall(9) });
   status({ ownerControl: true, lockFailed: true });
-  assert.equal(textOf(filter.server(toolResult(10))), LOCK_FAILED_TEXT);
+  assert.equal(textOf(filter.server(toolResult(9))), LOCK_FAILED_TEXT);
+  // Nothing happened while it ran: passed.
+  status(release(0, 2, "def456"));
+  assert.deepEqual(filter.client(toolCall(10)), { forward: toolCall(10) });
+  status(release(0, 2, "def456"));
+  assert.equal(filter.server(toolResult(10)), toolResult(10));
+  assert.equal(filter.calls.size(), 0);
+});
+
+test("run filter (signed-in): notifications and methods (N4): a tools/call without an id is dropped, only some notifications pass, logging/setLevel is answered here", () => {
+  const { filter, status } = runRig();
+  status(release());
+  const noId = JSON.stringify({ jsonrpc: "2.0", method: "tools/call", params: { name: "browser_snapshot", arguments: {} } });
+  assert.deepEqual(filter.client(noId), { drop: true }, "a tools/call in notification form never reaches the browser, also while released");
+  for (const method of ["notifications/initialized", "notifications/cancelled", "notifications/roots/list_changed"]) {
+    const line = JSON.stringify({ jsonrpc: "2.0", method, params: {} });
+    assert.deepEqual(filter.client(line), { forward: line }, method);
+  }
+  assert.deepEqual(filter.client(JSON.stringify({ jsonrpc: "2.0", method: "notifications/whatever" })), { drop: true });
+  assert.deepEqual(filter.client(JSON.stringify({ jsonrpc: "2.0", id: 1, method: 5 })), { drop: true });
+  const level = filter.client(JSON.stringify({ jsonrpc: "2.0", id: 3, method: "logging/setLevel", params: { level: "info" } }));
+  assert.deepEqual(JSON.parse(level.reply), { jsonrpc: "2.0", id: 3, result: {} }, "answered here, never forwarded");
+  const response = JSON.stringify({ jsonrpc: "2.0", id: "s1", result: { roots: [] } });
+  assert.deepEqual(filter.client(response), { forward: response }, "the agent's answer to Playwright MCP's own request");
+  for (const method of ["notifications/progress", "notifications/message", "notifications/resources/updated"]) {
+    assert.equal(filter.server(JSON.stringify({ jsonrpc: "2.0", method, params: { data: "page text" } })), null, `${method} from Playwright MCP is dropped`);
+  }
+  for (const method of ["notifications/tools/list_changed", "notifications/cancelled"]) {
+    const line = JSON.stringify({ jsonrpc: "2.0", method, params: {} });
+    assert.equal(filter.server(line), line, method);
+  }
+  const roots = JSON.stringify({ jsonrpc: "2.0", id: "s1", method: "roots/list" });
+  assert.equal(filter.server(roots), roots);
+  assert.equal(filter.server(JSON.stringify({ jsonrpc: "2.0", id: "s2", method: "sampling/createMessage", params: { messages: [] } })), null, "other requests from Playwright MCP are dropped");
+});
+
+test("run filter (signed-in): retired ids age out only by time and block new requests when too many (N3); unanswered requests get an error after the maximum call time (N5)", () => {
+  const { filter, status, emitted, clock } = runRig();
+  status(release());
+  const cancel = (id) => filter.client(JSON.stringify({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id } }));
+  // N5: no answer within 10 minutes.
+  assert.deepEqual(filter.client(toolCall(1)), { forward: toolCall(1) });
+  clock.t += 10 * 60_000;
+  status(release());
+  assert.deepEqual(emitted, [], "10 minutes exactly: still waiting");
+  clock.t += 1;
+  status(release());
+  assert.equal(emitted.length, 1);
+  assert.deepEqual(JSON.parse(emitted[0]).id, 1);
+  assert.match(JSON.parse(emitted[0]).error.message, /No answer from the browser within 10 minutes/);
+  assert.equal(filter.calls.size(), 0);
+  assert.ok("reply" in filter.client(toolCall(1)), "its id stays retired");
+  assert.equal(filter.server(toolResult(1)), null, "a late answer is dropped");
+  // N3: a cancelled id is not reused until it ages out (10 minutes), however many others are cancelled.
+  assert.deepEqual(filter.client(toolCall(2)), { forward: toolCall(2) });
+  cancel(2);
+  for (let i = 100; i < 600; i++) {
+    filter.client(toolCall(i));
+    cancel(i);
+  }
+  assert.ok("reply" in filter.client(toolCall(2)), "still retired after 500 more cancellations");
+  for (let i = 600; i < 1200; i++) {
+    filter.client(toolCall(i));
+    cancel(i);
+  }
+  const full = filter.client(toolCall(5000));
+  assert.match(JSON.parse(full.reply).error.message, /Too many requests/, "the retired cap refuses new requests instead of forgetting old ids");
+  assert.ok("reply" in filter.client(toolCall(2)), "the first cancelled id was never evicted");
+  clock.t += 10 * 60_000 + 1;
+  status(release());
+  assert.deepEqual(filter.client(toolCall(2)), { forward: toolCall(2) }, "aged out: the id may be used again");
+  assert.equal(filter.calls.retiredCount(), 0);
 });
 
 test("run filter (signed-in): the poller treats errors, timeouts, non-2xx (body cancelled), garbage and invalid bodies as failures, and logs once", async () => {
@@ -1938,7 +2001,8 @@ test("run filter (signed-in): the poller treats errors, timeouts, non-2xx (body 
 test("line splitter: a line over the limit is dropped whole, never forwarded in part (F5)", () => {
   const lines = [];
   let overflows = 0;
-  const split = lineSplitter((line) => lines.push(line), { maxLength: 10, onOverflow: () => overflows++ });
+  const infos = [];
+  const split = lineSplitter((line) => lines.push(line), { maxLength: 10, onOverflow: (info) => (overflows++, infos.push(info)) });
   split.push("short\n0123456789ABC");
   split.push("DEF still the long line");
   split.push(" end\nnext\n");
@@ -1947,8 +2011,101 @@ test("line splitter: a line over the limit is dropped whole, never forwarded in 
   split.end();
   assert.deepEqual(lines, ["short", "next", "last"]);
   assert.equal(overflows, 2);
+  assert.equal(infos[0].head, "0123456789ABC", "the start of the dropped line");
+  assert.equal(infos[0].tail, "0123456789ABCDEF still the long line end", "and its end");
+  assert.equal(infos[1].tail, "x".repeat(11));
   assert.equal(MAX_CLIENT_LINE, 8 * 1024 * 1024);
   assert.ok(MAX_SERVER_LINE >= MAX_CLIENT_LINE);
+});
+
+test("over-long lines are answered by their id (from the start for the agent, the end for Playwright MCP), in both kinds of Server browser", () => {
+  assert.equal(idOfDroppedLine({ head: '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"x":"aaaa' }), 7);
+  assert.equal(idOfDroppedLine({ head: '{"id":"a\\"b","method":"x' }), 'a"b');
+  assert.equal(idOfDroppedLine({ head: '{"result":{"content":"', tail: 'aaaa"}]},"jsonrpc":"2.0","id":12}' }), 12, "the SDK writes the id last");
+  assert.equal(idOfDroppedLine({ head: '{"method":"tools/call","params":{"id":5,"text":"', tail: 'aaa"}}' }), undefined, "a nested id is not the message's");
+  assert.equal(idOfDroppedLine({ head: "garbage", tail: "garbage" }), undefined);
+  assert.equal(idOfDroppedLine({ tail: '"id":{"a":1}}' }), undefined);
+  const { filter, status, clock, emitted } = runRig();
+  status(release());
+  const reply = JSON.parse(filter.overflowFromClient({ head: '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"browser_type","arguments":{"text":"', tail: 'xxx"}}}' }));
+  assert.equal(reply.id, 3);
+  assert.equal(reply.error.message, TOO_LONG_REQUEST_TEXT);
+  assert.equal(filter.overflowFromClient({ head: "{", tail: "}" }), null, "no id: nothing to answer");
+  assert.deepEqual(filter.client(toolCall(4)), { forward: toolCall(4) });
+  assert.equal(filter.overflowFromClient({ head: '{"id":4,"method":"tools/call"' }), null, "an id in flight is not answered for the dropped message");
+  const answer = JSON.parse(filter.overflowFromServer({ head: '{"result":{"content":[{"type":"image","data":"', tail: 'AAAA"}]},"jsonrpc":"2.0","id":4}' }));
+  assert.equal(answer.id, 4);
+  assert.equal(answer.error.message, TOO_LONG_RESULT_TEXT);
+  assert.equal(filter.calls.size(), 0, "the call is no longer in flight");
+  assert.equal(filter.overflowFromServer({ tail: '"jsonrpc":"2.0","id":99}' }), null, "an untracked id is not answered");
+  // An answer whose id cannot be read: the call gets the no-answer error after 10 minutes.
+  assert.deepEqual(filter.client(toolCall(5)), { forward: toolCall(5) });
+  assert.equal(filter.overflowFromServer({ head: "x", tail: "y" }), null);
+  clock.t += 10 * 60_000 + 1;
+  status(release());
+  assert.equal(JSON.parse(emitted.at(-1)).id, 5);
+  // The clean Server browser answers the same way (no tracking there).
+  const clean = createRunFilter({ signedIn: false, guard: null });
+  assert.equal(JSON.parse(clean.overflowFromClient({ head: '{"jsonrpc":"2.0","id":1,"method":"tools/call"' })).error.message, TOO_LONG_REQUEST_TEXT);
+  assert.equal(JSON.parse(clean.overflowFromServer({ tail: ',"jsonrpc":"2.0","id":1}' })).error.message, TOO_LONG_RESULT_TEXT);
+  const entry = readFileSync(new URL("../server-browser/entrypoint.mjs", import.meta.url), "utf8");
+  assert.match(entry, /const reply = filter\.overflowFromClient\(info\);\n    if \(reply\) process\.stdout\.write/);
+  assert.match(entry, /const reply = filter\.overflowFromServer\(info\);\n    if \(reply\) process\.stdout\.write/);
+});
+
+test("control guard: held with known: false (the relay cannot read neko while a viewer is connected) is unavailable, not a takeover: results come back unconfirmed", () => {
+  const { guard, filter, status } = runRig();
+  status(release());
+  assert.deepEqual(filter.client(toolCall(1)), { forward: toolCall(1) });
+  status({ ownerControl: true, known: false, sampledAgoMs: 900, bootId: "abc123", epoch: 0 });
+  assert.equal(guard.held(), true, "still paused");
+  assert.equal(guard.reason(), "unavailable");
+  assert.equal(textOf(filter.client(toolCall(2)).reply), UNAVAILABLE_TEXT);
+  status(release());
+  assert.equal(textOf(filter.server(toolResult(1))), UNCONFIRMED_TEXT, "not 'the owner has taken over'");
+  status({ ownerControl: true, known: true });
+  assert.equal(guard.reason(), "owner");
+});
+
+test("relay: a failed neko read while a viewer watches does not move the epoch, and a hanging neko read gives up after 1.5 s", async () => {
+  const neko = await fakeNeko();
+  const relay = await relayFor(neko, { controlPollMs: 60_000, log: () => {} });
+  const port = await relay.startControl("127.0.0.1", 0);
+  const raw = async () => JSON.parse((await http(port, "GET", "/control")).body);
+  try {
+    await relay.pollControl();
+    const created = await postTicket(relay, ticketAt(Date.now(), "unsu-unsu-unsu-0001"));
+    const cookie = String(created.headers["set-cookie"]).split(";")[0];
+    const socket = connect(relay.port, "127.0.0.1");
+    socket.on("error", () => {});
+    await new Promise((resolve) => socket.on("connect", resolve));
+    socket.write(
+      [`GET ${relay.prefix}/api/ws HTTP/1.1`, "Host: 127.0.0.1:5301", "Origin: http://127.0.0.1:5301", `Cookie: ${cookie}`, "Upgrade: websocket", "Connection: Upgrade", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version: 13", "", ""].join("\r\n"),
+    );
+    await new Promise((resolve) => socket.once("data", resolve));
+    const before = (await raw()).epoch;
+    neko.state.controlFails = true;
+    await relay.pollControl();
+    const unsure = await raw();
+    assert.deepEqual([unsure.ownerControl, unsure.known], [true, false], "paused, as unsure");
+    assert.equal(unsure.epoch, before, "an unsure read is not a takeover");
+    neko.state.controlFails = false;
+    neko.state.controlHangs = true;
+    const started = Date.now();
+    await relay.pollControl();
+    const took = Date.now() - started;
+    assert.ok(took >= 1400 && took < 3000, `the read gave up after about 1.5 s (${took} ms)`);
+    assert.equal(NEKO_CONTROL_TIMEOUT_MS, 1500);
+    assert.equal((await raw()).known, false);
+    neko.state.controlHangs = false;
+    await relay.pollControl();
+    const back = await raw();
+    assert.deepEqual([back.ownerControl, back.known, back.epoch], [false, true, before], "readable again, nobody held control: same epoch");
+    socket.destroy();
+  } finally {
+    await relay.close();
+    await neko.close();
+  }
 });
 
 test("run filter (clean Server browser): no takeover guard, tool calls pass as before", () => {
@@ -2109,8 +2266,12 @@ test("relay: neko's host counts with or without a viewer, a release carries the 
       [`GET ${relay.prefix}/api/ws HTTP/1.1`, "Host: 127.0.0.1:5301", "Origin: http://127.0.0.1:5301", `Cookie: ${cookie}`, "Upgrade: websocket", "Connection: Upgrade", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version: 13", "", ""].join("\r\n"),
     );
     await new Promise((resolve) => socket.once("data", resolve));
+    const epochViewer = (await raw()).epoch;
+    assert.ok(epochViewer > epoch1, "a viewer WebSocket that opens is a new epoch");
     neko.state.hasHost = false;
     assert.equal((await take()).status, 200, "with its viewer: forwarded");
+    const epochTake = (await raw()).epoch;
+    assert.ok(epochTake >= epochViewer + 2, "a forwarded control request is a new epoch before and after it");
     // A takeover that begins and ends between two of the run's reads still moves the epoch.
     neko.state.hasHost = true;
     await relay.pollControl();
@@ -2121,6 +2282,8 @@ test("relay: neko's host counts with or without a viewer, a release carries the 
     assert.ok(body.epoch > epoch1, "the run sees that a takeover happened");
     assert.match(body.bootId, /^[0-9a-f]{16}$/);
     socket.destroy();
+    for (let i = 0; i < 100 && relay.state().viewers > 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok((await raw()).epoch > body.epoch, "a viewer WebSocket that closes is a new epoch");
   } finally {
     await relay.close();
     await neko.close();

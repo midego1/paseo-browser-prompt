@@ -141,15 +141,15 @@ if (signedIn && !(await waitForCdp())) {
 // createControlGuard: it starts held, opens only on a valid `ownerControl: false` from the relay, and
 // holds again on a failed poll, an invalid status, or a release older than CONTROL_MAX_AGE_MS (from
 // the relay's read of neko). The first poll ends before Playwright MCP starts and before any message
-// from the agent is read. Results of calls in flight while the state was unknown are buffered until
-// it is confirmed (createCallTracker). The clean Server browser has no guard (no owner can take it over).
+// from the agent is read. The result of a call that was in flight while the state was not confirmed
+// is withheld (createCallTracker). The clean Server browser has no guard (no owner can take it over).
 const guard = signedIn ? createControlGuard() : null;
 const filter = createRunFilter({ signedIn, guard, log, emit: (line) => process.stdout.write(`${line}\n`) });
 if (guard) {
   const poll = createControlPoller({ guard, url: controlUrl, timeoutMs: CONTROL_POLL.timeoutMs, log, onPoll: () => filter.sync() });
   await poll();
   setInterval(() => void poll(), CONTROL_POLL.intervalMs).unref();
-  // A release that went stale between polls, and buffered results that waited too long.
+  // A release that went stale between polls, and requests that never got an answer.
   setInterval(() => filter.sync(), 250).unref();
 }
 
@@ -177,12 +177,24 @@ const fromAgent = lineSplitter((line) => {
   const verdict = filter.client(line);
   if ("reply" in verdict) process.stdout.write(`${verdict.reply}\n`);
   else if ("forward" in verdict) child.stdin.write(`${verdict.forward}\n`);
-}, { maxLength: MAX_CLIENT_LINE, onOverflow: () => filter.overflowFromClient() });
+}, {
+  maxLength: MAX_CLIENT_LINE,
+  onOverflow: (info) => {
+    const reply = filter.overflowFromClient(info);
+    if (reply) process.stdout.write(`${reply}\n`);
+  },
+});
 const fromServer = lineSplitter((line) => {
   // Signed-in: a result that comes back while held, or whose call overlapped a held period, is withheld.
   const kept = filter.server(line);
   if (kept !== null) process.stdout.write(`${kept}\n`);
-}, { maxLength: MAX_SERVER_LINE, onOverflow: () => filter.overflowFromServer() });
+}, {
+  maxLength: MAX_SERVER_LINE,
+  onOverflow: (info) => {
+    const reply = filter.overflowFromServer(info);
+    if (reply) process.stdout.write(`${reply}\n`);
+  },
+});
 process.stdin.setEncoding("utf8");
 child.stdout.setEncoding("utf8");
 process.stdin.on("data", (chunk) => fromAgent.push(chunk));

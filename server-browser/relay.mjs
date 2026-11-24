@@ -227,6 +227,9 @@ export function parseScreen(text) {
  * service login), `userPassword` (the owner's viewer logins, no admin rights), `landscape`,
  * `portrait`, `log`, `now`, `nekoRequest` (tests). Returns `{ port, rtcPort, close(), state() }`.
  */
+/** Limit for the relay's reads of neko's control state (and the login before them). */
+export const NEKO_CONTROL_TIMEOUT_MS = 1500;
+
 export async function startRelay(options) {
   const {
     nekoHost,
@@ -278,10 +281,12 @@ export async function startRelay(options) {
   /** The daemon could not lock the vault for this release: the run is told the owner has to act. */
   let lockFailed = false;
   let wasHeld = false;
+  let wasOwner = false;
   /**
-   * Grows on every start of a held period (a takeover, or unsure while a viewer is connected) and on
-   * every lock request: a run whose call was in flight compares it before and after, so a takeover
-   * that began and ended between two of its polls is still seen.
+   * Grows whenever neko reports a host after none, every viewer WebSocket that opens or closes, and
+   * before and after every control request it forwards: a run whose call was in flight compares it before and after, so a takeover
+   * the relay saw any sign of between two of its polls withholds that call's result. (A takeover
+   * between two reads of neko over a WebSocket that was already open is not seen; see SECURITY.md.)
    */
   let controlEpoch = 0;
   /** When (clock) the last successful read of neko's control state was asked for; -Infinity: never. */
@@ -289,7 +294,6 @@ export async function startRelay(options) {
   /** After a takeover ends (released, reset, or the viewer gone): the run waits for the lock. */
   function requireLock(reason) {
     if (!lockOnRelease) return;
-    controlEpoch++;
     lockGeneration++;
     if (!lockPending) log(`vault lock needed (${reason})`);
     lockPending = true;
@@ -298,7 +302,10 @@ export async function startRelay(options) {
   /** Notes the end of a held period (held or unsure while a viewer is connected). */
   function noteControl() {
     const held = controlHeld();
-    if (!wasHeld && held) controlEpoch++;
+    // Only a hold neko reported is a new epoch; unsure (a failed read with a viewer) is sent as
+    // known: false, which the run treats as unconfirmed, not as a takeover.
+    if (!wasOwner && ownerControl) controlEpoch++;
+    wasOwner = ownerControl;
     if (wasHeld && !held) requireLock("control released");
     wasHeld = held;
   }
@@ -314,7 +321,7 @@ export async function startRelay(options) {
   };
 
   /** One JSON request to neko; resolves `{ status, body }` or rejects. */
-  function nekoJson(method, path, body, token) {
+  function nekoJson(method, path, body, token, timeoutMs = 10_000) {
     if (options.nekoRequest) return options.nekoRequest(method, path, body, token);
     return new Promise((resolve, reject) => {
       const data = body === undefined ? null : Buffer.from(JSON.stringify(body));
@@ -330,7 +337,7 @@ export async function startRelay(options) {
             ...(data ? { "Content-Type": "application/json", "Content-Length": String(data.length) } : {}),
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
-          timeout: 10_000,
+          timeout: timeoutMs,
         },
         (res) => {
           const chunks = [];
@@ -358,9 +365,9 @@ export async function startRelay(options) {
   }
 
   /** A neko login: the relay's service login as an admin, the owner's viewer logins as a regular member. */
-  async function nekoLogin(prefix, password = adminPassword) {
+  async function nekoLogin(prefix, password = adminPassword, timeoutMs = 10_000) {
     const username = `${prefix}-${randomBytes(3).toString("hex")}`;
-    const result = await nekoJson("POST", "/api/login", { username, password });
+    const result = await nekoJson("POST", "/api/login", { username, password }, undefined, timeoutMs);
     const token = result.body && typeof result.body.token === "string" ? result.body.token : null;
     if (result.status !== 200 || !token) throw new Error(`neko login failed (${result.status})`);
     return token;
@@ -607,8 +614,13 @@ export async function startRelay(options) {
           log("refused a control request without a viewer");
           return sendJson(res, 409, { message: "Open the viewer first." });
         }
-        // Read the new state right away, not at the next poll.
-        res.on("finish", () => void pollControl());
+        // A control request is a new epoch before and after it (a run's call in flight then is
+        // withheld), and the new state is read right away, not at the next poll.
+        controlEpoch++;
+        res.on("close", () => {
+          controlEpoch++;
+          void pollControl();
+        });
       }
       touch();
       forward(req, res, session, inner);
@@ -668,6 +680,8 @@ export async function startRelay(options) {
       upstream.write(`${lines.join("\r\n")}\r\n\r\n`);
       if (head?.length) upstream.write(head);
       viewers++;
+      // A viewer that comes or goes is a new epoch: neko may take control events over its WebSocket.
+      controlEpoch++;
       noteControl();
       touch();
       if (landscapeTimer) clearTimeout(landscapeTimer);
@@ -676,6 +690,7 @@ export async function startRelay(options) {
         if (closed) return;
         closed = true;
         viewers = Math.max(0, viewers - 1);
+        controlEpoch++;
         touch();
         if (viewers === 0) {
           // Whatever the owner did in that viewer, the vault is locked before the run goes on.
@@ -741,9 +756,10 @@ export async function startRelay(options) {
   async function pollOnce() {
     const seq = ++pollIssued;
     try {
-      serviceToken ??= await nekoLogin("relay");
+      // Short limits: a release the run gets lasts 3 s from this read (CONTROL_MAX_AGE_MS).
+      serviceToken ??= await nekoLogin("relay", adminPassword, NEKO_CONTROL_TIMEOUT_MS);
       const askedAt = clock();
-      const result = await nekoJson("GET", "/api/room/control", undefined, serviceToken);
+      const result = await nekoJson("GET", "/api/room/control", undefined, serviceToken, NEKO_CONTROL_TIMEOUT_MS);
       if (result.status === 401) serviceToken = null;
       if (result.status !== 200 || !result.body) throw new Error(`control state ${result.status}`);
       if (seq > pollApplied) {
@@ -775,9 +791,9 @@ export async function startRelay(options) {
   }
   async function resetControl() {
     try {
-      serviceToken ??= await nekoLogin("relay");
+      serviceToken ??= await nekoLogin("relay", adminPassword, NEKO_CONTROL_TIMEOUT_MS);
       const askedAt = clock();
-      const result = await nekoJson("POST", "/api/room/control/reset", undefined, serviceToken);
+      const result = await nekoJson("POST", "/api/room/control/reset", undefined, serviceToken, NEKO_CONTROL_TIMEOUT_MS);
       if (result.status === 401) serviceToken = null;
       if (result.status < 200 || result.status >= 300) throw new Error(`reset ${result.status}`);
       ownerControl = false;
