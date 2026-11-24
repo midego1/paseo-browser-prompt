@@ -941,7 +941,9 @@ logs in to neko for you with a generated password you never see, and you get the
 the mouse icon (Request control) to take control; on a phone the keyboard button opens the on-screen
 keyboard. **While you hold control the run is paused**: every browser tool call of the agent is
 refused with "the owner has taken over" until you release control (the mouse icon again, or close
-the viewer). A phone switches the desktop to portrait (720×1280) while it watches;
+the viewer). The pause fails closed: a run's tools start paused and open only once the relay
+confirms that nobody holds control, and they pause again whenever that cannot be confirmed (see
+[SECURITY.md](SECURITY.md)). A phone switches the desktop to portrait (720×1280) while it watches;
 it switches back 20 seconds after the last viewer leaves. When a run hits a login, 2FA or captcha,
 the agent does not type anything: it asks you (a question on the card) to press Take over, complete
 it, release control and answer "done"; then it continues. Log in **in a new tab** (the + button)

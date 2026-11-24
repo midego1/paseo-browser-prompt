@@ -1281,6 +1281,9 @@ export function createSignedIn(options: SignedInOptions) {
       if (!path || !node) return null;
       // This call's own admission: noted at the claim, with its session name once known (below).
       const admission: Admission = { seq: 0, session: "" };
+      // What the claim replaces, put back when this call's setup fails.
+      let previousAdmission: Admission | undefined;
+      let previousStarting: number | undefined;
       const claimed = await admit(async () => {
         let others: number;
         try {
@@ -1289,6 +1292,8 @@ export function createSignedIn(options: SignedInOptions) {
           return "unavailable" as const;
         }
         if (others > 0) return "busy" as const;
+        previousAdmission = admissions.get(agentId);
+        previousStarting = starting.get(agentId);
         starting.set(agentId, now() + STARTING_WINDOW_MS);
         admission.seq = nextAdmissionSeq();
         rememberAdmission(admissions, agentId, admission);
@@ -1298,11 +1303,8 @@ export function createSignedIn(options: SignedInOptions) {
       try {
         const runtime = await sb.runtime();
         const nonce = random().slice(0, 12);
-        // With Bitwarden (running, or chosen: the owner's consent alone is enough) the run's takeover
-        // guard fails closed.
-        const config = await options.config();
-        const failClosed = isBitwardenImage(await runningNekoImage()) || consented(config);
-        const plan = signedInPlan(path, { stackId: await stackId(), instance: await sb.instance(), serverImage: sb.image, agentId, nonce, blockedIps: sb.blockedIps(), failClosed });
+        // The run's takeover guard always fails closed (with or without Bitwarden): see createControlGuard.
+        const plan = signedInPlan(path, { stackId: await stackId(), instance: await sb.instance(), serverImage: sb.image, agentId, nonce, blockedIps: sb.blockedIps() });
         lastActive = now();
         // A resumed run may find the browser stopped (idle): start it; the launcher waits for it.
         if (!(await isRunning())) void ensureStarted().catch(() => undefined);
@@ -1310,8 +1312,15 @@ export function createSignedIn(options: SignedInOptions) {
         admission.session = session;
         return { server: signedInMcpServer(node, runtime.launcher, plan, host), session };
       } catch (error) {
-        // Admitted but not set up: its admission goes (unless a newer one replaced it).
-        if (admissions.get(agentId) === admission) admissions.delete(agentId);
+        // Admitted but not set up. Unless a newer call replaced it, the admission and the starting
+        // window this claim replaced come back (an earlier session of the same run keeps its own), or
+        // go, so the browser is not reported busy for the rest of the window.
+        if (admissions.get(agentId) === admission) {
+          if (previousAdmission) rememberAdmission(admissions, agentId, previousAdmission);
+          else admissions.delete(agentId);
+          if (previousStarting !== undefined && previousStarting > now()) starting.set(agentId, previousStarting);
+          else starting.delete(agentId);
+        }
         throw error;
       }
     },

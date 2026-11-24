@@ -77,7 +77,10 @@ import { checkPlan, launch } from "../server-browser/launch.mjs";
 import {
   createCallTracker,
   createControlGuard,
+  createControlPoller,
+  createRunFilter,
   EXTENSION_URL_TEXT,
+  UNAVAILABLE_TEXT,
   LOCK_FAILED_TEXT,
   SECURING_TEXT,
   filterClientLine,
@@ -601,11 +604,13 @@ test("the run's MCP filter pauses every tool call while the owner holds control"
   const list = JSON.stringify({ jsonrpc: "2.0", id: 8, method: "tools/list" });
   assert.deepEqual(filterClientLine(list, { ownerControl: true }), { forward: list }, "listing tools still works");
   const entry = readFileSync(new URL("../server-browser/entrypoint.mjs", import.meta.url), "utf8");
-  assert.match(entry, /const verdict = filterClientLine\(line, \{ ownerControl: guard\.held\(\), securing: guard\.securing\(\), lockFailed: guard\.lockFailed\(\), signedIn \}\);/);
-  assert.match(entry, /if \(signedIn\) calls\.started\(verdict\.forward\);/);
-  assert.match(entry, /if \(kept !== null && signedIn\) kept = calls\.finish\(kept, guard\.held\(\)\);/);
-  assert.match(entry, /if \(polling\) return;/, "never two polls at once");
+  assert.match(entry, /const verdict = filter\.client\(line\);/);
+  assert.match(entry, /const kept = filter\.server\(line\);/);
+  assert.match(entry, /const poll = createControlPoller\(\{ guard, calls, url: controlUrl, log \}\);\n  await poll\(\);/, "the first poll ends before Playwright MCP starts");
   assert.match(entry, /setInterval\(\(\) => void poll\(\), 1000\)/);
+  assert.ok(entry.indexOf("await poll();") < entry.indexOf("const child = spawn("), "no agent message is read before the first poll");
+  assert.ok(entry.indexOf("await poll();") < entry.indexOf('process.stdin.on("data"'));
+  assert.match(entry, /if \(signedIn && !controlUrl\) \{\n  log\("BP_CONTROL_URL is missing/, "signed-in without the relay's state: no start");
 });
 
 // ---------------------------------------------------------------- docker arguments
@@ -1088,18 +1093,44 @@ test("daemon: a stale close of an older signed-in session leaves the new session
   assert.equal((await si.prepare({ sourceId: "s", cardId: "c" })).ok, true);
 });
 
-test("daemon: an admission whose setup throws is dropped, and a failed second call does not touch the first's session", async () => {
+test("daemon: an admission whose setup throws gives back the admission it replaced, and a failed second call does not touch the first's session", async () => {
   const docker = fakeStackDocker();
-  let failConfig = false;
-  const { si } = makeSignedIn(docker, { config: async () => { if (failConfig) throw new Error("config unreadable"); return { port: 5301, httpsBaseUrl: "", bitwarden: false }; } });
+  let failSetup = false;
+  let n = 0;
+  const random = () => {
+    if (failSetup) throw new Error("setup failed");
+    return (++n).toString(16).padStart(32, "0");
+  };
+  const { si } = makeSignedIn(docker, { random });
   const first = await si.prepare({ sourceId: "s", cardId: "c" });
   assert.equal(si.consumeTicket(first.ticket, { sourceId: "s", cardId: "c" }), true);
   const ok = await si.mcpServer("run-a");
   assert.ok("server" in ok);
+  const before = si.admission("run-a");
+  assert.equal(before.session, ok.session);
+  failSetup = true;
+  await assert.rejects(si.mcpServer("run-a"), /setup failed/);
+  assert.equal(si.admission("run-a"), before, "the failed call's admission goes; the one it replaced comes back, unchanged");
   assert.equal(si.admission("run-a").session, ok.session);
-  failConfig = true;
-  await assert.rejects(si.mcpServer("run-a"), /config unreadable/);
-  assert.equal(si.admission("run-a"), undefined, "the failed call's admission is dropped, not given the first session's name");
+  assert.deepEqual(await si.mcpServer("run-b"), { refused: "busy" }, "the first session's starting window is kept");
+});
+
+test("daemon: a first admission whose setup throws leaves no admission and no starting entry (the browser is not reported busy)", async () => {
+  const docker = fakeStackDocker();
+  let failSetup = false;
+  let n = 0;
+  const random = () => {
+    if (failSetup) throw new Error("setup failed");
+    return (++n).toString(16).padStart(32, "0");
+  };
+  const { si } = makeSignedIn(docker, { random });
+  await si.viewerLink({ purpose: "login", portrait: false });
+  failSetup = true;
+  await assert.rejects(si.mcpServer("run-a"), /setup failed/);
+  assert.equal(si.admission("run-a"), undefined);
+  assert.equal((await si.status()).busy, false, "no starting entry left behind");
+  failSetup = false;
+  assert.ok("server" in (await si.mcpServer("run-b")), "another run is admitted right away, not after the 2 min window");
 });
 
 test("daemon: stop keeps the profile, log out removes it and the keys; rotate restarts only the relay", async () => {
@@ -1526,34 +1557,169 @@ test("signed-in runs get no tool that reads page script state; the filter's list
   assert.match(SIGNED_IN_SAFETY_PREAMBLE, /The owner's own tabs are hidden from you/);
 });
 
-test("control guard: follows the relay's ownerControl, a held state lasts through failures for 10 s, opens only after sustained failure, ignores old results", () => {
+test("control guard (fail closed): starts held, and only a valid ownerControl: false releases", () => {
   let t = 0;
   const guard = createControlGuard({ now: () => t });
-  assert.equal(guard.held(), false);
+  assert.equal(guard.held(), true, "held before any status");
+  assert.equal(guard.unavailable(), true);
+  for (const body of [undefined, null, "false", 0, [], ["ownerControl", false], {}, { known: true }, { ownerControl: null }, { ownerControl: "false" }, { ownerControl: 0 }, { ownerControl: undefined }, { ownerControl: "no" }]) {
+    guard.result(guard.next(), body);
+    assert.equal(guard.held(), true, `not a valid status: ${JSON.stringify(body)}`);
+    assert.equal(guard.unavailable(), true, JSON.stringify(body));
+    assert.equal(guard.securing(), false);
+    assert.equal(guard.lockFailed(), false);
+  }
+  guard.result(guard.next(), { ownerControl: false, known: true });
+  assert.equal(guard.held(), false, "a valid release opens");
+  assert.equal(guard.unavailable(), false);
+  guard.result(guard.next(), { ownerControl: false, known: false });
+  assert.equal(guard.held(), false, "the relay's boolean decides; `known` is informational");
   guard.result(guard.next(), { ownerControl: true, known: true });
   assert.equal(guard.held(), true);
-  t += 3000;
-  guard.failure(guard.next());
-  guard.failure(guard.next());
-  guard.failure(guard.next());
-  assert.equal(guard.held(), true, "within 10 s of the last held state");
-  t += 8000;
-  guard.failure(guard.next());
-  assert.equal(guard.held(), false, "11 s and four failures later");
-  guard.result(guard.next(), { ownerControl: false, known: false });
-  assert.equal(guard.held(), false, "the relay's ownerControl decides; it folds the unsure case in itself");
-  guard.result(guard.next(), { ownerControl: true, known: false });
-  assert.equal(guard.held(), true);
+  assert.equal(guard.unavailable(), false, "held by the owner, not unavailable");
+  guard.result(guard.next(), { ownerControl: false });
+  assert.equal(guard.held(), false);
+  guard.result(guard.next(), { known: true });
+  assert.equal(guard.held(), true, "ownerControl missing again after a release: held");
+  guard.result(guard.next(), { ownerControl: false, securing: true, lockFailed: true });
+  assert.equal(guard.securing(), false, "securing and lockFailed only mean something while held");
+  assert.equal(guard.lockFailed(), false);
+});
+
+test("control guard (fail closed): any failure after a release holds again, and no number of failures opens it", () => {
+  let t = 0;
+  const guard = createControlGuard({ now: () => t });
   guard.result(guard.next(), { ownerControl: false, known: true });
   assert.equal(guard.held(), false);
+  guard.failure(guard.next());
+  assert.equal(guard.held(), true, "one failed poll after a release: paused");
+  assert.equal(guard.unavailable(), true);
+  for (let i = 0; i < 100; i++) {
+    t += 1000;
+    guard.failure(guard.next());
+    assert.equal(guard.held(), true, `failure ${i + 2}: still paused`);
+  }
+  guard.result(guard.next(), { ownerControl: false });
+  assert.equal(guard.held(), false, "the relay answers again with a release: open");
+  const never = createControlGuard({ now: () => t });
+  for (let i = 0; i < 10; i++) never.failure(never.next());
+  assert.equal(never.held(), true, "never confirmed: stays held through failures");
+  guard.result(guard.next(), { ownerControl: true, securing: true });
+  guard.failure(guard.next());
+  assert.equal(guard.securing(), false, "a failed poll is unavailable, not securing");
+  assert.equal(guard.unavailable(), true);
+});
+
+test("control guard (fail closed): a release older than maxAgeMs counts as unavailable (held), also between polls", () => {
+  let t = 0;
+  const guard = createControlGuard({ now: () => t, maxAgeMs: 3000 });
+  guard.result(guard.next(), { ownerControl: false });
+  t += 3000;
+  assert.equal(guard.held(), false, "3 s old: still good");
+  t += 1;
+  assert.equal(guard.held(), true, "older than 3 s without a newer release: held");
+  assert.equal(guard.unavailable(), true);
+  guard.result(guard.next(), { ownerControl: false });
+  assert.equal(guard.held(), false, "a fresh release opens again");
+  assert.equal(createControlGuard().held(), true, "default options: held at the start");
+});
+
+test("control guard (fail closed): older results and failures are ignored (sequence order)", () => {
+  const guard = createControlGuard({ now: () => 0 });
   const late = guard.next();
-  guard.result(guard.next(), { ownerControl: true, known: true });
-  guard.result(late, { ownerControl: false, known: true });
-  assert.equal(guard.held(), true, "an older result is ignored");
-  const fresh = createControlGuard({ now: () => t });
-  fresh.failure(fresh.next());
-  fresh.failure(fresh.next());
-  assert.equal(fresh.held(), false, "never held: stays open");
+  guard.result(guard.next(), { ownerControl: true });
+  guard.result(late, { ownerControl: false });
+  assert.equal(guard.held(), true, "an older release does not overwrite a newer hold");
+  const slowFailure = guard.next();
+  guard.result(guard.next(), { ownerControl: false });
+  guard.failure(slowFailure);
+  assert.equal(guard.held(), false, "an older failure does not overwrite a newer release");
+  const old = guard.next();
+  guard.failure(guard.next());
+  guard.result(old, { ownerControl: false });
+  assert.equal(guard.held(), true, "an older release does not overwrite a newer failure");
+  guard.result(0, { ownerControl: false });
+  guard.result(Number.NaN, { ownerControl: false });
+  guard.result("99", { ownerControl: false });
+  assert.equal(guard.held(), true, "no sequence number of its own: ignored");
+});
+
+test("run filter (signed-in): a tool call before the first status is refused (wait), tools/list passes, and the normal flow opens after a valid release", async () => {
+  let t = 0;
+  const guard = createControlGuard({ now: () => t });
+  const calls = createCallTracker();
+  const filter = createRunFilter({ signedIn: true, guard, calls });
+  const call = (id) => JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "browser_snapshot", arguments: {} } });
+  const result = (id) => JSON.stringify({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "page content" }] } });
+  const early = filter.client(call(1));
+  assert.ok("reply" in early, "nothing reaches Playwright MCP before a valid release");
+  assert.equal(JSON.parse(early.reply).result.content[0].text, UNAVAILABLE_TEXT);
+  assert.match(UNAVAILABLE_TEXT, /Wait about 5 seconds and try the same call again/);
+  assert.equal(calls.size(), 0);
+  const list = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+  assert.deepEqual(filter.client(list), { forward: list }, "listing tools does not touch the browser");
+  const init = JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: {} });
+  assert.deepEqual(filter.client(init), { forward: init });
+
+  // The poller: errors, non-2xx, garbage and invalid bodies all keep it held.
+  const answers = [];
+  const fetchImpl = async () => {
+    const next = answers.shift();
+    if (next instanceof Error) throw next;
+    return next;
+  };
+  const respond = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => (typeof body === "string" ? JSON.parse(body) : body) });
+  const logs = [];
+  const poll = createControlPoller({ guard, calls, url: "http://bp-si-0a1b2c3d-relay:8081/control", fetchImpl, log: (m) => logs.push(m) });
+  for (const answer of [new Error("ECONNREFUSED"), new DOMException("timeout", "TimeoutError"), respond(500, { ownerControl: false }), respond(404, {}), respond(200, "not json"), respond(200, { known: true }), respond(200, { ownerControl: "false" })]) {
+    answers.push(answer);
+    await poll();
+    assert.equal(guard.held(), true);
+    assert.equal(JSON.parse(filter.client(call(3)).reply).result.content[0].text, UNAVAILABLE_TEXT);
+  }
+  assert.equal(logs.length, 1, "logged once while it keeps failing");
+  answers.push(respond(200, { ownerControl: true, known: true }));
+  await poll();
+  assert.equal(JSON.parse(filter.client(call(4)).reply).result.content[0].text, OWNER_CONTROL_TEXT, "the owner holds control");
+  answers.push(respond(200, { ownerControl: false, known: true }));
+  await poll();
+  assert.equal(guard.held(), false);
+  assert.deepEqual(filter.client(call(5)), { forward: call(5) }, "released: the call goes to Playwright MCP");
+  assert.equal(filter.server(result(5)), result(5), "and its result comes back");
+
+  // A call on its way when the relay stops answering: its result is withheld.
+  assert.deepEqual(filter.client(call(6)), { forward: call(6) });
+  answers.push(new Error("ECONNRESET"));
+  await poll();
+  assert.equal(guard.held(), true, "paused again when the status becomes unavailable");
+  answers.push(respond(200, { ownerControl: false }));
+  await poll();
+  assert.equal(JSON.parse(filter.server(result(6))).result.content[0].text, OWNER_CONTROL_TEXT, "overlapped a paused period: withheld");
+  // A stale release between polls withholds a result too.
+  assert.deepEqual(filter.client(call(7)), { forward: call(7) });
+  t += 3001;
+  assert.equal(JSON.parse(filter.server(result(7))).result.content[0].text, UNAVAILABLE_TEXT, "stale release when the result arrives: withheld");
+  assert.equal(JSON.parse(filter.client(call(8)).reply).result.content[0].text, UNAVAILABLE_TEXT);
+
+  // Two polls never run at once.
+  let resolveSlow;
+  let fetches = 0;
+  const slow = createControlPoller({ guard, calls, url: "u", fetchImpl: () => (fetches++, new Promise((resolve) => (resolveSlow = resolve))) });
+  const first = slow();
+  await slow();
+  assert.equal(fetches, 1);
+  resolveSlow(respond(200, { ownerControl: false }));
+  await first;
+  assert.equal(guard.held(), false);
+  assert.throws(() => createRunFilter({ signedIn: true }), /needs the takeover guard/);
+});
+
+test("run filter (clean Server browser): no takeover guard, tool calls pass as before", () => {
+  const filter = createRunFilter({ signedIn: false, guard: null });
+  const call = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "browser_evaluate", arguments: {} } });
+  assert.deepEqual(filter.client(call), { forward: call });
+  const result = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "ok" }] } });
+  assert.equal(filter.server(result), result);
 });
 
 test("call tracker: a result that arrives while the owner holds control, or whose call overlapped a takeover, is withheld", () => {
@@ -1692,6 +1858,34 @@ test("no viewer and a failing neko control poll: the run is not paused", async (
     neko.state.failLogin = true; // a 401 loop on neko's login
     for (let i = 0; i < 3; i++) await relay.pollControl();
     assert.equal(JSON.parse((await http(port, "GET", "/control")).body).ownerControl, false);
+  } finally {
+    await relay.close();
+    await neko.close();
+  }
+});
+
+test("the run's poller over real HTTP: held until the relay answers, open on its release, held when the relay is gone", async () => {
+  const neko = await fakeNeko();
+  const relay = await relayFor(neko, { controlPollMs: 60_000, log: () => {} });
+  const port = await relay.startControl("127.0.0.1", 0);
+  const guard = createControlGuard();
+  const calls = createCallTracker();
+  const filter = createRunFilter({ signedIn: true, guard, calls });
+  const call = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "browser_snapshot", arguments: {} } });
+  try {
+    assert.equal(JSON.parse(filter.client(call).reply).result.content[0].text, UNAVAILABLE_TEXT, "before the first status");
+    const wrong = createControlPoller({ guard, calls, url: `http://127.0.0.1:${port}/other`, timeoutMs: 1500 });
+    await wrong();
+    assert.equal(guard.held(), true, "a 404 is not a status");
+    await relay.pollControl();
+    const poll = createControlPoller({ guard, calls, url: `http://127.0.0.1:${port}/control`, timeoutMs: 1500 });
+    await poll();
+    assert.equal(guard.held(), false, "the relay's explicit ownerControl: false releases");
+    assert.deepEqual(filter.client(call), { forward: call });
+    await relay.close();
+    await poll();
+    assert.equal(guard.held(), true, "the relay is gone: paused again");
+    assert.equal(JSON.parse(filter.client(call).reply).result.content[0].text, UNAVAILABLE_TEXT);
   } finally {
     await relay.close();
     await neko.close();
@@ -2018,10 +2212,10 @@ test("Bitwarden daemon: nothing is downloaded without the saved consent; the var
   status = await si.status();
   assert.equal(status.bitwarden.active, true);
   assert.equal(status.bitwarden.updatePending, false);
-  // A run's MCP container fails closed with Bitwarden.
+  // A run's MCP container gets the relay's takeover state (its guard always fails closed).
   const mcp = await si.mcpServer("run-b");
   const plan = JSON.parse(Buffer.from(mcp.server.args[1], "base64").toString("utf8"));
-  assert.ok(value(plan.agent.run, "--env").includes("BP_CONTROL_FAIL_CLOSED=1"));
+  assert.ok(value(plan.agent.run, "--env").some((item) => item.startsWith("BP_CONTROL_URL=")));
   // Turned off: an idle browser restarts without it.
   bitwarden = false;
   docker.state.agents = [];
@@ -2366,22 +2560,26 @@ test("while only the vault is being locked, the run is told to wait, not to ask 
   assert.match(SECURING_TEXT, /Do not ask the owner/);
 });
 
-test("Bitwarden fail closed: the run's guard never opens on failed polls, and the entry point takes only that flag", () => {
-  const guard = createControlGuard({ now: () => 1_000_000, failuresToOpen: Number.POSITIVE_INFINITY });
-  guard.failure(guard.next());
-  assert.equal(guard.held(), true, "the relay could not be asked: paused");
+test("fail closed for every signed-in run: the plan always names the relay's takeover state, never a fail-closed flag, and the launcher requires it", () => {
+  const guard = createControlGuard({ now: () => 1_000_000 });
   for (let i = 0; i < 50; i++) guard.failure(guard.next());
-  assert.equal(guard.held(), true);
+  assert.equal(guard.held(), true, "the relay could not be asked: paused, with or without Bitwarden");
   guard.result(guard.next(), { ownerControl: false });
   assert.equal(guard.held(), false, "the relay answers: it decides");
   const entry = readFileSync(new URL("../server-browser/entrypoint.mjs", import.meta.url), "utf8");
-  assert.match(entry, /const guard = createControlGuard\(failClosed \? \{ failuresToOpen: Number\.POSITIVE_INFINITY \} : \{\}\);/);
-  assert.match(entry, /BP_CONTROL_FAIL_CLOSED may only be 1 or empty/);
-  const plain = signedInPlan("/usr/bin/docker", { stackId: "0a1b2c3d", instance: INSTANCE, serverImage: SERVER_IMAGE, agentId: "a1", nonce: "n1", blockedIps: [] });
-  assert.ok(!value(plain.agent.run, "--env").includes("BP_CONTROL_FAIL_CLOSED=1"));
-  const closed = signedInPlan("/usr/bin/docker", { stackId: "0a1b2c3d", instance: INSTANCE, serverImage: SERVER_IMAGE, agentId: "a1", nonce: "n1", blockedIps: [], failClosed: true });
-  assert.ok(value(closed.agent.run, "--env").includes("BP_CONTROL_FAIL_CLOSED=1"));
-  assert.doesNotThrow(() => checkPlan(closed));
+  assert.doesNotMatch(entry, /BP_CONTROL_FAIL_CLOSED|failuresToOpen/, "no switch to a guard that opens on failures");
+  const plan = signedInPlan("/usr/bin/docker", { stackId: "0a1b2c3d", instance: INSTANCE, serverImage: SERVER_IMAGE, agentId: "a1", nonce: "n1", blockedIps: [] });
+  const env = value(plan.agent.run, "--env");
+  assert.ok(env.includes("BP_CONTROL_URL=http://bp-si-0a1b2c3d-relay:8081/control"));
+  assert.ok(!env.some((item) => item.startsWith("BP_CONTROL_FAIL_CLOSED")));
+  assert.doesNotThrow(() => checkPlan(plan));
+  const without = structuredClone(plan);
+  const at = without.agent.run.findIndex((arg) => arg.startsWith("BP_CONTROL_URL="));
+  without.agent.run.splice(at - 1, 2);
+  assert.throws(() => checkPlan(without), /takeover state/, "no takeover state: the launcher refuses the plan");
+  const twice = structuredClone(plan);
+  twice.agent.run.splice(at + 1, 0, "--env", plan.agent.run[at]);
+  assert.throws(() => checkPlan(twice), /takeover state/);
 });
 
 test("DevTools filter: a frame that attaches before its URL is known and then commits to an extension page is taken away before the run sees its content, and its clicks are checked", () => {
@@ -2615,7 +2813,7 @@ test("0.23.1 Bitwarden: an unreadable signing key, or any Bitwarden image, never
   assert.equal(isBitwardenImageTag("other:x-bw2026.11.0-bbbbbbbbbbbb"), false);
   const mcp = await fresh.si.mcpServer("run-x");
   const plan = JSON.parse(Buffer.from(mcp.server.args[1], "base64").toString("utf8"));
-  assert.ok(value(plan.agent.run, "--env").includes("BP_CONTROL_FAIL_CLOSED=1"), "the run's takeover guard fails closed while a Bitwarden image runs, key or not");
+  assert.doesNotThrow(() => checkPlan(plan), "the run's takeover guard fails closed (always; the plan names the relay's state)");
 });
 
 test("0.23.1 settings: not ready, invalid, a failed read or a non-boolean Bitwarden value are unknown (keep); only an explicit false is off", async () => {
@@ -2859,17 +3057,18 @@ test("0.23.1 Bitwarden cleanup: never clears anything when the installed build c
   assert.deepEqual(await si.cleanupOldBitwarden(), [current]);
 });
 
-test("0.23.1 Bitwarden: the owner's consent alone makes the run's takeover guard fail closed", async () => {
+test("0.24.2: every signed-in run's plan is the same with or without Bitwarden (the takeover guard always fails closed)", async () => {
   const docker = fakeStackDocker();
   const { si } = makeSignedIn(docker, { config: async () => ({ port: 5301, httpsBaseUrl: "", bitwarden: true, bitwardenConsent: BITWARDEN.sha256 }) });
   await si.viewerLink({ purpose: "login", portrait: false });
-  assert.doesNotMatch(docker.state.nekoImage, /-bw/, "plain image (Bitwarden not built, no key)");
   const plan = JSON.parse(Buffer.from((await si.mcpServer("run-y")).server.args[1], "base64").toString("utf8"));
-  assert.ok(value(plan.agent.run, "--env").includes("BP_CONTROL_FAIL_CLOSED=1"));
   const plain = makeSignedIn(fakeStackDocker(), { config: async () => ({ port: 5301, httpsBaseUrl: "", bitwarden: false, bitwardenConsent: "" }) });
   await plain.si.viewerLink({ purpose: "login", portrait: false });
   const open = JSON.parse(Buffer.from((await plain.si.mcpServer("run-z")).server.args[1], "base64").toString("utf8"));
-  assert.ok(!value(open.agent.run, "--env").includes("BP_CONTROL_FAIL_CLOSED=1"), "without Bitwarden: as before");
+  for (const env of [value(plan.agent.run, "--env"), value(open.agent.run, "--env")]) {
+    assert.ok(env.some((item) => item.startsWith("BP_CONTROL_URL=")));
+    assert.ok(!env.some((item) => item.startsWith("BP_CONTROL_FAIL_CLOSED")));
+  }
 });
 
 test("0.23.1 Bitwarden lock with the relay down: an image name that cannot be read counts as possibly Bitwarden (the vault is locked)", async () => {

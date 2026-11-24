@@ -103,18 +103,37 @@ export const LOCK_FAILED_TEXT =
   "The signed-in browser stays paused for safety: its password manager (Bitwarden) could not be locked after the takeover. Only the owner can fix this. Ask the owner with AskUserQuestion to press Lock Bitwarden now or Restart browser on the card (or in the plugin settings), and to check Bitwarden's vault timeout (not Never), then answer \"done\". Wait for that answer and try again; do not retry in a loop.";
 
 /**
- * A message from the agent: `{ forward }` to pass it on, `{ reply }` to answer it here, or
- * `{ drop: true }` to discard it. With `ownerControl` (signed-in runs, while the owner holds control
- * in the viewer) every tool call is answered with OWNER_CONTROL_TEXT instead of reaching the browser.
+ * What a tool call gets while the takeover state cannot be confirmed: before the first status from
+ * the relay, after a failed poll, or when the last status is invalid or too old (fail closed).
  */
-export function filterClientLine(line, { ownerControl = false, securing = false, lockFailed = false, signedIn = false } = {}) {
+export const UNAVAILABLE_TEXT =
+  "The signed-in browser is paused for safety: the plugin cannot confirm right now that the owner is not holding control of it (the takeover state is still being checked, or the browser's relay does not answer). Browser tools stay paused until that is confirmed. Wait about 5 seconds and try the same call again. Do not retry in a tight loop; if it still fails after a minute, ask the owner with AskUserQuestion to press Restart browser on the card (or in the plugin settings) and answer \"done\".";
+
+/** The refusal for a tool call while the guard is held, by why it is held. */
+function refusalText({ securing = false, lockFailed = false, unavailable = false } = {}) {
+  return lockFailed ? LOCK_FAILED_TEXT : securing ? SECURING_TEXT : unavailable ? UNAVAILABLE_TEXT : OWNER_CONTROL_TEXT;
+}
+
+/** The refusal that fits a guard's current state (see createControlGuard). */
+export function heldText(guard) {
+  return refusalText({ securing: guard.securing(), lockFailed: guard.lockFailed(), unavailable: guard.unavailable() });
+}
+
+/**
+ * A message from the agent: `{ forward }` to pass it on, `{ reply }` to answer it here, or
+ * `{ drop: true }` to discard it. With `ownerControl` (signed-in runs, whenever the takeover guard is
+ * held: the owner holds control in the viewer, or release is not confirmed) every tool call is
+ * answered with a refusal (OWNER_CONTROL_TEXT, SECURING_TEXT, LOCK_FAILED_TEXT or UNAVAILABLE_TEXT)
+ * instead of reaching the browser. Other messages (initialize, tools/list) do not touch the browser
+ * and pass.
+ */
+export function filterClientLine(line, { ownerControl = false, securing = false, lockFailed = false, unavailable = false, signedIn = false } = {}) {
   const message = parseObject(line);
   if (!message) return { drop: true };
   if (ownerControl && message.method === "tools/call") {
     if (message.id === undefined || message.id === null) return { drop: true };
-    return {
-      reply: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: lockFailed ? LOCK_FAILED_TEXT : securing ? SECURING_TEXT : OWNER_CONTROL_TEXT }], isError: true } }),
-    };
+    const text = refusalText({ securing, lockFailed, unavailable });
+    return { reply: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text }], isError: true } }) };
   }
   if (message.method === "tools/call" && !toolAllowed(message.params?.name, signedIn)) {
     if (message.id === undefined || message.id === null) return { drop: true };
@@ -163,59 +182,68 @@ export function lineSplitter(onLine) {
 }
 
 /**
- * The owner's takeover state as the run sees it. Polled results carry a sequence number; older ones
- * are ignored. The relay's `ownerControl` decides (it already counts "unsure while a viewer is
- * connected" as held, and never holds without a viewer). After
- * a failed poll the state stays held while the last held state is younger than `holdMs`, and opens
- * only after `failuresToOpen` failed polls in a row (when the relay cannot be asked at all, no viewer
- * can hold control either: the relay is the viewer's only way in). With Bitwarden in the browser
- * `failuresToOpen` is infinite: a failed poll keeps the state, and it never opens on failures alone
- * (the relay is also what says the vault was locked after a takeover).
+ * The owner's takeover state as a signed-in run sees it. It fails closed: tools are paused (held)
+ * until a valid relay status confirms release, and paused again as soon as that confirmation is
+ * missing.
+ *
+ * - It starts held: nothing reaches the browser before the first valid status.
+ * - A status is valid only when the body is a JSON object whose `ownerControl` is a boolean.
+ *   `ownerControl: false` (strictly) releases; `true` holds; anything else (missing, not a boolean,
+ *   not an object) holds, as unknown.
+ * - A failed poll (relay unreachable, timeout, an error status, a body that is not JSON) holds. There
+ *   is no number of failures after which it opens.
+ * - A release is only good for `maxAgeMs` after it arrived: without a newer valid release it counts
+ *   as unavailable and holds (`held()` checks the age on every call, also between polls).
+ * - Results carry a sequence number from `next()`; a result or failure older than the last applied
+ *   one is ignored, so a slow poll cannot overwrite a newer state.
  */
-export function createControlGuard({ now = Date.now, holdMs = 10_000, failuresToOpen = 3 } = {}) {
-  let held = false;
+export function createControlGuard({ now = Date.now, maxAgeMs = 3000 } = {}) {
+  let releasedAt = -Infinity;
+  let released = false;
   let securing = false;
   let lockFailed = false;
-  let lastHeldAt = -Infinity;
-  let failures = 0;
+  /** Paused because no valid status is at hand (none yet, a failed poll, an invalid body). */
+  let unavailable = true;
   let issued = 0;
   let applied = 0;
+  const fresh = () => released && now() - releasedAt <= maxAgeMs;
   return {
     /** Sequence number for the next poll. */
     next: () => ++issued,
     result(seq, body) {
-      if (seq <= applied) return;
+      if (!Number.isSafeInteger(seq) || seq <= applied) return;
       applied = seq;
-      failures = 0;
-      // The relay decides (held only while a viewer is connected and holds control or it is unsure);
-      // `known` is informational.
-      held = body?.ownerControl === true;
-      securing = held && body?.securing === true;
-      lockFailed = held && body?.lockFailed === true;
-      if (held) lastHeldAt = now();
+      const valid = body !== null && typeof body === "object" && !Array.isArray(body) && typeof body.ownerControl === "boolean";
+      unavailable = !valid;
+      released = valid && body.ownerControl === false;
+      releasedAt = released ? now() : -Infinity;
+      securing = valid && !released && body.securing === true;
+      lockFailed = valid && !released && body.lockFailed === true;
     },
     failure(seq) {
-      if (seq <= applied) return;
+      if (!Number.isSafeInteger(seq) || seq <= applied) return;
       applied = seq;
-      failures++;
+      unavailable = true;
+      released = false;
+      releasedAt = -Infinity;
       securing = false;
       lockFailed = false;
-      if (now() - lastHeldAt < holdMs) held = true;
-      else if (failures >= failuresToOpen) held = false;
-      else if (!Number.isFinite(failuresToOpen)) held = true;
     },
-    held: () => held,
+    /** Whether tool calls are paused: true unless a valid, recent status said `ownerControl: false`. */
+    held: () => !fresh(),
     /** Held only because the vault is being locked (nobody holds control). */
-    securing: () => securing,
+    securing: () => !fresh() && securing,
     /** Held because the vault could not be locked: the owner has to act. */
-    lockFailed: () => lockFailed,
+    lockFailed: () => !fresh() && lockFailed,
+    /** Held because the takeover state cannot be confirmed (no status yet, a failed poll, an invalid or stale one). */
+    unavailable: () => !fresh() && (unavailable || released),
   };
 }
 
 /**
- * Tool calls on their way through Playwright MCP. A result that arrives while the owner holds
- * control, or whose call overlapped a held period, is replaced with OWNER_CONTROL_TEXT, so a call
- * that started before a takeover cannot hand back what the owner typed.
+ * Tool calls on their way through Playwright MCP. A result that arrives while the guard is held, or
+ * whose call overlapped a held period, is replaced with a refusal (OWNER_CONTROL_TEXT, or `text`),
+ * so a call that started before a takeover cannot hand back what the owner typed.
  */
 export function createCallTracker() {
   /** JSON of the request id -> whether the owner held control while it ran */
@@ -228,7 +256,7 @@ export function createCallTracker() {
     markHeld() {
       for (const key of pending.keys()) pending.set(key, true);
     },
-    finish(line, heldNow) {
+    finish(line, heldNow, text = OWNER_CONTROL_TEXT) {
       const message = parseObject(line);
       if (!message || message.id === undefined || message.id === null || message.method) return line;
       const key = JSON.stringify(message.id);
@@ -236,8 +264,61 @@ export function createCallTracker() {
       const during = pending.get(key);
       pending.delete(key);
       if (!heldNow && !during) return line;
-      return JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: OWNER_CONTROL_TEXT }], isError: true } });
+      return JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text }], isError: true } });
     },
     size: () => pending.size,
+  };
+}
+
+/**
+ * One poll of the relay's takeover state into `guard` (signed-in runs; never two at once: a call
+ * while one runs does nothing). A response that is not 2xx, not JSON, or not a valid status, a
+ * timeout or an unreachable relay all count as a failed poll: held. `fetchImpl` and `log` are for tests.
+ */
+export function createControlPoller({ guard, calls, url, fetchImpl = fetch, timeoutMs = 1500, log = () => {} }) {
+  let polling = false;
+  let warned = false;
+  return async function poll() {
+    if (polling) return;
+    polling = true;
+    const seq = guard.next();
+    try {
+      const response = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
+      if (!response.ok) throw new Error(`status ${response.status}`);
+      guard.result(seq, await response.json());
+      if (guard.unavailable()) throw new Error("not a valid takeover state");
+      warned = false;
+    } catch {
+      guard.failure(seq);
+      if (!warned) log("could not read a valid takeover state from the relay; browser tools are paused");
+      warned = true;
+    } finally {
+      polling = false;
+      if (guard.held()) calls.markHeld();
+    }
+  };
+}
+
+/**
+ * The stdio filter of one run, both directions. `guard` is the signed-in run's takeover guard (null
+ * for the clean Server browser, which no owner can take over). `client(line)` returns
+ * filterClientLine's verdict; a forwarded tool call is tracked. `server(line)` returns the line to
+ * pass on or null; a tool result that arrives while held, or whose call overlapped a held period, is
+ * replaced with the refusal for the guard's state.
+ */
+export function createRunFilter({ signedIn = false, guard = null, calls = createCallTracker() } = {}) {
+  if (signedIn && !guard) throw new Error("a signed-in run needs the takeover guard");
+  const state = () => (guard ? { ownerControl: guard.held(), securing: guard.securing(), lockFailed: guard.lockFailed(), unavailable: guard.unavailable() } : { ownerControl: false });
+  return {
+    client(line) {
+      const verdict = filterClientLine(line, { ...state(), signedIn });
+      if ("forward" in verdict && guard) calls.started(verdict.forward);
+      return verdict;
+    },
+    server(line) {
+      const kept = filterServerLine(line, { signedIn });
+      if (kept === null || !guard) return kept;
+      return calls.finish(kept, guard.held(), heldText(guard));
+    },
   };
 }

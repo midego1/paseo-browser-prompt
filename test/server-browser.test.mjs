@@ -371,8 +371,10 @@ test("the entrypoint: headless, isolated, Chromium sandbox on, only the sidecar 
   assert.match(entry, /acceptDownloads: false/);
   assert.match(entry, /const work = "\/tmp\/browser-prompt";/, "output only under the container's tmpfs");
   assert.match(entry, /stdio: \["pipe", "pipe", "inherit"\]/, "both MCP directions go through the filter");
-  assert.match(entry, /filterClientLine\(line, \{ ownerControl: guard\.held\(\), securing: guard\.securing\(\), lockFailed: guard\.lockFailed\(\), signedIn \}\)/);
-  assert.match(entry, /filterServerLine\(line, \{ signedIn \}\)/);
+  assert.match(entry, /const filter = createRunFilter\(\{ signedIn, guard, calls \}\);/);
+  assert.match(entry, /const verdict = filter\.client\(line\);/);
+  assert.match(entry, /const kept = filter\.server\(line\);/);
+  assert.match(entry, /const guard = signedIn \? createControlGuard\(\{ maxAgeMs: 3000 \}\) : null;/, "the clean Server browser has no takeover guard");
   assert.match(entry, /BP_IDLE_TIMEOUT_S/);
   assert.doesNotMatch(entry, /console\.log/, "stdout stays JSON-RPC");
   const main = readFileSync(new URL("../server-browser/proxy-main.mjs", import.meta.url), "utf8");

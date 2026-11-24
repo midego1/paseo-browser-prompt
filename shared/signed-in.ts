@@ -616,8 +616,6 @@ export interface SignedInAgentInput {
   agentId: string;
   nonce: string;
   blockedIps: readonly string[];
-  /** Bitwarden in the browser: the run's takeover guard never opens when the relay cannot be asked. */
-  failClosed?: boolean;
 }
 
 /** `bp-sa-<agent id>-<nonce>`. */
@@ -693,7 +691,6 @@ export function signedInAgentArgs(input: SignedInAgentInput): string[] {
     `BP_CDP_ENDPOINT=${SIGNED_IN_CDP_ENDPOINT}`,
     "--env",
     `BP_CONTROL_URL=${controlUrl(input.stackId)}`,
-    ...(input.failClosed ? ["--env", "BP_CONTROL_FAIL_CLOSED=1"] : []),
     "--env",
     `BP_BLOCKED_IPS=${ips.join(",")}`,
     "--env",

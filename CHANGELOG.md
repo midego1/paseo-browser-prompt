@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.24.2 (unreleased)
+
+Plugin registry review of 0.24.1: the signed-in browser's takeover guard now fails closed.
+
+- **Tools start paused and open only on a confirmed release.** The run's takeover guard
+  (`createControlGuard`) used to start open and treat a missing `ownerControl` as release; without
+  Bitwarden it also opened after 3 failed reads. Now, for every signed-in run (with or without
+  Bitwarden): the guard starts held; only a 2xx relay status whose JSON body is an object with
+  `ownerControl` strictly `false` releases; a missing or non-boolean `ownerControl`, a non-object
+  body, a non-2xx status, a timeout or an unreachable relay holds (unknown = paused); one failed or
+  invalid read after a release holds again, and no number of failures opens it; a release older than
+  3 seconds without a newer one holds (checked at every call and result, also between polls); older
+  results are still ignored by sequence number. The first read finishes before Playwright MCP starts
+  and before any agent message is read. A call while held is refused; while the state is unavailable
+  the agent is told to wait about 5 seconds and try again. `BP_CONTROL_FAIL_CLOSED` is gone (it is
+  always fail closed), and the signed-in MCP container and its launcher refuse to start without the
+  relay's takeover address. The relay's `GET /control` already returns an explicit boolean
+  `ownerControl`. The clean Server browser has no takeover guard and is unchanged.
+- The poll and both directions of the stdio filter moved into `mcp-filter.mjs`
+  (`createControlPoller`, `createRunFilter`) and have behavioural tests.
+- **A failed signed-in setup gives back what it replaced.** When the MCP server setup of a signed-in
+  run fails after its claim, the admission and starting window the claim replaced (an earlier session
+  of the same run) are restored instead of dropped; with none to restore, its starting entry goes as
+  well, so the browser is no longer reported busy for up to 2 minutes.
+
 ## 0.24.1 (unreleased)
 
 Follow-ups from the review of the redesigned card (0.24.0).
