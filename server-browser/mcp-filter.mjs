@@ -44,9 +44,8 @@ export const SIGNED_IN_ALLOWED_TOOLS = new Set([...ALLOWED_TOOLS].filter((name) 
 
 export const DENIED_TEXT = "This tool is turned off in the browser-prompt Server browser.";
 
-/** What a tool call that names a chrome-extension:// page gets (a password manager's pages are never the agent's). */
-export const EXTENSION_URL_TEXT =
-  "Browser extension pages (chrome-extension://) are not available in the browser-prompt Server browser. Never open or use the password manager: ask the owner to take over for logins and passkeys.";
+/** What a tool call that names a chrome-extension:// page gets (extension pages are never the agent's). */
+export const EXTENSION_URL_TEXT = "Browser extension pages (chrome-extension://) are not available in the browser-prompt Server browser.";
 
 /** Whether any string in a tool call's arguments names an extension page (chrome-extension:, also percent-encoded). */
 export function namesExtensionPage(args) {
@@ -92,22 +91,15 @@ function parseObject(line) {
 
 /** What a signed-in run's tool call gets while the owner holds control of the browser (Take over). */
 export const OWNER_CONTROL_TEXT =
-  "The owner has taken over the signed-in browser and holds control right now (or the takeover just ended and the browser is being secured for a few seconds), so browser tools are paused (no reading and no actions). Do not retry in a loop: ask the owner with AskUserQuestion to answer \"done\" when they are finished and have released control (tap the mouse icon again or close the viewer), then take a new snapshot and continue.";
+  "The owner has taken over the signed-in browser and holds control right now, so browser tools are paused (no reading and no actions). Do not retry in a loop: ask the owner with AskUserQuestion to answer \"done\" when they are finished and have released control (tap the mouse icon again or close the viewer), then take a new snapshot and continue.";
 
-/** What a tool call gets while the vault is being locked after a takeover or a start (nobody holds control). */
-export const SECURING_TEXT =
-  "The signed-in browser is being secured right now (its password manager is being locked after a takeover or a start); this takes a few seconds. Wait about 5 seconds and try the same call again. Do not ask the owner about it unless it still fails after a minute.";
-
-/** What a tool call gets when the vault could not be locked after a takeover: only the owner can fix it. */
-export const LOCK_FAILED_TEXT =
-  "The signed-in browser stays paused for safety: its password manager (Bitwarden) could not be locked after the takeover. Only the owner can fix this. Ask the owner with AskUserQuestion to press Lock Bitwarden now or Restart browser on the card (or in the plugin settings), and to check Bitwarden's vault timeout (not Never), then answer \"done\". Wait for that answer and try again; do not retry in a loop.";
 
 /**
  * What a tool call gets while the takeover state cannot be confirmed: before the first status from
  * the relay, after a failed poll, or when the last status is invalid or too old (fail closed).
  */
 export const UNAVAILABLE_TEXT =
-  "The signed-in browser is paused for safety: the plugin cannot confirm right now that the owner is not holding control of it (the takeover state is still being checked, or the browser's relay does not answer). Browser tools stay paused until that is confirmed. Wait about 5 seconds and try the same call again. Do not retry in a tight loop; if it still fails after a minute, ask the owner with AskUserQuestion to press Restart browser on the card (or in the plugin settings) and answer \"done\".";
+  "The signed-in browser is paused for safety: the plugin cannot confirm right now that the owner is not holding control of it (the takeover state is still being checked, or the browser's relay does not answer). Browser tools stay paused until that is confirmed. Wait about 5 seconds and try the same call again. Do not retry in a tight loop; if it still fails after a minute, ask the owner with AskUserQuestion to press Restart browser in the plugin settings (Signed-in Server browser) and answer \"done\".";
 
 /**
  * What a tool call's result is replaced with when the takeover state could not be confirmed while
@@ -117,29 +109,29 @@ export const UNCONFIRMED_TEXT =
   "The browser status could not be confirmed while this call ran, so its result is withheld. The call may have been carried out: take a snapshot before you repeat it.";
 
 /** The refusal for a tool call while the guard is held, by why it is held. */
-function refusalText({ securing = false, lockFailed = false, unavailable = false } = {}) {
-  return lockFailed ? LOCK_FAILED_TEXT : securing ? SECURING_TEXT : unavailable ? UNAVAILABLE_TEXT : OWNER_CONTROL_TEXT;
+function refusalText({ unavailable = false } = {}) {
+  return unavailable ? UNAVAILABLE_TEXT : OWNER_CONTROL_TEXT;
 }
 
 /** The refusal that fits a guard's current state (see createControlGuard). */
 export function heldText(guard) {
-  return refusalText({ securing: guard.securing(), lockFailed: guard.lockFailed(), unavailable: guard.unavailable() });
+  return refusalText({ unavailable: guard.unavailable() });
 }
 
 /**
  * A message from the agent: `{ forward }` to pass it on, `{ reply }` to answer it here, or
  * `{ drop: true }` to discard it. With `ownerControl` (signed-in runs, whenever the takeover guard is
  * held: the owner holds control in the viewer, or release is not confirmed) every tool call is
- * answered with a refusal (OWNER_CONTROL_TEXT, SECURING_TEXT, LOCK_FAILED_TEXT or UNAVAILABLE_TEXT)
+ * answered with a refusal (OWNER_CONTROL_TEXT or UNAVAILABLE_TEXT)
  * instead of reaching the browser. Other messages (initialize, tools/list) do not touch the browser
  * and pass.
  */
-export function filterClientLine(line, { ownerControl = false, securing = false, lockFailed = false, unavailable = false, signedIn = false } = {}) {
+export function filterClientLine(line, { ownerControl = false, unavailable = false, signedIn = false } = {}) {
   const message = parseObject(line);
   if (!message) return { drop: true };
   if (ownerControl && message.method === "tools/call") {
     if (message.id === undefined || message.id === null) return { drop: true };
-    const text = refusalText({ securing, lockFailed, unavailable });
+    const text = refusalText({ unavailable });
     return { reply: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text }], isError: true } }) };
   }
   if (message.method === "tools/call" && !toolAllowed(message.params?.name, signedIn)) {
@@ -263,10 +255,10 @@ function parseStatus(body, askedAt) {
   const bootId = typeof body.bootId === "string" && /^[0-9a-f]{1,64}$/.test(body.bootId) ? body.bootId : null;
   const epoch = Number.isSafeInteger(body.epoch) && body.epoch >= 0 ? body.epoch : null;
   // Held with `known: false`: the relay could not read neko (a viewer is connected), not a takeover it saw.
-  if (body.ownerControl) return { ownerControl: true, unsure: body.known === false, securing: body.securing === true, lockFailed: body.lockFailed === true, bootId, epoch, sampledAt: askedAt };
+  if (body.ownerControl) return { ownerControl: true, unsure: body.known === false, bootId, epoch, sampledAt: askedAt };
   const ago = body.sampledAgoMs;
   if (bootId === null || epoch === null || typeof ago !== "number" || !Number.isFinite(ago) || ago < 0) return null;
-  return { ownerControl: false, securing: false, lockFailed: false, bootId, epoch, sampledAt: askedAt - ago };
+  return { ownerControl: false, bootId, epoch, sampledAt: askedAt - ago };
 }
 
 /**
@@ -308,8 +300,7 @@ export function createControlGuard({ now = () => performance.now(), maxAgeMs = C
     applied = seq;
     return at;
   };
-  const reason = () =>
-    fresh() ? "released" : !status?.ownerControl ? "unavailable" : status.lockFailed ? "lockFailed" : status.securing ? "securing" : status.unsure ? "unavailable" : "owner";
+  const reason = () => (fresh() ? "released" : !status?.ownerControl || status.unsure ? "unavailable" : "owner");
   return {
     /** Sequence number for the next poll (its start time is kept for the release's age). */
     next() {
@@ -329,12 +320,8 @@ export function createControlGuard({ now = () => performance.now(), maxAgeMs = C
     },
     /** Whether tool calls are paused: true unless a valid, recent status said `ownerControl: false`. */
     held: () => !fresh(),
-    /** Why: "released", "owner" (holds control), "securing" (vault being locked), "lockFailed", or "unavailable" (no valid, recent status). */
+    /** Why: "released", "owner" (holds control), or "unavailable" (no valid, recent status). */
     reason,
-    /** Held only because the vault is being locked (nobody holds control). */
-    securing: () => reason() === "securing",
-    /** Held because the vault could not be locked: the owner has to act. */
-    lockFailed: () => reason() === "lockFailed",
     /** Held because the takeover state cannot be confirmed (no status yet, a failed poll, an invalid or stale one). */
     unavailable: () => reason() === "unavailable",
     /** The relay start and control epoch of the current release, or null while held. */
@@ -343,8 +330,8 @@ export function createControlGuard({ now = () => performance.now(), maxAgeMs = C
 }
 
 /** How bad what happened while a call ran is: its result is passed, or replaced by the text. */
-const MARK = Object.freeze({ none: 0, unconfirmed: 1, owner: 2, lockFailed: 3 });
-const MARK_TEXT = [null, UNCONFIRMED_TEXT, OWNER_CONTROL_TEXT, LOCK_FAILED_TEXT];
+const MARK = Object.freeze({ none: 0, unconfirmed: 1, owner: 2 });
+const MARK_TEXT = [null, UNCONFIRMED_TEXT, OWNER_CONTROL_TEXT];
 
 /** What a request gets when Playwright MCP does not answer it within the maximum call time. */
 export const NO_ANSWER_TEXT =
@@ -363,9 +350,8 @@ export function validRequestId(id) {
  * it ran (`sync`, after every poll and before every decision). Its result passes only when nothing
  * was seen; otherwise it is withheld, never released later:
  *
- * - The owner held control or the vault was being locked (a real `ownerControl: true`), or the
- *   epoch moved between two good polls (a takeover, a viewer, a control request): OWNER_CONTROL_TEXT.
- * - The vault could not be locked: LOCK_FAILED_TEXT.
+ * - The owner held control (a real `ownerControl: true`), or the epoch moved between two good
+ *   polls (a takeover, a viewer, a control request): OWNER_CONTROL_TEXT.
  * - The status was unavailable (a failed, invalid or stale poll) or the relay started again while it
  *   ran: UNCONFIRMED_TEXT. A later release does not prove that nobody took over meanwhile.
  *
@@ -420,8 +406,7 @@ export function createCallTracker({ now = () => performance.now(), maxPending = 
       const confirm = guard.confirmation();
       for (const entry of pending.values()) {
         if (!entry.call) continue;
-        if (reason === "owner" || reason === "securing") raise(entry, MARK.owner);
-        else if (reason === "lockFailed") raise(entry, MARK.lockFailed);
+        if (reason === "owner") raise(entry, MARK.owner);
         else if (reason === "unavailable") raise(entry, MARK.unconfirmed);
         else if (!entry.confirm || !confirm || confirm.bootId !== entry.confirm.bootId) raise(entry, MARK.unconfirmed);
         else if (confirm.epoch !== entry.confirm.epoch) raise(entry, MARK.owner);
@@ -523,7 +508,7 @@ const rpcError = (id, code, message) => ({ reply: JSON.stringify({ jsonrpc: "2.0
 export function createRunFilter({ signedIn = false, guard = null, now = () => performance.now(), emit = () => {}, log = () => {}, maxCallMs, retireMs } = {}) {
   if (signedIn && !guard) throw new Error("a signed-in run needs the takeover guard");
   const calls = guard ? createCallTracker({ now, emit, ...(maxCallMs ? { maxCallMs } : {}), ...(retireMs ? { retireMs } : {}) }) : null;
-  const state = () => (guard ? { ownerControl: guard.held(), securing: guard.securing(), lockFailed: guard.lockFailed(), unavailable: guard.unavailable() } : { ownerControl: false });
+  const state = () => (guard ? { ownerControl: guard.held(), unavailable: guard.unavailable() } : { ownerControl: false });
   return {
     calls,
     client(line) {

@@ -35,7 +35,9 @@
     "about:*",
     "javascript://*",
     "javascript:*",
-    "data:*"
+    "data:*",
+    "chromewebstore.google.com",
+    "chrome.google.com/webstore"
   ],
   "URLAllowlist": [
     "about:blank",
@@ -43,5 +45,12 @@
   ],
   "ExtensionInstallBlocklist": [
     "*"
-  ]
+  ],
+  "ExtensionInstallForcelist": [],
+  "ExtensionInstallSources": [],
+  "ExtensionAllowedTypes": [
+    "extension"
+  ],
+  "BlockExternalExtensions": true,
+  "ExtensionDeveloperModeSettings": 1
 }

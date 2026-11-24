@@ -46,119 +46,14 @@ export function signedInImageTag(contextHash: string): string {
 }
 
 /**
- * The Bitwarden Password Manager release the optional Bitwarden variant of the image installs
- * (signed-in-bitwarden/bitwarden.json holds the same pin; a test keeps them equal). Downloaded from
- * Bitwarden's GitHub releases at image build time, only after the owner's two-press consent, and
- * refused unless size and SHA-256 match (its files are the same as the Chrome Web Store build of
- * that version; only the store's update_url differs). The image packs it unchanged into a CRX signed
- * with this install's key (made once by the daemon, so the extension id stays the same across images
- * and pins) and force-installs it by policy from a local update manifest, so it is never updated
- * behind the pin.
+ * Migration only: whether an image tag is one of the Bitwarden variants of the signed-in image that
+ * plugin versions before 0.25.0 could build (`<signed-in tag>-bw<version>-<hash>`). Bitwarden was
+ * removed in 0.25.0: such an image is never handed to a new run, is replaced once no run holds it,
+ * and is removed (docker rmi, best effort).
  */
-export const BITWARDEN = {
-  version: "2026.11.0",
-  url: "https://github.com/bitwarden/clients/releases/download/browser-v2026.11.0/bit-dist-chrome-2026.11.0.zip",
-  sha256: "07cf19b8f79e649005fdeee67c85d3cf31c735449a01a37a5b9f0287732605a5",
-  size: 33_808_971,
-} as const;
-
-/** `<signed-in image tag>-bw<version>-<12 hex of the variant's build context hash>`, never `latest`. */
-export function bitwardenImageTag(baseTag: string, contextHash: string): string {
-  const hash = contextHash.toLowerCase().replace(/[^0-9a-f]/g, "").slice(0, 12);
-  if (hash.length < 12 || !baseTag.startsWith(`${SIGNED_IN_IMAGE_REPOSITORY}:`)) throw new Error("The Bitwarden image tag needs the signed-in image and a build context hash.");
-  return `${baseTag}-bw${BITWARDEN.version}-${hash}`;
-}
-
-/**
- * Whether an image tag is a Bitwarden variant of the signed-in image (any pin, any install key, any
- * plugin version): used to fail closed (lock on release, the run's guard) whenever such an image
- * runs, also one this daemon would not build now (an older version still running after an update).
- */
-export function isBitwardenImageTag(tag: string): boolean {
+export function isLegacyBitwardenImageTag(tag: string): boolean {
   return tag.startsWith(`${SIGNED_IN_IMAGE_REPOSITORY}:`) && /-bw\d/.test(tag.slice(SIGNED_IN_IMAGE_REPOSITORY.length + 1));
 }
-
-/** Lock attempts (lock, then reload) before the daemon restarts Chromium to clear every in-memory key. */
-export const BITWARDEN_LOCK_ATTEMPTS = 3;
-export const BITWARDEN_TOOL_MODES = ["status", "lock", "reload", "restart", "cleanup"] as const;
-export type BitwardenToolMode = (typeof BITWARDEN_TOOL_MODES)[number];
-const EXTENSION_ID = /^[a-p]{32}$/;
-export const BITWARDEN_TOOL_LIMITS = { memory: "256m", cpus: "0.5", pids: 64, tmpfs: "16m" } as const;
-
-/**
- * `docker run` for the daemon's Bitwarden tool (server-browser/bitwarden-lock.mjs): a short-lived
- * container in neko's network namespace with its own DevTools connection to Chromium (never the
- * agent's filter), every capability dropped, no new privileges, read-only root, an unprivileged
- * user, limits, no log, never pulls. It locks Bitwarden and verifies the lock, restarts Chromium, or
- * clears the storage of Bitwarden builds no longer installed. `ids`: the installed build's id
- * (status, lock, reload) or the old ones (cleanup).
- */
-export function bitwardenToolArgs(input: { stackId: string; instance: string; serverImage: string }, mode: BitwardenToolMode, ids: readonly string[]): string[] {
-  checkServerImage(input.serverImage);
-  if (!BITWARDEN_TOOL_MODES.includes(mode)) throw new Error("Unexpected Bitwarden tool mode.");
-  if (ids.some((id) => !EXTENSION_ID.test(id))) throw new Error("Unexpected extension id.");
-  const names = stackNames(input.stackId);
-  return [
-    "run",
-    "--rm",
-    "--init",
-    "--pull",
-    "never",
-    ...stackLabels(input, "bitwarden-tool"),
-    "--network",
-    `container:${names.neko}`,
-    "--cap-drop",
-    "ALL",
-    "--security-opt",
-    "no-new-privileges",
-    "--read-only",
-    "--tmpfs",
-    `/tmp:rw,nosuid,nodev,size=${BITWARDEN_TOOL_LIMITS.tmpfs}`,
-    "--memory",
-    BITWARDEN_TOOL_LIMITS.memory,
-    "--memory-swap",
-    BITWARDEN_TOOL_LIMITS.memory,
-    "--cpus",
-    BITWARDEN_TOOL_LIMITS.cpus,
-    "--pids-limit",
-    String(BITWARDEN_TOOL_LIMITS.pids),
-    "--user",
-    "pwuser",
-    "--log-driver",
-    "none",
-    "--entrypoint",
-    "node",
-    input.serverImage,
-    "/opt/browser-prompt/bitwarden-lock.mjs",
-    mode,
-    ...ids,
-  ];
-}
-
-/** The tool's one JSON line, or null. */
-export function parseBitwardenTool(stdout: string): { locked: boolean; detail: string; statuses?: { status: number }[] | null; cleared?: string[]; reloaded?: boolean } | null {
-  const line = stdout.trim().split("\n").at(-1) ?? "";
-  try {
-    const value = JSON.parse(line);
-    return value && typeof value === "object" ? { ...value, locked: value.locked === true, detail: typeof value.detail === "string" ? value.detail : "" } : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Bitwarden's pin record in the variant image (/opt/bitwarden/browser-prompt-pin.json): the installed build's id, or null. */
-export function bitwardenIdFromPin(text: string): string | null {
-  try {
-    const id = JSON.parse(text)?.id;
-    return typeof id === "string" && EXTENSION_ID.test(id) ? id : null;
-  } catch {
-    return null;
-  }
-}
-
-/** The Bitwarden option's state: off, or why it is not in the browser yet. */
-export const BITWARDEN_STATES = ["off", "needs-browser", "no-image", "building", "build-failed", "ready"] as const;
-export type BitwardenState = (typeof BITWARDEN_STATES)[number];
 
 /** Label on every resource of the signed-in stack; its value is the role. Never swept by launcher pid. */
 export const STACK_LABEL = "browser-prompt.signed-in";
@@ -239,8 +134,6 @@ export interface StackInput {
   port: number;
   /** Origins the viewer is opened from (http://<bind>:<port>, and the optional https base). */
   origins: readonly string[];
-  /** neko runs the Bitwarden variant: the relay then keeps the run paused after a takeover until the vault is locked. */
-  bitwarden?: boolean;
 }
 
 const IP_TEXT = /^[0-9A-Fa-f:.]{2,45}$/;
@@ -522,7 +415,6 @@ export function stackRelayArgs(input: StackInput, secrets: StackSecrets): string
     `BP_CONTROL_SUBNET=${STACK_SUBNET_PLACEHOLDER}`,
     "--env",
     `BP_MAX_LIFETIME_S=${STACK_MAX_LIFETIME_S}`,
-    ...(input.bitwarden ? ["--env", "BP_LOCK_ON_RELEASE=1"] : []),
     "--log-driver",
     "none",
     "--stop-timeout",

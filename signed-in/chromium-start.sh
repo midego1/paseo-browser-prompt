@@ -4,16 +4,14 @@
 # sends every request through the filtering proxy sidecar (BP_PROXY), loopback included, so pages
 # can reach neither this container's own services (neko, the DevTools port) nor private, tailnet or
 # host addresses. Without a valid BP_PROXY it does not start Chromium at all.
-# Bitwarden (only in the image variant built after the owner's consent, see signed-in-bitwarden/):
-# the variant force-installs it by policy, with this install's extension id (the daemon's signing
-# key, kept across images and pins). This script records the ids of the Bitwarden builds the profile
-# has seen (.bp-bitwarden-ids) and, on every start, removes what is left of every one not installed
-# now: all of them when Bitwarden is off, an old one after the id changed (data directories, the
-# shared extension databases, preference entries). (Chromium
-# itself uninstalls a force-installed extension once the policy no longer names it, and the plugin
-# clears the extension origins' storage through DevTools after the start.)
+# Migration from before 0.25.0, when the plugin could put Bitwarden into this browser (an image
+# variant, removed in 0.25.0; no extension can be installed now, see policies.json): the profile
+# recorded the ids of the Bitwarden builds it had seen (.bp-bitwarden-ids). While that file exists,
+# every start removes what those builds left (their extension data directories, IndexedDB and file
+# system entries, Chromium's shared extension databases, their preference entries), then forgets
+# every id nothing in the profile names any more, and the file with the last one. Site logins and
+# cookies are never touched.
 PROFILE=/home/neko/.config/chromium
-PIN=/opt/bitwarden/browser-prompt-pin.json
 IDS="$PROFILE/.bp-bitwarden-ids"
 DBS="$PROFILE/.bp-bitwarden-dbs-cleared"
 # The first 0.23.0 builds loaded Bitwarden with its store id: a stale build where it left traces.
@@ -24,24 +22,12 @@ if ! printf '%s' "${BP_PROXY:-}" | grep -Eq '^http://(bp-si-[0-9a-f]{8}-proxy|[0
   sleep 10
   exit 1
 fi
-CURRENT=""
-if [ -f "$PIN" ]; then
-  CURRENT=$(grep -oE '"id": *"[a-p]{32}"' "$PIN" | grep -oE '[a-p]{32}')
-  if [ -n "$CURRENT" ] && ! grep -qx "$CURRENT" "$IDS" 2>/dev/null; then printf '%s\n' "$CURRENT" >> "$IDS"; fi
-  # The installed build is not stale: forget that its shared databases were cleared once, so they are
-  # cleared again if it ever becomes stale later (turned off, a new id).
-  if [ -n "$CURRENT" ] && grep -qx "$CURRENT" "$DBS" 2>/dev/null; then
-    { grep -vx "$CURRENT" "$DBS" || true; } > "$DBS.bp-tmp" && mv -f "$DBS.bp-tmp" "$DBS"
-  fi
-fi
-if [ "$LEGACY_ID" != "$CURRENT" ] && ! grep -qx "$LEGACY_ID" "$IDS" 2>/dev/null; then
+if ! grep -qx "$LEGACY_ID" "$IDS" 2>/dev/null; then
   if [ -e "$PROFILE/Default/Local Extension Settings/$LEGACY_ID" ] || grep -q "$LEGACY_ID" "$PROFILE/Default/Preferences" 2>/dev/null; then printf '%s\n' "$LEGACY_ID" >> "$IDS"; fi
 fi
 if [ -f "$IDS" ]; then
-  STALE=""
-  for id in $(grep -xE '[a-p]{32}' "$IDS"); do
-    [ "$id" = "$CURRENT" ] && continue
-    STALE="$STALE $id"
+  STALE=$(grep -xE '[a-p]{32}' "$IDS" | sort -u)
+  for id in $STALE; do
     for dir in "$PROFILE"/Default "$PROFILE"/Profile*; do
       [ -d "$dir" ] || continue
       rm -rf "$dir/Local Extension Settings/$id" "$dir/Sync Extension Settings/$id" "$dir/Managed Extension Settings/$id" \
@@ -49,16 +35,12 @@ if [ -f "$IDS" ]; then
         "$dir/IndexedDB/chrome-extension_${id}_0.indexeddb.blob" "$dir/File System/chrome-extension_${id}_0"
     done
   done
-  # Chromium's shared extension databases (state, rules, dynamic scripts) are keyed by extension id;
-  # Bitwarden is the only extension besides Chromium's own components, which rebuild their entries.
-  # Only on the first start after a build became stale (not on every start).
-  NEW_STALE=""
-  for id in $STALE; do grep -qx "$id" "$DBS" 2>/dev/null || NEW_STALE="$NEW_STALE $id"; done
-  if [ -n "$NEW_STALE" ]; then
+  if [ -n "$STALE" ]; then
+    # Chromium's shared extension databases (state, rules, dynamic scripts) are keyed by extension id;
+    # no extension may be installed any more, and Chromium's own components rebuild their entries.
     for dir in "$PROFILE"/Default "$PROFILE"/Profile*; do
       [ -d "$dir" ] && rm -rf "$dir/Extension State" "$dir/Extension Rules" "$dir/Extension Scripts"
     done
-    for id in $NEW_STALE; do printf '%s\n' "$id" >> "$DBS"; done
   fi
   # Their entries in Chromium's preferences (settings, uninstall records, shortcuts, MACs), before Chromium reads them.
   if [ -n "$STALE" ] && command -v python3 >/dev/null 2>&1; then
@@ -93,6 +75,16 @@ for root, dirs, files in os.walk(sys.argv[1]):
                 json.dump(cleaned, out)
             os.replace(path + ".bp-tmp", path)
 ' "$PROFILE" $STALE || true
+  fi
+  # Forget an id once nothing in the profile names it (a file name, or the preferences); the file goes with the last one.
+  KEEP=""
+  for id in $STALE; do
+    if [ -n "$(find "$PROFILE" -name "*$id*" 2>/dev/null | head -1)" ] || grep -qs "$id" "$PROFILE"/*/Preferences "$PROFILE"/*/"Secure Preferences"; then KEEP="$KEEP $id"; fi
+  done
+  if [ -n "$KEEP" ]; then
+    printf '%s\n' $KEEP > "$IDS.bp-tmp" && mv -f "$IDS.bp-tmp" "$IDS"
+  else
+    rm -f "$IDS" "$DBS"
   fi
 fi
 exec /usr/bin/chromium "$@" --proxy-server="$BP_PROXY" --proxy-bypass-list="<-loopback>"

@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.25.0 (unreleased)
+
+Bitwarden is removed from the signed-in Server browser. The signed-in browser itself (neko, Log in
+to sites, Take over, the fail-closed takeover guard of 0.24.2, the DevTools and MCP filters, the
+relay) stays as it was.
+
+### Removed: Bitwarden
+
+- **The Bitwarden image variant** (`signed-in-bitwarden/`: the pinned release, its install script,
+  the policy overlay), the `-bw` image tags, the per-install extension signing key and the BuildKit
+  secret that carried it.
+- **The settings:** the Bitwarden row, Download and enable / Download Bitwarden again, Turn Bitwarden
+  off, Apply the Bitwarden choice now, Lock Bitwarden now, the recommended Bitwarden settings and the
+  pin note; the `signed-in.bitwarden` RPC and the `bitwarden` part of `signed-in.status`.
+- **The vault lock:** the lock tool (`server-browser/bitwarden-lock.mjs`), the daemon's lock check,
+  lock now, lock on release, its back-off and browser-restart rules; the relay's lock mode
+  (`BP_LOCK_ON_RELEASE`, `lockPending`/`lockGeneration`/`lockFailed`, `POST /bp/locked` and
+  `/bp/lock-failed`); the run's "being secured" and "the owner has to act" states and texts. The
+  takeover guard now knows only released, owner and unavailable; it fails closed exactly as in
+  0.24.2 (starts held, only a valid fresh release opens, sequence order, epochs, bootId, withheld
+  results). A status from an older relay that still says `securing` or `lockFailed` holds as the
+  owner's control.
+- **The card's** Lock Bitwarden now / Restart browser panel and its Bitwarden takeover hint.
+- **Bitwarden-only filtering:** the DevTools filter's click, tap and keyboard checks on extension
+  frames, the take-away of a frame that turns into an extension page, and hiding extension
+  content-script worlds. Kept as generic hardening: extension targets stay hidden, navigation to
+  `chrome-extension://` pages and the whole `Extensions.*` domain stay refused, and the MCP filter
+  still refuses tool calls that name an extension page.
+- **The agent prompt's** password-manager paragraph, and the smoke test's Bitwarden checks.
+
+### Changed
+
+- **No extensions at all.** The signed-in image's policy now carries the hardening of the former
+  variant: every extension blocked (`ExtensionInstallBlocklist: ["*"]`), an empty force-install list,
+  no install sources, no external extensions, developer mode off, the Chrome Web Store blocked; and
+  `chrome-extension://*` stays blocked by URL.
+- **Restart the signed-in browser** in the settings is now a generic action (`signed-in.control`
+  `restart`: a graceful stop, logins kept, then a start); the "takeover state cannot be confirmed"
+  text points there.
+
+### Migration (automatic, fail safe)
+
+- **Settings:** stored `bitwarden` and `bitwardenConsent` values are ignored (the schema drops
+  unknown keys; no version bump, nothing breaks on an old document).
+- **A browser still on the Bitwarden image** is never handed to a new run or session (Run says the
+  browser is in use; a new session of a run gets none), and it starts again with the plain image as
+  soon as no run holds it, also with a viewer connected (logins kept). A run that held it through the
+  update finishes on it.
+- **A relay that still waits for a vault lock** (started before 0.25.0 with Bitwarden) would keep a
+  paused run waiting forever: the daemon starts that relay again without the lock, at its start and
+  at every idle check, once no viewer is connected (neko keeps running; the run's guard fails closed
+  across the relay restart as always).
+- **State directory:** the signing key (`signed-in/bitwarden-key.pem`, also a temp file of it) and
+  the variant's build contexts are deleted; the `browser-prompt-signed-in:*-bw*` images are removed
+  with `docker rmi` (no force: an image a container still uses stays until a later check). Best
+  effort, retried at every idle check until nothing is left; it never fails a start.
+- **Profile:** at the browser's next start its start script removes what every recorded Bitwarden
+  build (`.bp-bitwarden-ids`, plus the first 0.23.0 store id where it left traces) left in the
+  profile: extension data directories, IndexedDB and File System entries, the shared extension
+  databases and its preference entries. It then forgets every id nothing names any more and removes
+  `.bp-bitwarden-ids` and `.bp-bitwarden-dbs-cleared` with the last one. Site logins and cookies are
+  never touched. (The DevTools clearing of the extension origins' storage is gone with the lock tool;
+  Bitwarden's vault cache lives in Local Extension Settings, which the script removes.)
+
 ## 0.24.2 (unreleased)
 
 Plugin registry review of 0.24.1: the signed-in browser's takeover guard now fails closed.

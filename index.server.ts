@@ -12,8 +12,8 @@ import { createRunLocks, runLockKey } from "./shared/run-lock";
 import { acquireRunLock, finishRunLock } from "./shared/run-lock-rpc";
 import { prepareServerBrowserRun, serverBrowserStatus } from "./shared/server-browser-rpc";
 import { cardSettings, preferences, signedInSettings } from "./shared/settings";
-import { BITWARDEN, DEFAULT_SIGNED_IN_PORT, SIGNED_IN_STATE_MESSAGES, validateHttpsBase } from "./shared/signed-in";
-import { prepareSignedInRun, signedInBitwarden, signedInControl, signedInStatus, signedInViewerLink } from "./shared/signed-in-rpc";
+import { DEFAULT_SIGNED_IN_PORT, validateHttpsBase } from "./shared/signed-in";
+import { prepareSignedInRun, signedInControl, signedInStatus, signedInViewerLink } from "./shared/signed-in-rpc";
 import { chooseTrampolineHost } from "./shared/trampoline-host";
 import { getLauncherStatus, stashPrompt } from "./shared/trampoline";
 import { DEFAULT_TRAMPOLINE_PORT } from "./shared/trampoline-host";
@@ -95,8 +95,7 @@ export default function contribute(server: PluginServerContext) {
       bindHostCache = { at: Date.now(), configured, host };
       return host;
     },
-    // Unknown settings (not ready, invalid, a failed read) stay unknown (bitwarden undefined): the
-    // browser never switches images on a guess, so Bitwarden's data is removed only on an explicit off.
+    // Not ready, invalid or a failed read: the defaults (keys of earlier versions are ignored).
     config: async () => signedInConfigFrom(await signedInConfig.read().catch(() => null), { port: DEFAULT_SIGNED_IN_PORT, validHttpsBase: (base) => validateHttpsBase(base) === null }),
   });
   signedIn.startIdleChecks();
@@ -116,7 +115,6 @@ export default function contribute(server: PluginServerContext) {
         state: "unsupported" as const,
         image: signedIn.image,
         serverImage: serverBrowser.image,
-        bitwarden: { state: "off" as const, version: BITWARDEN.version, active: false, detail: "", lockPending: false, lastLock: null, updatePending: false },
         running: false,
         viewers: 0,
         busy: false,
@@ -138,19 +136,16 @@ export default function contribute(server: PluginServerContext) {
   server.handle(signedInControl, async ({ action }) => {
     try {
       if (action === "stop") await signedIn.stop();
+      else if (action === "restart") await signedIn.restart();
       else if (action === "logout") await signedIn.logout();
       else await signedIn.rotateKey();
-      const done = { stop: "Stopped the signed-in browser. Your logins are kept.", logout: "Logged out of everything: the signed-in browser's profile was removed.", "rotate-key": "New viewer key: earlier links and viewer sessions no longer work." } as const;
+      const done = {
+        stop: "Stopped the signed-in browser. Your logins are kept.",
+        restart: "Restarted the signed-in browser. Your logins are kept.",
+        logout: "Logged out of everything: the signed-in browser's profile was removed.",
+        "rotate-key": "New viewer key: earlier links and viewer sessions no longer work.",
+      } as const;
       return { ok: true, message: done[action] };
-    } catch (error) {
-      return { ok: false, message: error instanceof Error ? error.message : String(error) };
-    }
-  });
-
-  server.handle(signedInBitwarden, async ({ action }) => {
-    if (!serverBrowserHook.supported) return { ok: false, message: SIGNED_IN_STATE_MESSAGES.unsupported };
-    try {
-      return await signedIn.bitwarden(action);
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) };
     }

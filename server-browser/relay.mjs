@@ -20,10 +20,7 @@
 //   3. WebRTC over ICE-TCP: a plain TCP forward of the mux port to neko.
 //   4. Takeover state for the run's agent: it polls neko's control state and answers GET /control
 //      on an unpublished port (8081) on the stack's networks, so the run's MCP filter refuses tool
-//      calls while the owner holds control. With Bitwarden in the browser (lockOnRelease), the run
-//      also stays paused after every takeover until the daemon has locked the vault: from the
-//      relay's start, after control is released or reset, and when the last viewer leaves, until
-//      the daemon confirms the lock for that release (POST /bp/locked with the status token).
+//      calls while the owner holds control.
 // Node's standard library only.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, request as httpRequest } from "node:http";
@@ -238,7 +235,6 @@ export async function startRelay(options) {
     listenHost = "0.0.0.0",
     rtcPort = 0,
     controlPollMs = 500,
-    lockOnRelease = false,
     secret,
     statusToken,
     adminPassword,
@@ -270,17 +266,10 @@ export async function startRelay(options) {
   const sessions = new Map();
   /** ticket nonces used (or being used) -> expiry (s) */
   const usedNonces = new Map();
-  /** Per relay start: tells the daemon that the relay started again (its lock rounds begin anew). */
+  /** Per relay start: tells the run's guard (and the daemon) that the relay started again. */
   const bootId = options.bootId ?? randomBytes(8).toString("hex");
   let ownerControl = false;
   let controlKnown = false;
-  // Bitwarden: whether the vault must be locked before the run may go on, and which release that is
-  // (a confirmation for an earlier release does not clear a later one).
-  let lockPending = lockOnRelease;
-  let lockGeneration = lockOnRelease ? 1 : 0;
-  /** The daemon could not lock the vault for this release: the run is told the owner has to act. */
-  let lockFailed = false;
-  let wasHeld = false;
   let wasOwner = false;
   /**
    * Grows whenever neko reports a host after none, every viewer WebSocket that opens or closes, and
@@ -298,23 +287,12 @@ export async function startRelay(options) {
   let controlRequests = 0;
   let controlRequestEndSeq = -1;
   let sampleSeq = 0;
-  /** After a takeover ends (released, reset, or the viewer gone): the run waits for the lock. */
-  function requireLock(reason) {
-    if (!lockOnRelease) return;
-    lockGeneration++;
-    if (!lockPending) log(`vault lock needed (${reason})`);
-    lockPending = true;
-    lockFailed = false;
-  }
-  /** Notes the end of a held period (held or unsure while a viewer is connected). */
+  /** Notes the start of a hold neko reported (a new control epoch). */
   function noteControl() {
-    const held = controlHeld();
     // Only a hold neko reported is a new epoch; unsure (a failed read with a viewer) is sent as
     // known: false, which the run treats as unconfirmed, not as a takeover.
     if (!wasOwner && ownerControl) controlEpoch++;
     wasOwner = ownerControl;
-    if (wasHeld && !held) requireLock("control released");
-    wasHeld = held;
   }
   let lastPeer = "";
   let viewers = 0;
@@ -546,42 +524,7 @@ export async function startRelay(options) {
         } catch {
           nekoUp = false;
         }
-        return sendJson(res, 200, { viewers, idleMs: Math.max(0, now() - lastActivity), nekoUp, portrait: screenIsPortrait, ownerControl: controlHeld(), lastPeer, lockPending, lockGeneration, lockFailed, bootId });
-      }
-      if (path === "/bp/locked" && req.method === "POST") {
-        // The daemon locked the vault (Bitwarden's own Lock command) for release `generation`.
-        const auth = String(req.headers.authorization ?? "");
-        const expected = `Bearer ${statusToken}`;
-        if (auth.length !== expected.length || !timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) return sendJson(res, 401, { error: "status token" });
-        let generation = -1;
-        try {
-          generation = Number(JSON.parse((await readBody(req, 256)) || "{}").generation);
-        } catch {
-          return sendJson(res, 400, { error: "body" });
-        }
-        // Only while nobody holds control: a lock pressed while the owner works is no lock for later.
-        const cleared = lockPending && generation === lockGeneration && !controlHeld();
-        if (cleared) {
-          lockPending = false;
-          lockFailed = false;
-          log("vault locked; the run may go on");
-        }
-        return sendJson(res, 200, { lockPending, lockGeneration, cleared });
-      }
-      if (path === "/bp/lock-failed" && req.method === "POST") {
-        // The daemon could not lock the vault for release `generation`: the run stays paused and is
-        // told that the owner has to act (Lock now, Restart browser, Bitwarden's settings).
-        const auth = String(req.headers.authorization ?? "");
-        const expected = `Bearer ${statusToken}`;
-        if (auth.length !== expected.length || !timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) return sendJson(res, 401, { error: "status token" });
-        let generation = -1;
-        try {
-          generation = Number(JSON.parse((await readBody(req, 256)) || "{}").generation);
-        } catch {
-          return sendJson(res, 400, { error: "body" });
-        }
-        if (lockPending && generation === lockGeneration) lockFailed = true;
-        return sendJson(res, 200, { lockPending, lockGeneration, lockFailed });
+        return sendJson(res, 200, { viewers, idleMs: Math.max(0, now() - lastActivity), nekoUp, portrait: screenIsPortrait, ownerControl: controlHeld(), lastPeer, bootId });
       }
       if (!hostOk(req)) return send(res, 421, "Unknown host.", { "Content-Type": "text/plain" });
       if (path === "/bp/open" && (req.method === "GET" || req.method === "HEAD")) {
@@ -709,9 +652,6 @@ export async function startRelay(options) {
         controlEpoch++;
         touch();
         if (viewers === 0) {
-          // Whatever the owner did in that viewer, the vault is locked before the run goes on.
-          requireLock("the last viewer left");
-          wasHeld = false;
           scheduleLandscape();
           // A closed viewer must not leave control held (the run would stay paused).
           void resetControl();
@@ -841,19 +781,16 @@ export async function startRelay(options) {
       if (req.method !== "GET" || req.url !== "/control") return res.writeHead(404).end();
       noteControl();
       const age = clock() - lastSampleAt;
-      // While the vault waits to be locked, the run stays paused as if the owner still held control.
       res
         .writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" })
         .end(
           JSON.stringify({
-            ownerControl: controlHeld() || lockPending,
+            ownerControl: controlHeld(),
             known: controlKnown || viewers === 0,
             // Age of neko's last control read (null: none yet), this relay start, and the control epoch.
             sampledAgoMs: Number.isFinite(age) && age >= 0 ? Math.round(age) : null,
             bootId,
             epoch: controlEpoch,
-            // Paused only because the vault is being locked (nobody holds control): the run waits, it does not ask the owner.
-            ...(lockOnRelease ? { lockPending, securing: lockPending && !controlHeld() && !lockFailed, lockFailed: lockPending && lockFailed && !controlHeld() } : {}),
           }),
         );
     });
@@ -872,7 +809,7 @@ export async function startRelay(options) {
     prefix,
     cookieName,
     pollControl,
-    state: () => ({ viewers, sessions: sessions.size, idleMs: now() - lastActivity, portrait: screenIsPortrait, ownerControl: controlHeld(), lockPending, lockGeneration, bootId }),
+    state: () => ({ viewers, sessions: sessions.size, idleMs: now() - lastActivity, portrait: screenIsPortrait, ownerControl: controlHeld(), bootId }),
     close: () =>
       new Promise((resolve) => {
         if (landscapeTimer) clearTimeout(landscapeTimer);

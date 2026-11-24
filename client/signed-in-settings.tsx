@@ -5,8 +5,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Platform, Text } from "react-native";
 import { signedInSettings } from "../shared/settings";
-import { BITWARDEN, DEFAULT_SIGNED_IN_PORT, SIGNED_IN_STATE_MESSAGES, validateHttpsBase, type BitwardenState } from "../shared/signed-in";
-import { signedInBitwarden, signedInControl, signedInStatus, signedInViewerLink } from "../shared/signed-in-rpc";
+import { DEFAULT_SIGNED_IN_PORT, SIGNED_IN_STATE_MESSAGES, validateHttpsBase } from "../shared/signed-in";
+import { signedInControl, signedInStatus, signedInViewerLink } from "../shared/signed-in-rpc";
 
 const STATUS_KEY = ["browser-prompt", "signed-in-status"];
 
@@ -25,40 +25,23 @@ const STATE_LABELS = {
   failed: "Could not start",
 } as const;
 
-type Armed = null | "build" | "logout" | "rotate" | "bitwarden";
-
-const BITWARDEN_LABELS: Record<BitwardenState, string> = {
-  off: "Off",
-  "needs-browser": "On, but the signed-in browser is not set up yet (Download and build above first)",
-  "no-image": `On, but Bitwarden ${BITWARDEN.version} is not downloaded yet: press Download and confirm`,
-  building: `Downloading Bitwarden ${BITWARDEN.version} and building the browser with it…`,
-  "build-failed": "Download or build failed",
-  ready: `Ready (Bitwarden ${BITWARDEN.version})`,
-};
-
-/** Recommended Bitwarden settings: the extension has no managed policy for them, so the owner sets them once. */
-export const BITWARDEN_RECOMMENDED =
-  "First, in Bitwarden in the signed-in browser (Bitwarden has no policy the plugin could force these with): Settings › Account security: Vault timeout 1 minute (or shorter) with action Lock, never “Never” (that stores the key on the server's disk and Bitwarden unlocks itself, so the plugin can never lock it and runs stay paused); Unlock with PIN off; no biometrics. Settings › Autofill: Autofill on page load off (Bitwarden's default), and turn off card and identity suggestions in the inline menu. Log in with your master password plus two-step login.";
-/** A plugin update that changes the browser image, or turning Bitwarden off, can remove what it kept in the browser. */
-export const BITWARDEN_PIN_NOTE =
-  "A plugin update that changes the browser image (a newer Bitwarden pin, or a change to the signed-in browser itself) can require downloading Bitwarden again (a newer pin also asks you to confirm again). Until you do, the browser starts without Bitwarden once it is idle, which removes Bitwarden's local data, so you log in to Bitwarden again afterwards. Its extension id stays the same (this install's signing key). Turning Bitwarden off removes it and its data at the browser's next start (right away when the browser is idle); Log out of everything removes it with the whole profile at once.";
+type Armed = null | "build" | "logout" | "rotate";
 
 /**
  * Signed-in Server browser: status, the explicit two-press image download, Log in to sites (the
- * owner's viewer, portrait on phones), Stop, Log out of everything (wipes the profile), viewer key
- * rotation, and the viewer's port and optional https base.
+ * owner's viewer, portrait on phones), Stop, Restart, Log out of everything (wipes the profile),
+ * viewer key rotation, and the viewer's port and optional https base.
  */
 export function SignedInSettings({ theme }: Pick<PluginSurfaceProps, "theme">) {
   const status = useRpc(signedInStatus);
   const link = useRpc(signedInViewerLink);
   const control = useRpc(signedInControl);
-  const bitwarden = useRpc(signedInBitwarden);
   const config = useSettings(signedInSettings);
   const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: STATUS_KEY,
     queryFn: () => status({}),
-    refetchInterval: (q) => (q.state.data?.state === "building" || q.state.data?.state === "starting" || q.state.data?.bitwarden.state === "building" ? 5000 : 30000),
+    refetchInterval: (q) => (q.state.data?.state === "building" || q.state.data?.state === "starting" ? 5000 : 30000),
   });
   const [armed, setArmed] = useState<Armed>(null);
   const [working, setWorking] = useState(false);
@@ -68,7 +51,7 @@ export function SignedInSettings({ theme }: Pick<PluginSurfaceProps, "theme">) {
   const info = query.data;
   // An armed confirmation is dropped when the state changes and after 10 seconds, so an old first
   // press never turns a later single press into a download or a wipe.
-  useEffect(() => setArmed(null), [info?.state, info?.bitwarden.state]);
+  useEffect(() => setArmed(null), [info?.state]);
   useEffect(() => {
     if (!armed) return;
     const timer = setTimeout(() => setArmed(null), 10_000);
@@ -180,89 +163,13 @@ export function SignedInSettings({ theme }: Pick<PluginSurfaceProps, "theme">) {
             void act(async () => (await control({ action: "rotate-key" })).message);
           }}
         />
-        <SettingsRow
-          label="Bitwarden"
-          hint={
-            info
-              ? [
-                  `${BITWARDEN_LABELS[info.bitwarden.state]}${info.bitwarden.detail ? ` (${info.bitwarden.detail})` : ""}`,
-                  info.running ? (info.bitwarden.active ? "in the running browser" : "not in the running browser") : "",
-                  info.bitwarden.updatePending ? (info.busy ? "Update pending: the browser switches when the run ends" : "Update pending: the browser switches at its next check") : "",
-                  info.bitwarden.lockPending ? "a run waits until Bitwarden is locked" : "",
-                  info.bitwarden.lastLock
-                    ? info.bitwarden.lastLock.ok
-                      ? "last lock verified"
-                      : `last lock failed${info.bitwarden.lastLock.failures > 1 ? ` (${info.bitwarden.lastLock.failures} times in a row; tried again after a growing pause)` : ""}: ${info.bitwarden.lastLock.detail}`
-                    : "",
-                ]
-                  .filter(Boolean)
-                  .join(" · ")
-              : undefined
-          }
-        />
-        {values?.bitwarden ? <Text style={{ ...muted, color: theme.colors.foreground }}>{BITWARDEN_RECOMMENDED}</Text> : null}
-        <Text style={muted}>
-          {`Optional: the Bitwarden Password Manager extension in the signed-in browser, for you while you hold control (Take over or Log in to sites): unlock it there, fill logins from its icon or a field's suggestion, and use it for passkeys. The agent never gets it: its pages and frames are hidden from the run, the run cannot open, click or type into them, and every time you release control the plugin locks the vault (Bitwarden's own lock, checked through the browser) before the run goes on. An unlocked vault does live in that browser on the server while you use it. Download and enable fetches Bitwarden ${BITWARDEN.version} (about 34 MB) from Bitwarden's GitHub releases, checks its SHA-256 and builds it into the browser image, where Chromium installs it by policy; it never updates by itself. Turning it off removes it and its data from the browser at the next start.`}
-        </Text>
-        <SettingsAction
-          label={values?.bitwarden ? "Download Bitwarden again" : "Download and enable Bitwarden"}
-          hint={values?.bitwarden ? "Needed after a plugin update that changes the browser image (for example a newer Bitwarden pin), or when the download failed." : undefined}
-          actionLabel={armed === "bitwarden" ? "Confirm download" : values?.bitwarden ? "Download" : "Download and enable"}
-          disabled={
-            working ||
-            !values ||
-            !info ||
-            info.bitwarden.state === "building" ||
-            info.bitwarden.state === "ready" ||
-            !["ready", "running", "failed"].includes(info.state)
-          }
-          onPress={() => {
-            // Two presses: the download happens only on the owner's explicit confirmation.
-            if (armed !== "bitwarden") return setArmed("bitwarden");
-            setArmed(null);
-            void act(async () => {
-              if (config.status !== "ready") return "Settings are not loaded yet.";
-              // The consent names the pinned release (its SHA-256); a new pin asks again.
-              if (!(config.values.bitwarden && config.values.bitwardenConsent === BITWARDEN.sha256) && !(await config.save({ ...config.values, bitwarden: true, bitwardenConsent: BITWARDEN.sha256 }, config.revision))) return "Could not save the setting.";
-              return (await bitwarden({ action: "download" })).message;
-            });
-          }}
-        />
-        <SettingsAction
-          label="Turn Bitwarden off"
-          hint="Removes Bitwarden and its data (vault cache, settings) from the signed-in browser at its next start; an idle browser restarts now."
-          actionLabel="Turn off"
-          disabled={working || !values?.bitwarden}
-          onPress={() =>
-            void act(async () => {
-              if (config.status !== "ready") return "Settings are not loaded yet.";
-              if (!(await config.save({ ...config.values, bitwarden: false }, config.revision))) return "Could not save the setting.";
-              return (await bitwarden({ action: "apply" })).message;
-            })
-          }
-        />
-        <SettingsAction
-          label="Apply the Bitwarden choice now"
-          hint="Restarts the signed-in browser (logins kept) so it starts with or without Bitwarden as chosen. Never while a run uses it."
-          actionLabel="Restart"
-          disabled={working || !info?.running || info.bitwarden.active === (values?.bitwarden === true && info.bitwarden.state === "ready")}
-          onPress={() => void act(async () => (await bitwarden({ action: "apply" })).message)}
-        />
-        <SettingsAction
-          label="Lock Bitwarden now"
-          hint="Locks every Bitwarden account in the signed-in browser and checks that it is locked; a run that waits for the lock goes on."
-          actionLabel="Lock now"
-          disabled={working || !info?.running || !info.bitwarden.active}
-          onPress={() => void act(async () => (await bitwarden({ action: "lock" })).message)}
-        />
         <SettingsAction
           label="Restart the signed-in browser"
-          hint="Restarts Chromium there (your logins are kept; every unlocked key in memory is gone), then locks Bitwarden. Use it when Lock now fails."
+          hint="Stops the browser gracefully and starts it again (your logins are kept). A run using it loses the browser: start it again afterwards."
           actionLabel="Restart browser"
           disabled={working || !info?.running}
-          onPress={() => void act(async () => (await bitwarden({ action: "restart-browser" })).message)}
+          onPress={() => void act(async () => (await control({ action: "restart" })).message)}
         />
-        {values?.bitwarden ? <Text style={muted}>{BITWARDEN_PIN_NOTE}</Text> : null}
         {message ? <Text style={muted}>{message}</Text> : null}
         <SettingsInput
           label="Viewer port"
