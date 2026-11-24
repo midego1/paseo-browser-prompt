@@ -11,15 +11,16 @@
 // of the signed-in browser's neko container and attaches Playwright MCP over the DevTools protocol to
 // the owner's persistent, signed-in Chromium there (its default context) instead of launching one.
 // That Chromium already sends everything through the stack's filtering proxy; the same origin rules
-// apply on top. The same stdio filter, timeouts and denied tools apply. With BP_CONTROL_URL (the
-// relay's unpublished takeover state) it also refuses every tool call while the owner holds control
-// of the browser in the viewer.
+// apply on top. The same stdio filter, timeouts and denied tools apply. BP_CONTROL_URL (the relay's
+// unpublished takeover state) is required: every tool call is refused until the relay confirms that
+// the owner does not hold control, and again whenever that confirmation is missing (fail closed, see
+// createControlGuard). The clean Server browser (no BP_CDP_ENDPOINT) has no owner and no guard.
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { startCdpFilter } from "./cdp-filter.mjs";
-import { createCallTracker, createControlGuard, filterClientLine, filterServerLine, lineSplitter } from "./mcp-filter.mjs";
+import { CONTROL_POLL, createControlGuard, createControlPoller, createRunFilter, lineSplitter, MAX_CLIENT_LINE, MAX_SERVER_LINE } from "./mcp-filter.mjs";
 import { BLOCKED_HOST_SUFFIXES, normalizeAddress } from "./proxy.mjs";
 
 const require = createRequire(import.meta.url);
@@ -37,11 +38,12 @@ if (controlUrl && !/^http:\/\/bp-si-[0-9a-f]{8}-relay:8081\/control$/.test(contr
   log("BP_CONTROL_URL is not the signed-in relay's control address; refusing to start");
   process.exit(1);
 }
-// Bitwarden in the signed-in browser: the takeover guard never opens on failed polls (the relay is
-// what tells the run the vault was locked after a takeover).
-const failClosed = (process.env.BP_CONTROL_FAIL_CLOSED ?? "") === "1";
-if (!["", "1"].includes(process.env.BP_CONTROL_FAIL_CLOSED ?? "")) {
-  log("BP_CONTROL_FAIL_CLOSED may only be 1 or empty; refusing to start");
+if (signedIn && !controlUrl) {
+  log("BP_CONTROL_URL is missing: the signed-in browser needs the relay's takeover state; refusing to start");
+  process.exit(1);
+}
+if (!signedIn && controlUrl) {
+  log("BP_CONTROL_URL is only for the signed-in browser; refusing to start");
   process.exit(1);
 }
 const proxyServer = (process.env.BP_PROXY ?? "").trim();
@@ -135,38 +137,26 @@ if (signedIn && !(await waitForCdp())) {
   process.exit(1);
 }
 
-// The owner's takeover state, polled every second (never two polls at once). See createControlGuard:
-// unsure counts as held, and the state opens only after sustained failure.
-const guard = createControlGuard(failClosed ? { failuresToOpen: Number.POSITIVE_INFINITY } : {});
-const calls = createCallTracker();
-if (signedIn && controlUrl) {
-  let polling = false;
-  let warned = false;
-  const poll = async () => {
-    if (polling) return;
-    polling = true;
-    const seq = guard.next();
-    try {
-      const response = await fetch(controlUrl, { signal: AbortSignal.timeout(1500) });
-      guard.result(seq, await response.json());
-      warned = false;
-    } catch {
-      guard.failure(seq);
-      if (!warned) log("could not read the takeover state from the relay");
-      warned = true;
-    } finally {
-      polling = false;
-      if (guard.held()) calls.markHeld();
-    }
-  };
+// Signed-in: the owner's takeover state, polled every 500 ms (never two polls at once). See
+// createControlGuard: it starts held, opens only on a valid `ownerControl: false` from the relay, and
+// holds again on a failed poll, an invalid status, or a release older than CONTROL_MAX_AGE_MS (from
+// the relay's read of neko). The first poll ends before Playwright MCP starts and before any message
+// from the agent is read. The result of a call that was in flight while the state was not confirmed
+// is withheld (createCallTracker). The clean Server browser has no guard (no owner can take it over).
+const guard = signedIn ? createControlGuard() : null;
+const filter = createRunFilter({ signedIn, guard, log, emit: (line) => process.stdout.write(`${line}\n`) });
+if (guard) {
+  const poll = createControlPoller({ guard, url: controlUrl, timeoutMs: CONTROL_POLL.timeoutMs, log, onPoll: () => filter.sync() });
   await poll();
-  setInterval(() => void poll(), 1000).unref();
+  setInterval(() => void poll(), CONTROL_POLL.intervalMs).unref();
+  // A release that went stale between polls, and requests that never got an answer.
+  setInterval(() => filter.sync(), 250).unref();
 }
 
 // Signed-in: Playwright MCP talks to the owner's Chromium only through the DevTools filter, which
 // hides the owner's tabs (those open now, and those the owner opens while holding control).
 if (signedIn) {
-  const cdp = await startCdpFilter({ upstream: cdpEndpoint, held: () => guard.held(), log });
+  const cdp = await startCdpFilter({ upstream: cdpEndpoint, held: () => guard?.held() ?? true, log });
   config.browser.cdpEndpoint = cdp.endpoint;
 }
 writeFileSync(configPath, JSON.stringify(config));
@@ -184,18 +174,26 @@ const child = spawn(process.execPath, cliArgs, {
 let lastMessage = Date.now();
 const fromAgent = lineSplitter((line) => {
   lastMessage = Date.now();
-  const verdict = filterClientLine(line, { ownerControl: guard.held(), securing: guard.securing(), lockFailed: guard.lockFailed(), signedIn });
+  const verdict = filter.client(line);
   if ("reply" in verdict) process.stdout.write(`${verdict.reply}\n`);
-  else if ("forward" in verdict) {
-    if (signedIn) calls.started(verdict.forward);
-    child.stdin.write(`${verdict.forward}\n`);
-  }
+  else if ("forward" in verdict) child.stdin.write(`${verdict.forward}\n`);
+}, {
+  maxLength: MAX_CLIENT_LINE,
+  onOverflow: (info) => {
+    const reply = filter.overflowFromClient(info);
+    if (reply) process.stdout.write(`${reply}\n`);
+  },
 });
 const fromServer = lineSplitter((line) => {
-  let kept = filterServerLine(line, { signedIn });
-  // A result that comes back while the owner holds control, or whose call overlapped a takeover, is withheld.
-  if (kept !== null && signedIn) kept = calls.finish(kept, guard.held());
+  // Signed-in: a result that comes back while held, or whose call overlapped a held period, is withheld.
+  const kept = filter.server(line);
   if (kept !== null) process.stdout.write(`${kept}\n`);
+}, {
+  maxLength: MAX_SERVER_LINE,
+  onOverflow: (info) => {
+    const reply = filter.overflowFromServer(info);
+    if (reply) process.stdout.write(`${reply}\n`);
+  },
 });
 process.stdin.setEncoding("utf8");
 child.stdout.setEncoding("utf8");

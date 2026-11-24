@@ -1279,7 +1279,8 @@ export function createSignedIn(options: SignedInOptions) {
       const { path, host } = await sb.docker();
       const node = await sb.node();
       if (!path || !node) return null;
-      // This call's own admission: noted at the claim, with its session name once known (below).
+      // This call's own admission: noted at the claim, with its session name once known (below), and
+      // the admission it replaced (put back when this setup fails).
       const admission: Admission = { seq: 0, session: "" };
       const claimed = await admit(async () => {
         let others: number;
@@ -1289,7 +1290,9 @@ export function createSignedIn(options: SignedInOptions) {
           return "unavailable" as const;
         }
         if (others > 0) return "busy" as const;
-        starting.set(agentId, now() + STARTING_WINDOW_MS);
+        admission.previous = admissions.get(agentId);
+        admission.until = now() + STARTING_WINDOW_MS;
+        starting.set(agentId, admission.until);
         admission.seq = nextAdmissionSeq();
         rememberAdmission(admissions, agentId, admission);
         return null;
@@ -1298,20 +1301,33 @@ export function createSignedIn(options: SignedInOptions) {
       try {
         const runtime = await sb.runtime();
         const nonce = random().slice(0, 12);
-        // With Bitwarden (running, or chosen: the owner's consent alone is enough) the run's takeover
-        // guard fails closed.
-        const config = await options.config();
-        const failClosed = isBitwardenImage(await runningNekoImage()) || consented(config);
-        const plan = signedInPlan(path, { stackId: await stackId(), instance: await sb.instance(), serverImage: sb.image, agentId, nonce, blockedIps: sb.blockedIps(), failClosed });
+        // The run's takeover guard always fails closed (with or without Bitwarden): see createControlGuard.
+        const plan = signedInPlan(path, { stackId: await stackId(), instance: await sb.instance(), serverImage: sb.image, agentId, nonce, blockedIps: sb.blockedIps() });
         lastActive = now();
         // A resumed run may find the browser stopped (idle): start it; the launcher waits for it.
         if (!(await isRunning())) void ensureStarted().catch(() => undefined);
         const session = signedInAgentName(agentId, nonce);
         admission.session = session;
-        return { server: signedInMcpServer(node, runtime.launcher, plan, host), session };
+        const server = signedInMcpServer(node, runtime.launcher, plan, host);
+        admission.previous = undefined;
+        return { server, session };
       } catch (error) {
-        // Admitted but not set up: its admission goes (unless a newer one replaced it).
-        if (admissions.get(agentId) === admission) admissions.delete(agentId);
+        // Admitted but not set up: never restored itself. Unless a newer call replaced it, the nearest
+        // earlier admission whose setup did not fail comes back (an earlier session of the same run
+        // keeps its own), or none; the starting window goes back to that one's, or goes, so the browser
+        // is not reported busy for the rest of the window. A release meanwhile (the window is no
+        // longer this claim's) is left as it is.
+        admission.failed = true;
+        if (admissions.get(agentId) === admission) {
+          let back = admission.previous;
+          while (back?.failed) back = back.previous;
+          if (back) rememberAdmission(admissions, agentId, back);
+          else admissions.delete(agentId);
+          if (starting.get(agentId) === admission.until) {
+            if (back?.until !== undefined && back.until > now()) starting.set(agentId, back.until);
+            else starting.delete(agentId);
+          }
+        }
         throw error;
       }
     },

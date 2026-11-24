@@ -66,7 +66,7 @@ export const FOCUS_WORLD = "bp-focus-guard";
  */
 export const HELD_REFUSED =
   /^(Input\.|DOM\.(?!enable$|disable$)|DOMSnapshot\.|DOMStorage\.|IndexedDB\.|CacheStorage\.|Storage\.|Accessibility\.|Fetch\.|Page\.(navigate|reload|navigateToHistoryEntry|captureScreenshot|captureSnapshot|printToPDF|setDocumentContent|close|bringToFront|handleJavaScriptDialog|startScreencast|getResourceContent|searchInResource)$|Target\.(createTarget|closeTarget|activateTarget)$|Runtime\.(evaluate|callFunctionOn|compileScript|runScript|queryObjects|globalLexicalScopeNames|getProperties)$|Network\.(getCookies|getAllCookies|setCookie|setCookies|deleteCookies|clearBrowserCookies|getResponseBody|getRequestPostData|replayXHR|loadNetworkResource)$|Emulation\.setTouchEmulationEnabled$)/;
-export const HELD_TEXT = "The owner holds control of the signed-in browser (or it is being secured after a takeover): not allowed now.";
+export const HELD_TEXT = "The owner holds control of the signed-in browser (or it is being secured after a takeover, or its takeover state cannot be confirmed right now): not allowed now.";
 /** Input that clicks or taps at a point: refused where the point is an extension frame. */
 const POINTER_METHODS = new Set(["Input.dispatchMouseEvent", "Input.dispatchTouchEvent", "Input.synthesizeTapGesture", "Input.dispatchDragEvent", "Input.emulateTouchFromMouseEvent"]);
 export const EXTENSION_TEXT = "Not allowed in the signed-in browser: that is the password manager's (a browser extension's) page or frame.";

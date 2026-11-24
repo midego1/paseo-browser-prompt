@@ -506,6 +506,12 @@ export type ServerBrowser = ReturnType<typeof createServerBrowser>;
 export interface Admission {
   seq: number;
   session: string;
+  /** Signed-in: the admission this one replaced while its setup runs (dropped once it is set up). */
+  previous?: Admission;
+  /** Signed-in: its setup failed (never restored). */
+  failed?: boolean;
+  /** Signed-in: the starting window this admission set. */
+  until?: number;
 }
 
 let admissionSeq = 0;

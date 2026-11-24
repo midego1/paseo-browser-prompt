@@ -287,25 +287,120 @@ its MCP container); the check and the claim happen together, one press or sessio
 so two presses at once cannot both get it. Others are told it is in use. The owner's viewer works
 alongside a run.
 
-**Takeover pauses the agent (enforced).** The relay polls neko's control state every second (one
-poll at a time, older results ignored) with its own admin session and answers `GET /control` with
-`{ ownerControl, known }` on port 8081, bound only to its address on the stack's internal network
-(not published, not on the outward network). `ownerControl` is true only while a viewer is
-connected and holds control, or while a viewer is connected and the relay cannot read neko's state
-(fail closed); without a viewer nobody can hold control, so the run never waits on a stale or
-unknown state, and a control left held without a viewer is reset (retried every second). `known`
-is informational. The run's MCP container reads it every second (one request at a time); after a
-failed read the state stays held while the last held state is younger than 10 seconds, and opens
-only after 3 failed reads in a row (when the relay cannot be asked at all, no viewer can hold control
-either: the relay is its only way in). While control is held, the MCP filter answers **every** tool call (snapshot, screenshot,
-typing, navigation) with "the owner has taken over…", and a result that arrives while control is
-held, or whose call overlapped a held period, is withheld and replaced by that message, so a call
-that started before a takeover cannot hand back what the owner typed. When the last viewer
-disconnects, the relay resets control, so a closed viewer cannot leave the run paused. Limits: the
-state the run sees can be up to about 2 seconds old (two 1-second polls), so the first moments of a
-takeover can overlap a running action (its result is still withheld); the agent is also told never
-to type credentials and to wait for your answer. Release control (the mouse icon again, or close
-the viewer) before you answer "done".
+**Takeover pauses the agent (enforced).** The relay reads neko's control state every 500 ms (one
+read at a time, older results ignored, 1.5 s limit for the read and the login before it) with its
+own admin session, and right after a control request it forwards. neko's own viewer takes control
+over its WebSocket, which the relay passes on without reading, so the relay learns of a takeover
+from these reads, not at the moment it happens. It answers `GET /control` with `{ ownerControl, known, sampledAgoMs, bootId,
+epoch }` (plus the Bitwarden lock fields) on port 8081, bound only to its address on the stack's
+internal network (not published, not on the outward network).
+
+- `ownerControl` is always a boolean. It is true whenever neko last reported a host, with or
+  without a viewer, until a reset or a new read clears it. It is also true while a viewer is
+  connected and the relay cannot read neko's state (then with `known: false`: unsure, which the run
+  treats as unavailable, not as a takeover), and while the vault waits to be locked (Bitwarden,
+  below). A control left held without a viewer is reset (retried at every read). A control request
+  over neko's REST API is forwarded only for a session whose own viewer WebSocket is open; without
+  one it is refused. While such a request is being forwarded, and until a read of neko that began
+  after it ended, `ownerControl` is true. (This does not make the relay see every takeover: the viewer takes control
+  over its WebSocket.)
+- `sampledAgoMs` is the age of the relay's last successful read of neko, on its monotonic clock
+  (`null` before the first read).
+- `bootId` names this relay start.
+- `epoch` grows when neko reports a host after none, when a viewer WebSocket opens or closes, and
+  before and after every control request the relay forwards. A failed read of neko does not move
+  it.
+- `known` is informational.
+
+The run's MCP container reads it every 500 ms (one request at a time, 1.5 s timeout, older results
+ignored by sequence number), and its takeover guard **fails closed**, with or without Bitwarden:
+
+- It **starts paused**. The first read finishes before Playwright MCP starts and before any message
+  from the agent is read; until a valid read confirms release, every tool call is refused.
+- Only a valid status **releases**: a 2xx response whose JSON body is an object with
+  `ownerControl` strictly `false` and with `sampledAgoMs`, `bootId` and `epoch` present and
+  well-formed. `ownerControl: true` pauses. Anything else counts as **unavailable** and pauses;
+  unknown is never release. That includes a missing or non-boolean `ownerControl`, a release
+  without those fields, a body that is not a JSON object, a non-2xx status (its body is discarded),
+  a timeout and an unreachable relay.
+- It **pauses again** as soon as the status becomes unavailable: one failed or invalid read after a
+  release is enough, and no number of failures ever opens it.
+- A release is good for **3 seconds**, counted from the relay's own read of neko (the poll's start
+  minus `sampledAgoMs`), on a monotonic clock. 3 seconds is the poll timeout (1.5 s) plus two poll
+  intervals plus one relay read interval, defined in one place. When the release is older, for
+  example because polls stopped or the relay's reads of neko stalled, it counts as unavailable and
+  pauses. A clock that goes backwards does the same. This is checked at every tool call and every
+  result, also between polls.
+- The signed-in MCP container does not start without the relay's address (`BP_CONTROL_URL`); the
+  launcher refuses a signed-in plan without exactly that address. Each start of the container (a
+  resume, a new session, a restart) begins paused again.
+
+While paused, the MCP filter answers **every** tool call (snapshot, screenshot, typing, navigation)
+with a refusal instead of passing it to the browser:
+
+- "the owner has taken over…" while you hold control;
+- "being secured, wait" or "the owner has to act" for the Bitwarden lock (below);
+- "the takeover state cannot be confirmed right now; wait about 5 seconds and try again" while the
+  status is unavailable.
+
+`initialize`, `ping` and `tools/list` still pass (they do not touch the browser);
+`logging/setLevel` is answered by the filter itself, and other request methods are refused. Of the
+agent's notifications only `notifications/initialized`, `notifications/cancelled` and
+`notifications/roots/list_changed` pass (a `tools/call` without an id is dropped, also while
+released). Of what Playwright MCP sends on its own only `notifications/tools/list_changed`,
+`notifications/cancelled` and the requests `roots/list` and `ping` pass; progress and log messages
+are dropped.
+
+Request ids must be strings or numbers, and an id may be in flight only once: a second request with
+an id still in flight, or one that was given up on, is refused before it reaches Playwright MCP. A
+request is given up on when the agent cancels it or when Playwright MCP has not answered within 10
+minutes (the agent then gets an error saying the call may have been carried out). A cancelled id
+stays retired for 10 minutes; the id of a call given up on stays retired until Playwright MCP answers
+it (that late answer is dropped), never by age. With 1000 retired ids, new requests are refused
+instead of forgetting old ones. The run checks its in-flight calls against the state it had right
+before it applies each new read of the relay, so a release that went stale in between is never
+skipped. An answer from Playwright MCP passes only when it answers a tracked
+request; a second answer to the same id, an answer to an id never asked for or given up on, and an
+answer without an id are dropped. A line longer than 8 MB from the agent (32 MB from Playwright MCP)
+is dropped whole, never passed on in part; it is answered with an error when its id can be read
+(from the start of the agent's message, from the end of Playwright MCP's answer, where the MCP SDK
+writes the id; the clean Server browser does the same), otherwise the call gets the no-answer error
+after 10 minutes.
+
+For each tool call in flight the filter records the relay start and epoch it began under and the
+worst thing seen while it ran. Its result passes only when nothing was seen; otherwise it is
+withheld and never released later:
+
+- **Withheld with "the owner has taken over…"**: you held control, or the vault was being locked,
+  while it ran (a real `ownerControl: true`). The same happens when the epoch moved between two
+  good reads: a takeover the relay saw, a viewer that connected or left, or a control request it
+  forwarded. So a call that started before a takeover cannot hand back what you typed.
+- **Withheld with "the owner has to act"**: the Bitwarden lock failed while it ran.
+- **Withheld with "the browser status could not be confirmed while this call ran… the call may
+  have been carried out: take a snapshot before you repeat it"**: the status was unavailable at any
+  moment while it ran (a failed, invalid or stale read, also a short relay blip, or the relay unsure
+  because it could not read neko while a viewer was connected), or the relay started again. A later release does not prove that nobody took over in between (the epoch moves
+  only for what the relay saw), so this result is never released later; the agent takes a new
+  snapshot.
+
+The DevTools filter between Playwright MCP and Chromium uses the same guard. The clean Server
+browser has no owner and no takeover guard. When the last viewer disconnects, the relay resets
+control, so a closed viewer cannot leave the run paused.
+
+**Remaining window (not instant, and inherent to this design).** With a healthy relay, the run's
+tools pause about 1 second after you take control, not at once: the relay sees the takeover at its next read of neko (at most
+500 ms, plus neko's answer time), and the run sees it at its next read of the relay (at most 500 ms
+more, plus the answer time). A call that starts and finishes within that second, right at the start
+of a takeover, can return what the page showed in that moment, including what you began to type.
+If the relay's reads of neko stall, that window is up to 3 seconds (a release stays good for 3
+seconds after the relay's last read). Actions the agent starts in the window can still reach the
+browser. A control request over neko's REST API pauses the run from the moment the relay forwards
+it, so only takeovers over the viewer's WebSocket have this window. A takeover that begins and ends
+between two of the relay's 500 ms reads over a viewer WebSocket that was already open is not seen at
+all (the viewer takes control over that WebSocket,
+which the relay passes on without reading). The agent is also told
+never to type credentials and to wait for your answer. Release control (the mouse icon again, or
+close the viewer) before you answer "done".
 
 **Lifetime.** The plugin stops the stack after 30 minutes without a run or viewer, always gracefully
 (neko gets up to 45 seconds so Chromium writes its cookies), also when a start fails or a stack that
@@ -446,15 +541,15 @@ and the whole `Extensions` domain).
   (for example a vault timeout set to Never) and offer **Lock Bitwarden now** and **Restart browser**.
   After a start, the daemon waits up to 90 seconds for this first lock before it hands out the
   browser, outside the stack's start lock.
-- **Relay unreachable:** with Bitwarden, the run's MCP container is started fail-closed: its
-  takeover guard never opens because the relay cannot be asked. While the relay is down and a run
+- **Relay unreachable:** the run's takeover guard never opens while the relay cannot be asked (as
+  for every signed-in run since 0.24.2, see Takeover above). While the relay is down and a run
   uses a Bitwarden browser, the daemon locks the vault anyway (every 15 seconds at most); the restarted
   relay starts with the vault marked "to be locked".
 - **Which build is installed** is read from neko's pin file by a probe that reports "no pin file"
   itself; a failed or unparseable probe is never "no Bitwarden": the lock fails (the run stays
   paused) unless the running image is certainly a plain one, and nothing is cleared from the profile. Any Bitwarden variant of the image counts (also
   one this daemon would not build now, such as an older one still running after a plugin update): its
-  relay locks on release and the run's guard fails closed.
+  relay locks on release (the run's guard fails closed for every image).
 
 **Limits (what remains).**
 

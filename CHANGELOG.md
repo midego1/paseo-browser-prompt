@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.24.2 (unreleased)
+
+Plugin registry review of 0.24.1: the signed-in browser's takeover guard now fails closed.
+
+- **Tools start paused and open only on a confirmed release.** The run's takeover guard
+  (`createControlGuard`) used to start open and treat a missing `ownerControl` as release; without
+  Bitwarden it also opened after 3 failed reads. Now, for every signed-in run (with or without
+  Bitwarden): the guard starts held; only a 2xx relay status whose JSON body is an object with
+  `ownerControl` strictly `false` releases; a missing or non-boolean `ownerControl`, a non-object
+  body, a non-2xx status, a timeout or an unreachable relay holds (unknown = paused); one failed or
+  invalid read after a release holds again, and no number of failures opens it; a release older than
+  3 seconds without a newer one holds (checked at every call and result, also between polls); older
+  results are still ignored by sequence number. The first read finishes before Playwright MCP starts
+  and before any agent message is read. A call while held is refused; while the state is unavailable
+  the agent is told to wait about 5 seconds and try again. `BP_CONTROL_FAIL_CLOSED` is gone (it is
+  always fail closed), and the signed-in MCP container and its launcher refuse to start without the
+  relay's takeover address. The relay's `GET /control` already returns an explicit boolean
+  `ownerControl`. The clean Server browser has no takeover guard and is unchanged.
+- **Release counted from the relay's read, on a monotonic clock.** The relay's `GET /control` now
+  also returns `sampledAgoMs` (age of its last read of neko), `bootId` and a control `epoch`
+  (grows at every held period and lock request); a release without them is invalid. Its 3 s
+  lifetime (poll timeout + 2 poll intervals + 1 relay read interval) counts from the relay's read,
+  with `performance.now()`; a clock that goes backwards holds. The relay reads neko and the run reads
+  the relay every 500 ms (was 1 s), and the relay reads again right after a control request it
+  forwards.
+- **neko's host counts without a viewer, and control is not taken over REST without one.** The relay
+  holds whenever neko last reported a host (until a reset or a new read clears it), and refuses a
+  REST control take, request or hand-over from a session without its own viewer WebSocket.
+- **Request ids are tracked strictly.** Ids must be strings or numbers; a request whose id is in flight
+  (or was given up on) is refused before Playwright MCP sees it, so a reused id can no longer clear
+  the mark of a call that overlapped a takeover; answers to untracked ids, second answers and answers
+  without an id are dropped. Requests other than initialize, ping, tools/list and tools/call are
+  refused. Lines over 8 MB (32 MB from Playwright MCP) are dropped whole.
+- **A relay blip no longer looks like a takeover, and its results are never released.** The result
+  of a call that was in flight while the status was unavailable or stale (or while the relay
+  restarted) is always withheld with "the browser status could not be confirmed while this call
+  ran… take a snapshot before you repeat it", never released later. Only a real `ownerControl:
+  true`, or an epoch that moved between two good polls, withholds with the owner-control text; the
+  relay's epoch also moves for every viewer WebSocket that opens or closes and before and after
+  every control request it forwards.
+- **Unsure is not a takeover; neko reads are short.** When the relay cannot read neko while a viewer
+  is connected it still pauses the run, but reports `known: false`: the run treats that as
+  unavailable (results of calls in flight are withheld with the unconfirmed text, not "the owner
+  has taken over"), and it does not move the epoch. The relay's reads of neko's control state and
+  the login before them give up after 1.5 s (were 10 s). Over-long lines are answered with an error
+  when their id can be read (start of the agent's message, end of Playwright MCP's answer), in the
+  clean Server browser too.
+- **Last review round.** The run compares its in-flight calls with the state right before it applies
+  each new relay read (a release that went stale in between is no longer skipped). The id of a call
+  given up on stays retired until Playwright MCP answers it, never by age. A duplicate id is refused
+  before `logging/setLevel` is answered. The relay reports `ownerControl: true` while it forwards a
+  control request and until a read of neko that began after it.
+- **Notifications and methods.** A `tools/call` without an id is dropped; of the agent's
+  notifications only initialized, cancelled and roots/list_changed pass; from Playwright MCP only
+  tools/list_changed, cancelled, roots/list and ping (progress and log messages are dropped).
+  `logging/setLevel` is answered by the filter. A request without an answer in 10 minutes gets an
+  error; its id, like a cancelled one, stays retired for 10 minutes (never evicted early; at 1000
+  retired ids new requests are refused).
+- The poll and both directions of the stdio filter moved into `mcp-filter.mjs`
+  (`createControlPoller`, `createRunFilter`) and have behavioural tests.
+- **A failed signed-in setup gives back what it replaced.** When the MCP server setup of a signed-in
+  run fails after its claim, the admission and starting window the claim replaced (an earlier session
+  of the same run) are restored instead of dropped; with none to restore, its starting entry goes as
+  well, so the browser is no longer reported busy for up to 2 minutes. With two setups of the same
+  run failing at once, the nearest earlier admission whose setup did not fail comes back (never a
+  failed one), and a release that happened during the setup is not undone.
+
 ## 0.24.1 (unreleased)
 
 Follow-ups from the review of the redesigned card (0.24.0).
