@@ -11,8 +11,10 @@
 #     sidecar as its only way out (also for loopback), refusing to start without it.
 #   - policies.json: neko's policy without the forced Google extensions, with DevTools allowed
 #     (needed for the protocol), cookies kept (neko ships session-only cookies), no password
-#     manager, autofill, sync, sign-in, downloads, file pickers, extensions, metrics reporting or
-#     background mode, standard Safe Browsing, and every internal page blocked (chrome://*,
+#     manager, autofill, sync, sign-in, downloads, file pickers, metrics reporting or background
+#     mode, no extensions at all (ExtensionInstallBlocklist "*", an empty force-install list, no
+#     install sources, no external extensions, developer mode off, the Chrome Web Store blocked),
+#     standard Safe Browsing, and every internal page blocked (chrome://*,
 #     chrome-untrusted://*, chrome-search://*, chrome-extension://*, devtools://*, view-source:,
 #     about:*, javascript:, data:, file://) except about:blank and chrome://newtab (which opens about:blank), so neither
 #     the agent nor a page can read history, settings or the list of signed-in sites there.
